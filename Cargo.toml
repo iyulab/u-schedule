@@ -11,6 +11,9 @@ categories = ["algorithms"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+u-metaheur = { path = "../u-metaheur" }
+u-optim = { path = "../u-optim" }
+rand = "0.9"
 
 [dev-dependencies]
 serde_json = "1.0"

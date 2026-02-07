@@ -12,6 +12,8 @@
 //! - **`validation`**: Input integrity checks (duplicate IDs, DAG cycles, resource refs)
 //! - **`dispatching`**: Priority dispatching rules (SPT, EDD, ATC, etc.) and rule engine
 //! - **`scheduler`**: Greedy scheduler and KPI evaluation
+//! - **`ga`**: GA-based scheduling with OSV/MAV encoding
+//! - **`cp`**: CP-based scheduling formulation
 //!
 //! # Architecture
 //!
@@ -26,7 +28,9 @@
 //! - Blazewicz et al. (2019), "Handbook on Scheduling"
 //! - Haupt (1989), "A Survey of Priority Rule-Based Scheduling"
 
+pub mod cp;
 pub mod dispatching;
+pub mod ga;
 pub mod models;
 pub mod scheduler;
 pub mod validation;
