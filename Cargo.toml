@@ -1,0 +1,16 @@
+[package]
+name = "u-schedule"
+version = "0.1.0"
+edition = "2021"
+authors = ["iyulab"]
+license = "MIT"
+repository = "https://github.com/iyulab/u-schedule"
+description = "Scheduling framework for the U-Engine ecosystem"
+keywords = ["scheduling", "job-shop", "optimization", "manufacturing"]
+categories = ["algorithms"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"
