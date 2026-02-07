@@ -185,6 +185,53 @@ impl TransitionMatrix {
     }
 }
 
+/// A collection of transition matrices indexed by resource ID.
+///
+/// Provides unified lookup for sequence-dependent setup times
+/// across multiple resources.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransitionMatrixCollection {
+    matrices: HashMap<String, TransitionMatrix>,
+}
+
+impl TransitionMatrixCollection {
+    /// Creates an empty collection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a transition matrix for a resource.
+    pub fn add(&mut self, matrix: TransitionMatrix) {
+        self.matrices.insert(matrix.resource_id.clone(), matrix);
+    }
+
+    /// Builder: adds a matrix and returns self.
+    pub fn with_matrix(mut self, matrix: TransitionMatrix) -> Self {
+        self.add(matrix);
+        self
+    }
+
+    /// Gets the transition time for a resource between two categories.
+    ///
+    /// Returns 0 if no matrix exists for the resource.
+    pub fn get_transition_time(&self, resource_id: &str, from: &str, to: &str) -> i64 {
+        self.matrices
+            .get(resource_id)
+            .map(|m| m.get_transition(from, to))
+            .unwrap_or(0)
+    }
+
+    /// Number of matrices in the collection.
+    pub fn len(&self) -> usize {
+        self.matrices.len()
+    }
+
+    /// Whether the collection is empty.
+    pub fn is_empty(&self) -> bool {
+        self.matrices.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

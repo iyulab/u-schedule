@@ -22,7 +22,7 @@ mod task;
 
 pub use activity::{Activity, ActivityDuration, ResourceRequirement};
 pub use calendar::{Calendar, TimeWindow};
-pub use constraint::{Constraint, TransitionMatrix};
+pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::{Resource, ResourceType, Skill};
 pub use schedule::{Assignment, Schedule, Violation, ViolationType};
 pub use task::Task;
