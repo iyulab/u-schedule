@@ -11,9 +11,8 @@ use std::collections::HashMap;
 use rand::Rng;
 use u_metaheur::ga::GaProblem;
 
-use super::chromosome::{
-    ScheduleChromosome, insert_mutation, mav_mutation, pox_crossover, swap_mutation,
-};
+use super::chromosome::ScheduleChromosome;
+use super::operators::GeneticOperators;
 use crate::models::{
     Assignment, Resource, Schedule, Task, TransitionMatrixCollection,
 };
@@ -87,6 +86,11 @@ pub struct SchedulingGaProblem {
     /// Used for SPT (Shortest Processing Time) initialization.
     /// If empty, SPT initialization is skipped and replaced with load-balanced.
     pub process_times: HashMap<(String, i32, String), i64>,
+    /// Genetic operators for crossover/mutation strategy selection.
+    ///
+    /// Default: POX crossover + Swap mutation (matching u-ras defaults).
+    /// Override with [`with_operators`](SchedulingGaProblem::with_operators).
+    pub operators: GeneticOperators,
 }
 
 impl SchedulingGaProblem {
@@ -116,6 +120,7 @@ impl SchedulingGaProblem {
             release_times,
             tardiness_weight: 0.5,
             process_times: HashMap::new(),
+            operators: GeneticOperators::default(),
         }
     }
 
@@ -140,6 +145,25 @@ impl SchedulingGaProblem {
         process_times: HashMap<(String, i32, String), i64>,
     ) -> Self {
         self.process_times = process_times;
+        self
+    }
+
+    /// Sets the genetic operators (crossover + mutation strategy).
+    ///
+    /// # Example
+    /// ```no_run
+    /// use u_schedule::ga::SchedulingGaProblem;
+    /// use u_schedule::ga::operators::{GeneticOperators, CrossoverType, MutationType};
+    ///
+    /// # let (tasks, resources) = (vec![], vec![]);
+    /// let problem = SchedulingGaProblem::new(&tasks, &resources)
+    ///     .with_operators(GeneticOperators {
+    ///         crossover_type: CrossoverType::LOX,
+    ///         mutation_type: MutationType::Invert,
+    ///     });
+    /// ```
+    pub fn with_operators(mut self, operators: GeneticOperators) -> Self {
+        self.operators = operators;
         self
     }
 
@@ -264,19 +288,12 @@ impl GaProblem for SchedulingGaProblem {
         parent2: &ScheduleChromosome,
         rng: &mut R,
     ) -> Vec<ScheduleChromosome> {
-        let (c1, c2) = pox_crossover(parent1, parent2, &self.activities, rng);
+        let (c1, c2) = self.operators.crossover(parent1, parent2, &self.activities, rng);
         vec![c1, c2]
     }
 
     fn mutate<R: Rng>(&self, individual: &mut ScheduleChromosome, rng: &mut R) {
-        // OSV mutation: 50% swap, 50% insert
-        if rng.random_bool(0.5) {
-            swap_mutation(individual, rng);
-        } else {
-            insert_mutation(individual, rng);
-        }
-        // Always mutate MAV as well
-        mav_mutation(individual, &self.activities, rng);
+        self.operators.mutate(individual, &self.activities, rng);
     }
 }
 
@@ -287,6 +304,7 @@ unsafe impl Sync for SchedulingGaProblem {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ga::operators::{CrossoverType, MutationType};
     use crate::models::{Activity, ActivityDuration, ResourceRequirement, ResourceType};
     use rand::SeedableRng;
     use rand::rngs::SmallRng;
@@ -445,6 +463,55 @@ mod tests {
             assert_eq!(ch.osv.len(), 3);
             assert_eq!(ch.mav.len(), 3);
         }
+    }
+
+    #[test]
+    fn test_with_operators_lox_invert() {
+        let (tasks, resources) = make_test_problem();
+        let ops = GeneticOperators {
+            crossover_type: CrossoverType::LOX,
+            mutation_type: MutationType::Invert,
+        };
+        let problem = SchedulingGaProblem::new(&tasks, &resources)
+            .with_operators(ops);
+        let config = GaConfig::default()
+            .with_population_size(20)
+            .with_max_generations(10)
+            .with_seed(42)
+            .with_parallel(false);
+
+        let result = GaRunner::run(&problem, &config);
+        assert!(result.best_fitness.is_finite());
+        assert!(result.best_fitness < f64::INFINITY);
+    }
+
+    #[test]
+    fn test_with_operators_jox_insert() {
+        let (tasks, resources) = make_test_problem();
+        let ops = GeneticOperators {
+            crossover_type: CrossoverType::JOX,
+            mutation_type: MutationType::Insert,
+        };
+        let problem = SchedulingGaProblem::new(&tasks, &resources)
+            .with_operators(ops);
+        let config = GaConfig::default()
+            .with_population_size(20)
+            .with_max_generations(10)
+            .with_seed(99)
+            .with_parallel(false);
+
+        let result = GaRunner::run(&problem, &config);
+        assert!(result.best_fitness.is_finite());
+        assert!(result.best_fitness < f64::INFINITY);
+    }
+
+    #[test]
+    fn test_default_operators_backward_compatible() {
+        // Default operators should be POX + Swap (same as original hardcoded behavior)
+        let (tasks, resources) = make_test_problem();
+        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        assert_eq!(problem.operators.crossover_type, CrossoverType::POX);
+        assert_eq!(problem.operators.mutation_type, MutationType::Swap);
     }
 
     #[test]
