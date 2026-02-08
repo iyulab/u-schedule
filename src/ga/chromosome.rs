@@ -93,6 +93,32 @@ impl ScheduleChromosome {
         }
     }
 
+    /// Creates a chromosome with shortest processing time assignment.
+    ///
+    /// For each activity, selects the candidate resource with the lowest
+    /// processing time. The `process_times` map is keyed by
+    /// `(task_id, sequence, resource_id)`.
+    ///
+    /// If a resource is not found in the map, the activity's default
+    /// `process_ms` is used as a fallback.
+    ///
+    /// # Reference
+    /// SPT (Shortest Processing Time) heuristic — Conway et al. (1967)
+    pub fn with_shortest_time<R: Rng>(
+        activities: &[ActivityInfo],
+        process_times: &HashMap<(String, i32, String), i64>,
+        rng: &mut R,
+    ) -> Self {
+        let (osv, activity_index) = Self::create_random_osv(activities, rng);
+        let mav = Self::create_shortest_time_mav(activities, process_times);
+        Self {
+            osv,
+            mav,
+            activity_index,
+            fitness: f64::INFINITY,
+        }
+    }
+
     /// Decodes the OSV into (task_id, sequence) pairs.
     pub fn decode_osv(&self) -> Vec<(String, i32)> {
         let mut task_counters: HashMap<&str, i32> = HashMap::new();
@@ -112,6 +138,17 @@ impl ScheduleChromosome {
             .get(&(task_id.to_string(), sequence))
             .and_then(|&idx| self.mav.get(idx))
             .map(|s| s.as_str())
+    }
+
+    /// Sets the assigned resource for a (task_id, sequence) pair.
+    ///
+    /// Does nothing if the activity is not found or the index is out of bounds.
+    pub fn set_resource(&mut self, task_id: &str, sequence: i32, resource_id: String) {
+        if let Some(&idx) = self.activity_index.get(&(task_id.to_string(), sequence)) {
+            if idx < self.mav.len() {
+                self.mav[idx] = resource_id;
+            }
+        }
     }
 
     /// Validates the chromosome against activity info.
@@ -169,6 +206,30 @@ impl ScheduleChromosome {
                 } else {
                     act.candidates.choose(rng).unwrap().clone()
                 }
+            })
+            .collect()
+    }
+
+    fn create_shortest_time_mav(
+        activities: &[ActivityInfo],
+        process_times: &HashMap<(String, i32, String), i64>,
+    ) -> Vec<String> {
+        activities
+            .iter()
+            .map(|act| {
+                if act.candidates.is_empty() {
+                    return String::new();
+                }
+                act.candidates
+                    .iter()
+                    .min_by_key(|c| {
+                        process_times
+                            .get(&(act.task_id.clone(), act.sequence, (*c).clone()))
+                            .copied()
+                            .unwrap_or(act.process_ms)
+                    })
+                    .unwrap()
+                    .clone()
             })
             .collect()
     }
@@ -452,5 +513,72 @@ mod tests {
             fitness: 0.0,
         };
         assert!(!ch.is_valid(&acts));
+    }
+
+    #[test]
+    fn test_with_shortest_time() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        // M1 is faster for T1/seq1, M3 is faster for T2/seq1
+        let process_times: HashMap<(String, i32, String), i64> = [
+            (("T1".into(), 1, "M1".into()), 500),
+            (("T1".into(), 1, "M2".into()), 900),
+            (("T1".into(), 2, "M2".into()), 2000), // Only candidate
+            (("T2".into(), 1, "M1".into()), 1500),
+            (("T2".into(), 1, "M3".into()), 800),
+        ]
+        .into_iter()
+        .collect();
+
+        let ch = ScheduleChromosome::with_shortest_time(&acts, &process_times, &mut rng);
+
+        assert!(ch.is_valid(&acts));
+        assert_eq!(ch.resource_for("T1", 1), Some("M1")); // M1 is faster (500 < 900)
+        assert_eq!(ch.resource_for("T1", 2), Some("M2")); // Only candidate
+        assert_eq!(ch.resource_for("T2", 1), Some("M3")); // M3 is faster (800 < 1500)
+    }
+
+    #[test]
+    fn test_with_shortest_time_fallback() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        // Partial map — T1/seq1 has no entries → falls back to process_ms
+        let process_times: HashMap<(String, i32, String), i64> = HashMap::new();
+
+        let ch = ScheduleChromosome::with_shortest_time(&acts, &process_times, &mut rng);
+
+        // Should still be valid (falls back to default process_ms for all)
+        assert!(ch.is_valid(&acts));
+        assert_eq!(ch.osv.len(), 3);
+        assert_eq!(ch.mav.len(), 3);
+    }
+
+    #[test]
+    fn test_set_resource() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut ch = ScheduleChromosome::random(&acts, &mut rng);
+
+        // Change T1/seq1 resource to M2
+        ch.set_resource("T1", 1, "M2".into());
+        assert_eq!(ch.resource_for("T1", 1), Some("M2"));
+
+        // Set unknown activity — should do nothing
+        ch.set_resource("T99", 1, "X".into());
+        assert!(ch.resource_for("T99", 1).is_none());
+    }
+
+    #[test]
+    fn test_set_resource_preserves_validity() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut ch = ScheduleChromosome::random(&acts, &mut rng);
+
+        // Set T2/seq1 to M1 (valid candidate)
+        ch.set_resource("T2", 1, "M1".into());
+        assert_eq!(ch.resource_for("T2", 1), Some("M1"));
+        assert!(ch.is_valid(&acts));
     }
 }
