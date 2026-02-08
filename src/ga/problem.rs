@@ -91,6 +91,10 @@ pub struct SchedulingGaProblem {
     /// Default: POX crossover + Swap mutation (matching u-ras defaults).
     /// Override with [`with_operators`](SchedulingGaProblem::with_operators).
     pub operators: GeneticOperators,
+    /// Precomputed index: `(task_id, sequence) → activities index`.
+    ///
+    /// Built once at construction, enables O(1) activity lookup during decode.
+    activity_index: HashMap<(String, i32), usize>,
 }
 
 impl SchedulingGaProblem {
@@ -111,6 +115,13 @@ impl SchedulingGaProblem {
             }
         }
 
+        // Build (task_id, sequence) → index lookup for O(1) decode
+        let activity_index: HashMap<(String, i32), usize> = activities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| ((a.task_id.clone(), a.sequence), i))
+            .collect();
+
         Self {
             activities,
             resources: resources.to_vec(),
@@ -121,6 +132,7 @@ impl SchedulingGaProblem {
             tardiness_weight: 0.5,
             process_times: HashMap::new(),
             operators: GeneticOperators::default(),
+            activity_index,
         }
     }
 
@@ -183,16 +195,11 @@ impl SchedulingGaProblem {
         let operation_order = chromosome.decode_osv();
 
         for (task_id, seq) in &operation_order {
-            // Find activity info
-            let act_idx = match self
-                .activities
-                .iter()
-                .position(|a| a.task_id == *task_id && a.sequence == *seq)
-            {
-                Some(idx) => idx,
+            // O(1) activity lookup via precomputed index
+            let act = match self.activity_index.get(&(task_id.clone(), *seq)) {
+                Some(&idx) => &self.activities[idx],
                 None => continue,
             };
-            let act = &self.activities[act_idx];
 
             // Get assigned resource from MAV
             let resource_id = match chromosome.resource_for(task_id, *seq) {
