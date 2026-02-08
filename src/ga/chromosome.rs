@@ -79,7 +79,7 @@ impl ScheduleChromosome {
                 .candidates
                 .iter()
                 .min_by_key(|c| resource_load.get(*c).copied().unwrap_or(0))
-                .unwrap()
+                .expect("candidates checked non-empty above")
                 .clone();
             *resource_load.entry(best.clone()).or_insert(0) += act.process_ms;
             mav.push(best);
@@ -204,7 +204,7 @@ impl ScheduleChromosome {
                 if act.candidates.is_empty() {
                     String::new()
                 } else {
-                    act.candidates.choose(rng).unwrap().clone()
+                    act.candidates.choose(rng).expect("candidates checked non-empty").clone()
                 }
             })
             .collect()
@@ -228,7 +228,7 @@ impl ScheduleChromosome {
                             .copied()
                             .unwrap_or(act.process_ms)
                     })
-                    .unwrap()
+                    .expect("candidates checked non-empty above")
                     .clone()
             })
             .collect()
@@ -528,7 +528,7 @@ pub fn mav_mutation<R: Rng>(
     }
     let idx = rng.random_range(0..chromosome.mav.len().min(activities.len()));
     if !activities[idx].candidates.is_empty() {
-        chromosome.mav[idx] = activities[idx].candidates.choose(rng).unwrap().clone();
+        chromosome.mav[idx] = activities[idx].candidates.choose(rng).expect("candidates checked non-empty").clone();
     }
 }
 
