@@ -88,7 +88,7 @@ pub struct SchedulingGaProblem {
     pub process_times: HashMap<(String, i32, String), i64>,
     /// Genetic operators for crossover/mutation strategy selection.
     ///
-    /// Default: POX crossover + Swap mutation (matching u-ras defaults).
+    /// Default: POX crossover + Swap mutation.
     /// Override with [`with_operators`](SchedulingGaProblem::with_operators).
     pub operators: GeneticOperators,
     /// Precomputed index: `(task_id, sequence) → activities index`.
