@@ -569,7 +569,7 @@ mod tests {
         many_ops.deadline = Some(5000);
         for i in 0..3 {
             many_ops.activities.push(
-                Activity::new(format!("many_O{i}"), "many", i as i32)
+                Activity::new(format!("many_O{i}"), "many", i)
                     .with_duration(ActivityDuration::fixed(333)),
             );
         }
