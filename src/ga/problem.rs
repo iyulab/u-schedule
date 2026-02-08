@@ -82,6 +82,11 @@ pub struct SchedulingGaProblem {
     pub release_times: HashMap<String, i64>,
     /// Weight for tardiness in fitness (default: 0.5).
     pub tardiness_weight: f64,
+    /// Per-resource processing times: `(task_id, sequence, resource_id) → ms`.
+    ///
+    /// Used for SPT (Shortest Processing Time) initialization.
+    /// If empty, SPT initialization is skipped and replaced with load-balanced.
+    pub process_times: HashMap<(String, i32, String), i64>,
 }
 
 impl SchedulingGaProblem {
@@ -110,6 +115,7 @@ impl SchedulingGaProblem {
             deadlines,
             release_times,
             tardiness_weight: 0.5,
+            process_times: HashMap::new(),
         }
     }
 
@@ -122,6 +128,18 @@ impl SchedulingGaProblem {
     /// Sets tardiness weight (0.0 = pure makespan, 1.0 = pure tardiness).
     pub fn with_tardiness_weight(mut self, weight: f64) -> Self {
         self.tardiness_weight = weight.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Sets per-resource processing times for SPT initialization.
+    ///
+    /// When set, 25% of the initial population uses SPT (Shortest Processing
+    /// Time) initialization. When empty, that 25% falls back to load-balanced.
+    pub fn with_process_times(
+        mut self,
+        process_times: HashMap<(String, i32, String), i64>,
+    ) -> Self {
+        self.process_times = process_times;
         self
     }
 
@@ -219,16 +237,19 @@ impl GaProblem for SchedulingGaProblem {
     type Individual = ScheduleChromosome;
 
     fn create_individual<R: Rng>(&self, rng: &mut R) -> ScheduleChromosome {
-        // 50% random, 50% load-balanced
-        if rng.random_bool(0.5) {
+        // 50% random, 25% load-balanced, 25% SPT (or load-balanced if no process_times)
+        let roll: f64 = rng.random_range(0.0..1.0);
+        if roll < 0.5 {
             ScheduleChromosome::random(&self.activities, rng)
-        } else {
+        } else if roll < 0.75 || self.process_times.is_empty() {
             let cap: HashMap<String, i64> = self
                 .resources
                 .iter()
                 .map(|r| (r.id.clone(), r.capacity as i64))
                 .collect();
             ScheduleChromosome::with_load_balancing(&self.activities, &cap, rng)
+        } else {
+            ScheduleChromosome::with_shortest_time(&self.activities, &self.process_times, rng)
         }
     }
 
@@ -399,5 +420,56 @@ mod tests {
         let f2 = problem_tardy.evaluate(&ch);
         // Different weights should give different fitness
         assert!(f1 != f2 || (f1 == 0.0 && f2 == 0.0));
+    }
+
+    #[test]
+    fn test_spt_initialization() {
+        let (tasks, resources) = make_test_problem();
+        let process_times: HashMap<(String, i32, String), i64> = [
+            (("T1".into(), 1, "M1".into()), 500),
+            (("T1".into(), 1, "M2".into()), 900),
+            (("T1".into(), 2, "M2".into()), 2000),
+            (("T2".into(), 1, "M1".into()), 1500),
+            (("T2".into(), 1, "M3".into()), 800),
+        ]
+        .into_iter()
+        .collect();
+
+        let problem = SchedulingGaProblem::new(&tasks, &resources)
+            .with_process_times(process_times);
+
+        // Generate many individuals to exercise all 3 init strategies
+        let mut rng = SmallRng::seed_from_u64(42);
+        for _ in 0..100 {
+            let ch = problem.create_individual(&mut rng);
+            assert_eq!(ch.osv.len(), 3);
+            assert_eq!(ch.mav.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_ga_runner_with_process_times() {
+        let (tasks, resources) = make_test_problem();
+        let process_times: HashMap<(String, i32, String), i64> = [
+            (("T1".into(), 1, "M1".into()), 500),
+            (("T1".into(), 1, "M2".into()), 900),
+            (("T1".into(), 2, "M2".into()), 2000),
+            (("T2".into(), 1, "M1".into()), 1500),
+            (("T2".into(), 1, "M3".into()), 800),
+        ]
+        .into_iter()
+        .collect();
+
+        let problem = SchedulingGaProblem::new(&tasks, &resources)
+            .with_process_times(process_times);
+        let config = GaConfig::default()
+            .with_population_size(20)
+            .with_max_generations(10)
+            .with_seed(42)
+            .with_parallel(false);
+
+        let result = GaRunner::run(&problem, &config);
+        assert!(result.best_fitness.is_finite());
+        assert!(result.best_fitness < f64::INFINITY);
     }
 }
