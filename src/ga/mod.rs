@@ -17,7 +17,7 @@ mod chromosome;
 mod problem;
 
 pub use chromosome::{
-    ScheduleChromosome, invert_mutation, insert_mutation, mav_mutation, pox_crossover,
-    swap_mutation,
+    ScheduleChromosome, invert_mutation, insert_mutation, jox_crossover, lox_crossover,
+    mav_mutation, pox_crossover, swap_mutation,
 };
 pub use problem::{ActivityInfo, SchedulingGaProblem};

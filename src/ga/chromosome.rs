@@ -304,6 +304,180 @@ fn pox_build_child(
     child
 }
 
+/// Performs LOX (Linear Order Crossover).
+///
+/// 1. Selects a random contiguous segment `[start..=end]` from parent 1.
+/// 2. Copies that segment to the same positions in the child.
+/// 3. Fills remaining positions circularly from parent 2, preserving
+///    parent 2's relative order.
+///
+/// # Reference
+/// Falkenauer & Bouffouix (1991), "A genetic algorithm for job shop"
+pub fn lox_crossover<R: Rng>(
+    p1: &ScheduleChromosome,
+    p2: &ScheduleChromosome,
+    _activities: &[ActivityInfo],
+    rng: &mut R,
+) -> (ScheduleChromosome, ScheduleChromosome) {
+    let len = p1.osv.len();
+    if len < 2 {
+        return (p1.clone(), p2.clone());
+    }
+
+    let start = rng.random_range(0..len);
+    let end = rng.random_range(0..len);
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+
+    let child1_osv = lox_build_child(&p1.osv, &p2.osv, start, end);
+    let child2_osv = lox_build_child(&p2.osv, &p1.osv, start, end);
+
+    let child1 = ScheduleChromosome {
+        osv: child1_osv,
+        mav: p1.mav.clone(),
+        activity_index: p1.activity_index.clone(),
+        fitness: f64::INFINITY,
+    };
+    let child2 = ScheduleChromosome {
+        osv: child2_osv,
+        mav: p2.mav.clone(),
+        activity_index: p2.activity_index.clone(),
+        fitness: f64::INFINITY,
+    };
+    (child1, child2)
+}
+
+fn lox_build_child(p1: &[String], p2: &[String], start: usize, end: usize) -> Vec<String> {
+    let len = p1.len();
+    let mut child = vec![String::new(); len];
+
+    // Copy segment from P1
+    let segment: Vec<String> = p1[start..=end].to_vec();
+    for (i, item) in segment.iter().enumerate() {
+        child[start + i] = item.clone();
+    }
+
+    // Count how many of each task are in the segment
+    let mut seg_counts: HashMap<&str, usize> = HashMap::new();
+    for item in &segment {
+        *seg_counts.entry(item.as_str()).or_insert(0) += 1;
+    }
+
+    // Track how many of each task from P2 we've already skipped
+    let mut p2_counts: HashMap<&str, usize> = HashMap::new();
+    for item in p2 {
+        *p2_counts.entry(item.as_str()).or_insert(0) += 1;
+    }
+
+    // Fill remaining positions circularly from P2
+    let mut child_idx = (end + 1) % len;
+    let mut skip_counts: HashMap<&str, usize> = HashMap::new();
+
+    for i in 0..len {
+        let p2_idx = (end + 1 + i) % len;
+        let item = &p2[p2_idx];
+
+        let seg_count = seg_counts.get(item.as_str()).copied().unwrap_or(0);
+        let skipped = skip_counts.get(item.as_str()).copied().unwrap_or(0);
+
+        if skipped < seg_count {
+            // Skip this occurrence (already in segment)
+            *skip_counts.entry(item.as_str()).or_insert(0) += 1;
+            continue;
+        }
+
+        if child_idx == start {
+            break;
+        }
+
+        child[child_idx] = item.clone();
+        child_idx = (child_idx + 1) % len;
+    }
+
+    child
+}
+
+/// Performs JOX (Job-based Order Crossover).
+///
+/// 1. Randomly selects a subset of jobs (task IDs).
+/// 2. Preserves selected jobs from parent 1 at their exact positions.
+/// 3. Fills remaining positions from parent 2 in relative order.
+///
+/// Differs from POX: JOX preserves exact positions (absolute), while
+/// POX preserves positions relative to the template layout.
+///
+/// # Reference
+/// Yamada & Nakano (1997), "Job shop scheduling"
+pub fn jox_crossover<R: Rng>(
+    p1: &ScheduleChromosome,
+    p2: &ScheduleChromosome,
+    activities: &[ActivityInfo],
+    rng: &mut R,
+) -> (ScheduleChromosome, ScheduleChromosome) {
+    let task_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        for act in activities {
+            seen.insert(act.task_id.clone());
+        }
+        seen.into_iter().collect()
+    };
+
+    if task_ids.is_empty() {
+        return (p1.clone(), p2.clone());
+    }
+
+    let set_size = rng.random_range(1..=task_ids.len().max(1));
+    let selected: std::collections::HashSet<String> =
+        task_ids.choose_multiple(rng, set_size).cloned().collect();
+
+    let child1_osv = jox_build_child(&p1.osv, &p2.osv, &selected);
+    let child2_osv = jox_build_child(&p2.osv, &p1.osv, &selected);
+
+    let child1 = ScheduleChromosome {
+        osv: child1_osv,
+        mav: p1.mav.clone(),
+        activity_index: p1.activity_index.clone(),
+        fitness: f64::INFINITY,
+    };
+    let child2 = ScheduleChromosome {
+        osv: child2_osv,
+        mav: p2.mav.clone(),
+        activity_index: p2.activity_index.clone(),
+        fitness: f64::INFINITY,
+    };
+    (child1, child2)
+}
+
+fn jox_build_child(
+    primary: &[String],
+    donor: &[String],
+    selected: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut child = vec![String::new(); primary.len()];
+
+    // Place selected jobs from primary at their exact positions
+    for (i, task) in primary.iter().enumerate() {
+        if selected.contains(task) {
+            child[i] = task.clone();
+        }
+    }
+
+    // Fill remaining positions from donor in order
+    let mut donor_iter = donor.iter().filter(|t| !selected.contains(t.as_str()));
+    for slot in &mut child {
+        if slot.is_empty() {
+            if let Some(t) = donor_iter.next() {
+                *slot = t.clone();
+            }
+        }
+    }
+
+    child
+}
+
 // ======================== Mutation operators ========================
 
 /// Swap mutation: exchanges two random positions in the OSV.
@@ -440,6 +614,94 @@ mod tests {
         // Children have reset fitness
         assert_eq!(c1.fitness, f64::INFINITY);
         assert_eq!(c2.fitness, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_lox_crossover() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let p1 = ScheduleChromosome::random(&acts, &mut rng);
+        let p2 = ScheduleChromosome::random(&acts, &mut rng);
+
+        let (c1, c2) = lox_crossover(&p1, &p2, &acts, &mut rng);
+        assert_eq!(c1.osv.len(), 3);
+        assert_eq!(c2.osv.len(), 3);
+        assert_eq!(c1.fitness, f64::INFINITY);
+        assert_eq!(c2.fitness, f64::INFINITY);
+
+        // Task counts must be preserved
+        let mut c1_sorted = c1.osv.clone();
+        c1_sorted.sort();
+        let mut p1_sorted = p1.osv.clone();
+        p1_sorted.sort();
+        assert_eq!(c1_sorted, p1_sorted);
+    }
+
+    #[test]
+    fn test_lox_crossover_preserves_segment() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(99);
+
+        // Run multiple times to exercise various segments
+        for seed in 0..20 {
+            let mut rng2 = SmallRng::seed_from_u64(seed);
+            let p1 = ScheduleChromosome::random(&acts, &mut rng2);
+            let p2 = ScheduleChromosome::random(&acts, &mut rng2);
+
+            let (c1, _c2) = lox_crossover(&p1, &p2, &acts, &mut rng);
+
+            // OSV length preserved
+            assert_eq!(c1.osv.len(), p1.osv.len());
+
+            // Task count conservation
+            let mut c1_sorted = c1.osv.clone();
+            c1_sorted.sort();
+            let mut p1_sorted = p1.osv.clone();
+            p1_sorted.sort();
+            assert_eq!(c1_sorted, p1_sorted, "seed={seed}");
+        }
+    }
+
+    #[test]
+    fn test_jox_crossover() {
+        let acts = sample_activities();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let p1 = ScheduleChromosome::random(&acts, &mut rng);
+        let p2 = ScheduleChromosome::random(&acts, &mut rng);
+
+        let (c1, c2) = jox_crossover(&p1, &p2, &acts, &mut rng);
+        assert_eq!(c1.osv.len(), 3);
+        assert_eq!(c2.osv.len(), 3);
+        assert_eq!(c1.fitness, f64::INFINITY);
+        assert_eq!(c2.fitness, f64::INFINITY);
+
+        // Task counts must be preserved
+        let mut c1_sorted = c1.osv.clone();
+        c1_sorted.sort();
+        let mut p1_sorted = p1.osv.clone();
+        p1_sorted.sort();
+        assert_eq!(c1_sorted, p1_sorted);
+    }
+
+    #[test]
+    fn test_jox_preserves_selected_positions() {
+        let acts = sample_activities();
+
+        // Run multiple times
+        for seed in 0..20 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let p1 = ScheduleChromosome::random(&acts, &mut rng);
+            let p2 = ScheduleChromosome::random(&acts, &mut rng);
+
+            let (c1, _c2) = jox_crossover(&p1, &p2, &acts, &mut rng);
+
+            // Task count conservation
+            let mut c1_sorted = c1.osv.clone();
+            c1_sorted.sort();
+            let mut p1_sorted = p1.osv.clone();
+            p1_sorted.sort();
+            assert_eq!(c1_sorted, p1_sorted, "seed={seed}");
+        }
     }
 
     #[test]
