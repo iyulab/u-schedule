@@ -19,6 +19,7 @@ mod constraint;
 mod resource;
 mod schedule;
 mod task;
+pub mod time_constraints;
 
 pub use activity::{Activity, ActivityDuration, ResourceRequirement};
 pub use calendar::{Calendar, TimeWindow};
@@ -26,3 +27,7 @@ pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::{Resource, ResourceType, Skill};
 pub use schedule::{Assignment, Schedule, Violation, ViolationType};
 pub use task::Task;
+pub use time_constraints::{
+    ActivityTimeConstraint, ConstraintType, ConstraintViolation, ConstraintViolationType,
+    DurationDistribution, PertEstimate, TimeWindowViolation, ViolationSeverity,
+};
