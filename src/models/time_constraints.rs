@@ -391,18 +391,18 @@ impl PertEstimate {
 
     /// Duration at specified confidence level.
     ///
-    /// Uses normal approximation via `u_optim::special::inverse_normal_cdf`.
+    /// Uses normal approximation via `u_numerics::special::inverse_normal_cdf`.
     pub fn duration_at_confidence(&self, confidence: f64) -> i64 {
-        let z = u_optim::special::inverse_normal_cdf(confidence);
+        let z = u_numerics::special::inverse_normal_cdf(confidence);
         (self.mean_ms() + z * self.std_dev_ms()) as i64
     }
 
     /// Probability of completing within given duration.
     ///
-    /// Uses `u_optim::special::standard_normal_cdf`.
+    /// Uses `u_numerics::special::standard_normal_cdf`.
     pub fn probability_of_completion(&self, duration_ms: i64) -> f64 {
         let z = (duration_ms as f64 - self.mean_ms()) / self.std_dev_ms();
-        u_optim::special::standard_normal_cdf(z)
+        u_numerics::special::standard_normal_cdf(z)
     }
 
     /// 50th percentile (median) duration.
@@ -488,7 +488,7 @@ impl DurationDistribution {
                 }
             }
             Self::LogNormal { mu, sigma } => {
-                let z = u_optim::special::inverse_normal_cdf(confidence);
+                let z = u_numerics::special::inverse_normal_cdf(confidence);
                 (mu + z * sigma).exp() as i64
             }
         }

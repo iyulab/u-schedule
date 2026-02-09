@@ -186,7 +186,7 @@ impl ScheduleChromosome {
     ) -> (Vec<String>, HashMap<(String, i32), usize>) {
         // Build OSV: list of task IDs (one per activity)
         let mut osv: Vec<String> = activities.iter().map(|a| a.task_id.clone()).collect();
-        u_optim::random::shuffle(&mut osv, rng);
+        u_numerics::random::shuffle(&mut osv, rng);
 
         // Build activity index
         let mut activity_index = HashMap::new();
