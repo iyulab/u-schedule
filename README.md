@@ -1,22 +1,13 @@
 # u-schedule
 
-**Scheduling framework for the U-Engine ecosystem**
+**Scheduling framework in Rust**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
 ## Overview
 
-u-schedule provides domain models, constraints, validation, dispatching rules, and a greedy scheduler for scheduling problems. It sits at **Layer 3 (Frameworks)** in the U-Engine architecture, defining the scheduling domain language on top of the generic algorithms in `u-metaheur`.
-
-```
-Consumer Layer
-  u-aps
-Framework Layer
-  u-schedule  ← you are here
-       ↓
-  u-metaheur  →  u-optim
-```
+u-schedule provides domain models, constraints, validation, dispatching rules, and a greedy scheduler for scheduling problems. It builds on `u-metaheur` for metaheuristic algorithms and `u-optim` for mathematical primitives.
 
 ## Modules
 
@@ -84,7 +75,7 @@ cargo build
 cargo test
 ```
 
-## References
+## Academic References
 
 - Pinedo (2016), *Scheduling: Theory, Algorithms, and Systems*
 - Brucker (2007), *Scheduling Algorithms*
@@ -93,11 +84,18 @@ cargo test
 
 ## Dependencies
 
-- `u-metaheur` — Metaheuristic algorithms (GA, SA, ALNS, CP)
-- `u-optim` — Mathematical foundation (statistics, RNG)
+- [u-metaheur](https://github.com/iyulab/u-metaheur) — Metaheuristic algorithms (GA, SA, ALNS, CP)
+- [u-optim](https://github.com/iyulab/u-optim) — Mathematical primitives (statistics, RNG)
 - `serde` 1.0 — Serialization
 - `rand` 0.9 — Random number generation
 
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+
+## Related
+
+- [u-optim](https://github.com/iyulab/u-optim) — Mathematical primitives
+- [u-metaheur](https://github.com/iyulab/u-metaheur) — Metaheuristic optimization (GA, SA, ALNS, CP)
+- [u-geometry](https://github.com/iyulab/u-geometry) — Computational geometry
+- [u-nesting](https://github.com/iyulab/U-Nesting) — 2D/3D nesting and bin packing
