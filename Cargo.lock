@@ -211,11 +211,11 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "rayon",
- "u-optim",
+ "u-numerics",
 ]
 
 [[package]]
-name = "u-optim"
+name = "u-numerics"
 version = "0.1.0"
 dependencies = [
  "rand",
@@ -229,7 +229,7 @@ dependencies = [
  "serde",
  "serde_json",
  "u-metaheur",
- "u-optim",
+ "u-numerics",
 ]
 
 [[package]]

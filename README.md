@@ -7,7 +7,7 @@
 
 ## Overview
 
-u-schedule provides domain models, constraints, validation, dispatching rules, and a greedy scheduler for scheduling problems. It builds on `u-metaheur` for metaheuristic algorithms and `u-optim` for mathematical primitives.
+u-schedule provides domain models, constraints, validation, dispatching rules, and a greedy scheduler for scheduling problems. It builds on `u-metaheur` for metaheuristic algorithms and `u-numerics` for mathematical primitives.
 
 ## Modules
 
@@ -85,7 +85,7 @@ cargo test
 ## Dependencies
 
 - [u-metaheur](https://github.com/iyulab/u-metaheur) — Metaheuristic algorithms (GA, SA, ALNS, CP)
-- [u-optim](https://github.com/iyulab/u-optim) — Mathematical primitives (statistics, RNG)
+- [u-numerics](https://github.com/iyulab/u-numerics) — Mathematical primitives (statistics, RNG)
 - `serde` 1.0 — Serialization
 - `rand` 0.9 — Random number generation
 
@@ -95,7 +95,7 @@ MIT License — see [LICENSE](LICENSE).
 
 ## Related
 
-- [u-optim](https://github.com/iyulab/u-optim) — Mathematical primitives
+- [u-numerics](https://github.com/iyulab/u-numerics) — Mathematical primitives
 - [u-metaheur](https://github.com/iyulab/u-metaheur) — Metaheuristic optimization (GA, SA, ALNS, CP)
 - [u-geometry](https://github.com/iyulab/u-geometry) — Computational geometry
 - [u-nesting](https://github.com/iyulab/U-Nesting) — 2D/3D nesting and bin packing
