@@ -172,7 +172,9 @@ impl Schedule {
 
     /// Finds the assignment for a given activity.
     pub fn assignment_for_activity(&self, activity_id: &str) -> Option<&Assignment> {
-        self.assignments.iter().find(|a| a.activity_id == activity_id)
+        self.assignments
+            .iter()
+            .find(|a| a.activity_id == activity_id)
     }
 
     /// Returns all assignments for a given task.

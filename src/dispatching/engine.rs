@@ -125,9 +125,7 @@ impl RuleEngine {
 
         match &self.mode {
             EvaluationMode::Sequential => {
-                indices.sort_by(|&a, &b| {
-                    self.compare_sequential(&tasks[a], &tasks[b], context)
-                });
+                indices.sort_by(|&a, &b| self.compare_sequential(&tasks[a], &tasks[b], context));
             }
             EvaluationMode::Weighted => {
                 let scores: Vec<f64> = tasks
@@ -308,10 +306,7 @@ mod tests {
 
     #[test]
     fn test_by_id_tie_breaker() {
-        let tasks = vec![
-            make_task("B", 1000, None, 0),
-            make_task("A", 1000, None, 0),
-        ];
+        let tasks = vec![make_task("B", 1000, None, 0), make_task("A", 1000, None, 0)];
         let ctx = SchedulingContext::at_time(0);
         let engine = RuleEngine::new()
             .with_rule(rules::Spt)

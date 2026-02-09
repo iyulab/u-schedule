@@ -170,9 +170,7 @@ fn detect_cycles(tasks: &[Task]) -> Option<ValidationError> {
         for act in &task.activities {
             all_ids.insert(&act.id);
             for pred in &act.predecessors {
-                adj.entry(pred.as_str())
-                    .or_default()
-                    .push(act.id.as_str());
+                adj.entry(pred.as_str()).or_default().push(act.id.as_str());
             }
         }
     }
@@ -237,8 +235,7 @@ mod tests {
                     Activity::new("O1", "J1", 0)
                         .with_duration(ActivityDuration::fixed(1000))
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M1".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                         ),
                 )
                 .with_activity(
@@ -246,8 +243,7 @@ mod tests {
                         .with_duration(ActivityDuration::fixed(2000))
                         .with_predecessor("O1")
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M2".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M2".into()]),
                         ),
                 ),
             Task::new("J2").with_activity(
@@ -269,11 +265,10 @@ mod tests {
 
     #[test]
     fn test_duplicate_task_id() {
-        let tasks = vec![Task::new("J1").with_activity(
-            Activity::new("O1", "J1", 0).with_process_time(100),
-        ), Task::new("J1").with_activity(
-            Activity::new("O2", "J1", 0).with_process_time(100),
-        )];
+        let tasks = vec![
+            Task::new("J1").with_activity(Activity::new("O1", "J1", 0).with_process_time(100)),
+            Task::new("J1").with_activity(Activity::new("O2", "J1", 0).with_process_time(100)),
+        ];
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
@@ -290,8 +285,7 @@ mod tests {
         let errors = validate_input(&tasks, &resources).unwrap_err();
         assert!(errors
             .iter()
-            .any(|e| e.kind == ValidationErrorKind::DuplicateId
-                && e.message.contains("resource")));
+            .any(|e| e.kind == ValidationErrorKind::DuplicateId && e.message.contains("resource")));
     }
 
     #[test]

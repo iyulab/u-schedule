@@ -477,9 +477,7 @@ impl DurationDistribution {
                 let fc = (*mode_ms - *min_ms) as f64 / (*max_ms - *min_ms) as f64;
                 if confidence < fc {
                     *min_ms
-                        + ((*max_ms - *min_ms) as f64
-                            * (*mode_ms - *min_ms) as f64
-                            * confidence)
+                        + ((*max_ms - *min_ms) as f64 * (*mode_ms - *min_ms) as f64 * confidence)
                             .sqrt() as i64
                 } else {
                     *max_ms

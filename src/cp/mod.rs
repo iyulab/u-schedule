@@ -10,14 +10,9 @@
 
 use std::collections::HashMap;
 
-use u_metaheur::cp::{
-    CpModel, CpSolver, CpSolution, IntervalVar,
-    Objective, SolverConfig,
-};
+use u_metaheur::cp::{CpModel, CpSolution, CpSolver, IntervalVar, Objective, SolverConfig};
 
-use crate::models::{
-    Assignment, Constraint, Resource, Schedule, Task, TransitionMatrixCollection,
-};
+use crate::models::{Assignment, Constraint, Resource, Schedule, Task, TransitionMatrixCollection};
 
 /// Builds a CP model from scheduling domain objects.
 ///
@@ -85,10 +80,10 @@ impl<'a> ScheduleCpBuilder<'a> {
                 let duration = activity.duration.process_ms;
                 let interval = IntervalVar::new(
                     &activity.id,
-                    release,         // start_min
+                    release,               // start_min
                     horizon_ms - duration, // start_max
-                    duration,        // fixed duration
-                    horizon_ms,      // end_max
+                    duration,              // fixed duration
+                    horizon_ms,            // end_max
                 );
                 model.add_interval(interval);
             }
@@ -227,24 +222,21 @@ mod tests {
                     Activity::new("T1_O1", "T1", 0)
                         .with_duration(ActivityDuration::fixed(1000))
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M1".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                         ),
                 )
                 .with_activity(
                     Activity::new("T1_O2", "T1", 1)
                         .with_duration(ActivityDuration::fixed(2000))
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M1".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                         ),
                 ),
             Task::new("T2").with_activity(
                 Activity::new("T2_O1", "T2", 0)
                     .with_duration(ActivityDuration::fixed(1500))
                     .with_requirement(
-                        ResourceRequirement::new("Machine")
-                            .with_candidates(vec!["M1".into()]),
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                     ),
             ),
         ];
@@ -269,8 +261,7 @@ mod tests {
     fn test_build_with_constraints() {
         let (tasks, resources) = make_test_data();
         let constraints = vec![Constraint::precedence("T1_O2", "T2_O1")];
-        let builder = ScheduleCpBuilder::new(&tasks, &resources)
-            .with_constraints(constraints);
+        let builder = ScheduleCpBuilder::new(&tasks, &resources).with_constraints(constraints);
         let model = builder.build(100_000);
 
         // Additional precedence constraint
@@ -327,8 +318,12 @@ mod tests {
                 assert!(
                     a.end_ms <= b.start_ms || b.end_ms <= a.start_ms,
                     "Overlap detected: {} [{}, {}] and {} [{}, {}]",
-                    a.activity_id, a.start_ms, a.end_ms,
-                    b.activity_id, b.start_ms, b.end_ms,
+                    a.activity_id,
+                    a.start_ms,
+                    a.end_ms,
+                    b.activity_id,
+                    b.start_ms,
+                    b.end_ms,
                 );
             }
         }

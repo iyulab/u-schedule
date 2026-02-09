@@ -78,7 +78,7 @@ pub mod operators;
 mod problem;
 
 pub use chromosome::{
-    ScheduleChromosome, invert_mutation, insert_mutation, jox_crossover, lox_crossover,
-    mav_mutation, pox_crossover, swap_mutation,
+    insert_mutation, invert_mutation, jox_crossover, lox_crossover, mav_mutation, pox_crossover,
+    swap_mutation, ScheduleChromosome,
 };
 pub use problem::{ActivityInfo, SchedulingGaProblem};

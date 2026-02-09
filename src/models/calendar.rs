@@ -88,8 +88,7 @@ impl Calendar {
 
     /// Adds a blocked period.
     pub fn with_blocked(mut self, start_ms: i64, end_ms: i64) -> Self {
-        self.blocked_periods
-            .push(TimeWindow::new(start_ms, end_ms));
+        self.blocked_periods.push(TimeWindow::new(start_ms, end_ms));
         self
     }
 
@@ -152,9 +151,7 @@ impl Calendar {
             }
             // If candidate is blocked, try end of the blocking period
             for bp in &self.blocked_periods {
-                if bp.contains(candidate)
-                    && bp.end_ms < i64::MAX
-                    && self.is_working_time(bp.end_ms)
+                if bp.contains(candidate) && bp.end_ms < i64::MAX && self.is_working_time(bp.end_ms)
                 {
                     return Some(bp.end_ms);
                 }
@@ -247,10 +244,10 @@ mod tests {
     #[test]
     fn test_calendar_with_windows() {
         let cal = Calendar::new("shifts")
-            .with_window(0, 8_000)       // 0-8s: day shift
+            .with_window(0, 8_000) // 0-8s: day shift
             .with_window(16_000, 24_000); // 16-24s: night shift
 
-        assert!(cal.is_working_time(4_000));  // During day shift
+        assert!(cal.is_working_time(4_000)); // During day shift
         assert!(!cal.is_working_time(10_000)); // Between shifts
         assert!(cal.is_working_time(20_000)); // During night shift
     }
@@ -261,9 +258,9 @@ mod tests {
             .with_window(0, 100_000)
             .with_blocked(50_000, 60_000); // Maintenance window
 
-        assert!(cal.is_working_time(40_000));  // Before maintenance
+        assert!(cal.is_working_time(40_000)); // Before maintenance
         assert!(!cal.is_working_time(55_000)); // During maintenance
-        assert!(cal.is_working_time(70_000));  // After maintenance
+        assert!(cal.is_working_time(70_000)); // After maintenance
     }
 
     #[test]
@@ -272,14 +269,13 @@ mod tests {
             .with_window(0, 8_000)
             .with_window(16_000, 24_000);
 
-        assert_eq!(cal.next_available_time(4_000), Some(4_000));   // Already available
+        assert_eq!(cal.next_available_time(4_000), Some(4_000)); // Already available
         assert_eq!(cal.next_available_time(10_000), Some(16_000)); // Wait for next shift
     }
 
     #[test]
     fn test_next_available_blocked() {
-        let cal = Calendar::always_available("cal")
-            .with_blocked(50_000, 60_000);
+        let cal = Calendar::always_available("cal").with_blocked(50_000, 60_000);
 
         assert_eq!(cal.next_available_time(40_000), Some(40_000));
         assert_eq!(cal.next_available_time(55_000), Some(60_000));
@@ -300,8 +296,7 @@ mod tests {
 
     #[test]
     fn test_available_time_no_windows() {
-        let cal = Calendar::always_available("cal")
-            .with_blocked(20_000, 30_000);
+        let cal = Calendar::always_available("cal").with_blocked(20_000, 30_000);
 
         let avail = cal.available_time_in_range(0, 50_000);
         assert_eq!(avail, 40_000); // 50k - 10k blocked

@@ -16,8 +16,8 @@
 use rand::Rng;
 
 use super::chromosome::{
-    ScheduleChromosome, insert_mutation, invert_mutation, jox_crossover, lox_crossover,
-    mav_mutation, pox_crossover, swap_mutation,
+    insert_mutation, invert_mutation, jox_crossover, lox_crossover, mav_mutation, pox_crossover,
+    swap_mutation, ScheduleChromosome,
 };
 use super::problem::ActivityInfo;
 
@@ -113,8 +113,8 @@ impl GeneticOperators {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     fn sample_activities() -> Vec<ActivityInfo> {
         vec![
@@ -248,6 +248,9 @@ mod tests {
                 break;
             }
         }
-        assert!(mav_changed, "MAV mutation should occur alongside OSV mutation");
+        assert!(
+            mav_changed,
+            "MAV mutation should occur alongside OSV mutation"
+        );
     }
 }

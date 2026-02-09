@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_kpi_tardiness() {
         let tasks = vec![
-            make_task("J1", 1000, Some(500), Some(0)),  // Deadline 500, completes at 1000 → tardy 500
+            make_task("J1", 1000, Some(500), Some(0)), // Deadline 500, completes at 1000 → tardy 500
             make_task("J2", 1000, Some(5000), Some(0)), // On time
         ];
         let mut schedule = Schedule::new();
@@ -192,7 +192,7 @@ mod tests {
     fn test_kpi_flow_time() {
         let tasks = vec![
             make_task("J1", 1000, None, Some(1000)), // Released at 1000, completes at 3000 → flow 2000
-            make_task("J2", 1000, None, Some(0)),     // Released at 0, completes at 1000 → flow 1000
+            make_task("J2", 1000, None, Some(0)),    // Released at 0, completes at 1000 → flow 1000
         ];
         let mut schedule = Schedule::new();
         schedule.add_assignment(Assignment::new("J1_O1", "J1", "M1", 2000, 3000));

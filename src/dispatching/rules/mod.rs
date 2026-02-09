@@ -328,7 +328,10 @@ impl DispatchingRule for Atc {
         };
 
         let slack = deadline - processing_time - context.current_time_ms as f64;
-        let p_avg = context.average_processing_time.unwrap_or(processing_time).max(1.0);
+        let p_avg = context
+            .average_processing_time
+            .unwrap_or(processing_time)
+            .max(1.0);
 
         let urgency = if slack <= 0.0 {
             1.0
@@ -564,7 +567,7 @@ mod tests {
     fn test_sro() {
         let ctx = SchedulingContext::at_time(0);
         let few_ops = make_task("few", 1000, Some(5000), 0); // 1 op, slack=4000, S/RO=4000
-        // Task with 3 activities
+                                                             // Task with 3 activities
         let mut many_ops = Task::new("many").with_priority(0);
         many_ops.deadline = Some(5000);
         for i in 0..3 {
@@ -583,7 +586,7 @@ mod tests {
         let atc = Atc::default();
         let urgent = make_task("urgent", 1000, Some(2000), 0); // Tight deadline
         let relaxed = make_task("relaxed", 1000, Some(100_000), 0); // Loose deadline
-        // Urgent has higher ATC score → lower (more negative) return
+                                                                    // Urgent has higher ATC score → lower (more negative) return
         assert!(atc.evaluate(&urgent, &ctx) < atc.evaluate(&relaxed, &ctx));
     }
 

@@ -244,8 +244,7 @@ mod tests {
     fn test_candidate_resources() {
         let act = Activity::new("O1", "J1", 0)
             .with_requirement(
-                ResourceRequirement::new("Machine")
-                    .with_candidates(vec!["M1".into(), "M2".into()]),
+                ResourceRequirement::new("Machine").with_candidates(vec!["M1".into(), "M2".into()]),
             )
             .with_requirement(
                 ResourceRequirement::new("Operator").with_candidates(vec!["W1".into()]),

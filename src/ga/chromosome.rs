@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 
-use rand::Rng;
 use rand::prelude::IndexedRandom;
+use rand::Rng;
 use u_metaheur::ga::Individual;
 
 use super::ActivityInfo;
@@ -204,7 +204,10 @@ impl ScheduleChromosome {
                 if act.candidates.is_empty() {
                     String::new()
                 } else {
-                    act.candidates.choose(rng).expect("candidates checked non-empty").clone()
+                    act.candidates
+                        .choose(rng)
+                        .expect("candidates checked non-empty")
+                        .clone()
                 }
             })
             .collect()
@@ -528,15 +531,19 @@ pub fn mav_mutation<R: Rng>(
     }
     let idx = rng.random_range(0..chromosome.mav.len().min(activities.len()));
     if !activities[idx].candidates.is_empty() {
-        chromosome.mav[idx] = activities[idx].candidates.choose(rng).expect("candidates checked non-empty").clone();
+        chromosome.mav[idx] = activities[idx]
+            .candidates
+            .choose(rng)
+            .expect("candidates checked non-empty")
+            .clone();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     fn sample_activities() -> Vec<ActivityInfo> {
         vec![

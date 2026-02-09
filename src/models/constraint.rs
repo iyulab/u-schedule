@@ -153,12 +153,7 @@ impl TransitionMatrix {
     }
 
     /// Defines a transition time between two categories.
-    pub fn set_transition(
-        &mut self,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        time_ms: i64,
-    ) {
+    pub fn set_transition(&mut self, from: impl Into<String>, to: impl Into<String>, time_ms: i64) {
         self.transitions.insert((from.into(), to.into()), time_ms);
     }
 
@@ -290,7 +285,7 @@ mod tests {
         assert_eq!(tm.get_transition("TypeA", "TypeB"), 1000);
         assert_eq!(tm.get_transition("TypeB", "TypeA"), 800);
         assert_eq!(tm.get_transition("TypeA", "TypeA"), 100); // Explicitly set
-        assert_eq!(tm.get_transition("TypeB", "TypeB"), 0);   // Same-type default
+        assert_eq!(tm.get_transition("TypeB", "TypeB"), 0); // Same-type default
         assert_eq!(tm.get_transition("TypeC", "TypeD"), 500); // Falls to default
         assert_eq!(tm.transition_count(), 3);
     }

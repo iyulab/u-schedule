@@ -16,9 +16,7 @@
 use std::collections::HashMap;
 
 use crate::dispatching::{RuleEngine, SchedulingContext};
-use crate::models::{
-    Assignment, Resource, Schedule, Task, TransitionMatrixCollection,
-};
+use crate::models::{Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
 
 /// Input container for scheduling.
 #[derive(Debug, Clone)]
@@ -122,12 +120,7 @@ impl SimpleScheduler {
     /// 2. For each task, schedule activities in sequence order.
     /// 3. For each activity, find the earliest-available candidate resource.
     /// 4. Apply setup time from transition matrices.
-    pub fn schedule(
-        &self,
-        tasks: &[Task],
-        resources: &[Resource],
-        start_time_ms: i64,
-    ) -> Schedule {
+    pub fn schedule(&self, tasks: &[Task], resources: &[Resource], start_time_ms: i64) -> Schedule {
         let mut schedule = Schedule::new();
         let mut resource_available: HashMap<String, i64> = HashMap::new();
         let mut last_category: HashMap<String, String> = HashMap::new();
@@ -143,7 +136,10 @@ impl SimpleScheduler {
         // Schedule each task
         for &task_idx in &task_order {
             let task = &tasks[task_idx];
-            let mut task_start = task.release_time.unwrap_or(start_time_ms).max(start_time_ms);
+            let mut task_start = task
+                .release_time
+                .unwrap_or(start_time_ms)
+                .max(start_time_ms);
 
             for activity in &task.activities {
                 let candidates = activity.candidate_resources();
@@ -168,8 +164,11 @@ impl SimpleScheduler {
                 if let Some(resource_id) = best_resource {
                     // Calculate setup time from transition matrices
                     let setup_time = if let Some(prev_cat) = last_category.get(resource_id) {
-                        self.transition_matrices
-                            .get_transition_time(resource_id, prev_cat, &task.category)
+                        self.transition_matrices.get_transition_time(
+                            resource_id,
+                            prev_cat,
+                            &task.category,
+                        )
                     } else {
                         0
                     };
@@ -177,14 +176,9 @@ impl SimpleScheduler {
                     let start = best_start;
                     let end = start + setup_time + activity.duration.process_ms;
 
-                    let assignment = Assignment::new(
-                        &activity.id,
-                        &task.id,
-                        resource_id,
-                        start,
-                        end,
-                    )
-                    .with_setup(setup_time);
+                    let assignment =
+                        Assignment::new(&activity.id, &task.id, resource_id, start, end)
+                            .with_setup(setup_time);
 
                     schedule.add_assignment(assignment);
 
@@ -337,16 +331,14 @@ mod tests {
                 Activity::new("O1", "J1", 0)
                     .with_duration(ActivityDuration::fixed(1000))
                     .with_requirement(
-                        ResourceRequirement::new("Machine")
-                            .with_candidates(vec!["M1".into()]),
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                     ),
             )
             .with_activity(
                 Activity::new("O2", "J1", 1)
                     .with_duration(ActivityDuration::fixed(2000))
                     .with_requirement(
-                        ResourceRequirement::new("Machine")
-                            .with_candidates(vec!["M1".into()]),
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                     ),
             );
 
@@ -377,8 +369,7 @@ mod tests {
                     Activity::new("O1", "J1", 0)
                         .with_duration(ActivityDuration::fixed(1000))
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M1".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                         ),
                 ),
             Task::new("J2")
@@ -388,8 +379,7 @@ mod tests {
                     Activity::new("O2", "J2", 0)
                         .with_duration(ActivityDuration::fixed(1000))
                         .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec!["M1".into()]),
+                            ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                         ),
                 ),
         ];
@@ -409,8 +399,8 @@ mod tests {
     fn test_with_rule_engine() {
         // Use SPT rule → shorter task first regardless of priority
         let tasks = vec![
-            make_task_with_resource("long", 5000, "M1", 100),  // High priority but long
-            make_task_with_resource("short", 1000, "M1", 1),   // Low priority but short
+            make_task_with_resource("long", 5000, "M1", 100), // High priority but long
+            make_task_with_resource("short", 1000, "M1", 1),  // Low priority but short
         ];
         let resources = vec![make_resource("M1")];
         let engine = RuleEngine::new().with_rule(rules::Spt);
