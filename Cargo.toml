@@ -5,14 +5,15 @@ edition = "2021"
 authors = ["iyulab"]
 license = "MIT"
 repository = "https://github.com/iyulab/u-schedule"
-description = "Scheduling framework for the U-Engine ecosystem"
+description = "Domain-agnostic scheduling framework: job-shop models, dispatching rules, GA encoding, constraint programming."
+readme = "README.md"
 keywords = ["scheduling", "job-shop", "optimization", "manufacturing"]
 categories = ["algorithms"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-u-metaheur = { path = "../u-metaheur" }
-u-optim = { path = "../u-optim" }
+u-metaheur = { version = "0.1", path = "../u-metaheur" }
+u-optim = { version = "0.1", path = "../u-optim" }
 rand = "0.9"
 
 [dev-dependencies]
