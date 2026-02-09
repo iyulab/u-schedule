@@ -18,7 +18,7 @@
 //! # Architecture
 //!
 //! This crate sits at Layer 3 (Frameworks) in the U-Engine ecosystem.
-//! It depends on `u-metaheur` and `u-numerics` but contains only scheduling
+//! It depends on `u-metaheur` and `u-numflow` but contains only scheduling
 //! domain logic — no nesting, packing, or manufacturing concepts.
 //!
 //! # References

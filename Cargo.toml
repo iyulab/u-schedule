@@ -13,7 +13,7 @@ categories = ["algorithms"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 u-metaheur = { version = "0.1", path = "../../algorithms/u-metaheur" }
-u-numerics = { version = "0.1", path = "../../foundation/u-numerics" }
+u-numflow = { version = "0.1", path = "../../foundation/u-numflow" }
 rand = "0.9"
 
 [dev-dependencies]
