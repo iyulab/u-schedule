@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force publish even if version unchanged'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: Check Version Change
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get current version
+        id: get_version
+        run: |
+          VERSION=$(grep -m1 'version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
+
+      - name: Check if version changed
+        id: check
+        run: |
+          git diff HEAD~1 HEAD -- Cargo.toml | grep -q '+version = ' && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
+
+  publish:
+    name: Publish to crates.io
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout path dependencies
+        shell: bash
+        run: |
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-numflow.git ../../foundation/u-numflow
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty || true
