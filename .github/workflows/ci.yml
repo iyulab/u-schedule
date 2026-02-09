@@ -18,8 +18,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
@@ -41,8 +42,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -60,8 +62,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
@@ -73,8 +76,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
@@ -88,8 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - run: cargo audit
@@ -102,8 +107,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout path dependencies
         run: |
-          git clone --depth 1 https://github.com/iyulab/u-optim.git ../u-optim
-          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../u-metaheur
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-optim.git ../../foundation/u-optim
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
