@@ -34,3 +34,6 @@ pub mod ga;
 pub mod models;
 pub mod scheduler;
 pub mod validation;
+
+#[cfg(feature = "wasm")]
+pub mod wasm;

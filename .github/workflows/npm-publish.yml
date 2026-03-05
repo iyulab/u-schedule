@@ -1,0 +1,44 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'src/wasm.rs'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout path dependencies
+        shell: bash
+        run: |
+          mkdir -p ../../foundation ../../algorithms
+          git clone --depth 1 https://github.com/iyulab/u-numflow.git ../../foundation/u-numflow
+          git clone --depth 1 https://github.com/iyulab/u-metaheur.git ../../algorithms/u-metaheur
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+
+      - run: wasm-pack build --target bundler --scope iyulab --features wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: cd pkg && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
