@@ -37,8 +37,21 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: cd pkg && npm publish --access public
+      - name: Publish to npm
+        run: |
+          cd pkg
+          npm publish --access public || {
+            EXIT=$?
+            PKG_NAME=$(node -p "require('./package.json').name")
+            PKG_VER=$(node -p "require('./package.json').version")
+            if npm view "${PKG_NAME}@${PKG_VER}" version 2>/dev/null; then
+              echo "Version ${PKG_VER} already published, skipping"
+              exit 0
+            fi
+            exit $EXIT
+          }
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
