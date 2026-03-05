@@ -16,8 +16,8 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::dispatching::rules;
+use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::models::{Activity, ActivityDuration, Task};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -98,9 +98,8 @@ fn ms_to_sec(ms: i64) -> f64 {
 /// - `weight` is stored in `Task::priority` as `(weight * 1000.0) as i32`
 fn build_task(job: &InputJob) -> Task {
     let duration_ms = sec_to_ms(job.processing_time);
-    let activity =
-        Activity::new(format!("{}_O1", job.id), &job.id, 0)
-            .with_duration(ActivityDuration::fixed(duration_ms));
+    let activity = Activity::new(format!("{}_O1", job.id), &job.id, 0)
+        .with_duration(ActivityDuration::fixed(duration_ms));
 
     let priority = (job.weight * 1_000.0).round() as i32;
 
@@ -190,8 +189,7 @@ fn simulate(tasks: &[Task], engine: &RuleEngine) -> Vec<OutputJob> {
 /// A JS object matching `ScheduleOutput` on success, or a JS string error.
 #[wasm_bindgen]
 pub fn run_schedule(jobs_json: JsValue) -> Result<JsValue, JsValue> {
-    let input: ScheduleInput =
-        serde_wasm_bindgen::from_value(jobs_json).map_err(js_err)?;
+    let input: ScheduleInput = serde_wasm_bindgen::from_value(jobs_json).map_err(js_err)?;
 
     if input.jobs.is_empty() {
         let output = ScheduleOutput {
@@ -323,7 +321,10 @@ mod tests {
         let (schedule, makespan, _) = run(jobs, "SPT");
         // A first in SPT order
         let a = schedule.iter().find(|j| j.id == "A").expect("A");
-        assert!((a.start - 5.0).abs() < 1e-9, "A start should be 5.0 (release respected)");
+        assert!(
+            (a.start - 5.0).abs() < 1e-9,
+            "A start should be 5.0 (release respected)"
+        );
         assert!((a.end - 7.0).abs() < 1e-9);
         assert!((makespan - 10.0).abs() < 1e-9);
     }
@@ -380,6 +381,9 @@ mod tests {
         ];
         let (schedule, _, _) = run(jobs, "WSPT");
         // Both same weight → WSPT degenerates to SPT → B (shorter) first.
-        assert_eq!(schedule[0].id, "B", "equal weight: shorter job goes first (SPT-like)");
+        assert_eq!(
+            schedule[0].id, "B",
+            "equal weight: shorter job goes first (SPT-like)"
+        );
     }
 }
