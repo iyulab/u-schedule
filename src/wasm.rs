@@ -516,6 +516,40 @@ fn parse_mutation(s: &str) -> Result<MutationType, String> {
     }
 }
 
+// ── GA config validation ────────────────────────────────────────────────────
+
+/// Validates `JobShopGaConfig` fields before they are passed to `GaConfig`.
+///
+/// This catches invalid values at the WASM boundary with clear error messages,
+/// preventing panics deeper in the GA runner.
+fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
+    if cfg.population_size < 2 {
+        return Err(format!(
+            "ga_config.population_size must be >= 2, got {}",
+            cfg.population_size
+        ));
+    }
+    if cfg.max_generations < 1 {
+        return Err(format!(
+            "ga_config.max_generations must be >= 1, got {}",
+            cfg.max_generations
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.mutation_rate) {
+        return Err(format!(
+            "ga_config.mutation_rate must be in 0.0..=1.0, got {}",
+            cfg.mutation_rate
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.tardiness_weight) {
+        return Err(format!(
+            "ga_config.tardiness_weight must be in 0.0..=1.0, got {}",
+            cfg.tardiness_weight
+        ));
+    }
+    Ok(())
+}
+
 // ── public API: solve_jobshop ───────────────────────────────────────────────
 
 /// Solve a job-shop scheduling problem using Genetic Algorithm.
@@ -641,7 +675,9 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
             mutation_type,
         });
 
-    // ── Configure GA ──
+    // ── Validate & configure GA ──
+    validate_ga_config(&input.ga_config).map_err(js_err)?;
+
     let mut config = GaConfig::default()
         .with_population_size(input.ga_config.population_size)
         .with_max_generations(input.ga_config.max_generations)
@@ -652,8 +688,11 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
         config = config.with_seed(seed);
     }
 
+    // Defence-in-depth: call GaConfig's own validation as well.
+    config.validate().map_err(js_err)?;
+
     // ── Run GA ──
-    let result = GaRunner::run(&problem, &config);
+    let result = GaRunner::run(&problem, &config).map_err(js_err)?;
 
     // ── Decode best solution ──
     let best_schedule = problem.decode(&result.best);
@@ -1043,7 +1082,7 @@ mod tests {
             .with_seed(42)
             .with_parallel(false);
 
-        let result = GaRunner::run(&problem, &config);
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
         let schedule = problem.decode(&result.best);
 
         assert!(schedule.makespan_ms() > 0);
@@ -1123,5 +1162,169 @@ mod tests {
             tasks.push(task);
         }
         Ok(tasks)
+    }
+
+    // ── GA config validation tests ──
+
+    #[test]
+    fn test_validate_ga_config_defaults_ok() {
+        let cfg = JobShopGaConfig::default();
+        assert!(validate_ga_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ga_config_population_size_zero() {
+        let cfg = JobShopGaConfig {
+            population_size: 0,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("population_size"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_ga_config_population_size_one() {
+        let cfg = JobShopGaConfig {
+            population_size: 1,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("population_size"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_ga_config_population_size_two_ok() {
+        let cfg = JobShopGaConfig {
+            population_size: 2,
+            ..Default::default()
+        };
+        assert!(validate_ga_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ga_config_max_generations_zero() {
+        let cfg = JobShopGaConfig {
+            max_generations: 0,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("max_generations"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_ga_config_mutation_rate_negative() {
+        let cfg = JobShopGaConfig {
+            mutation_rate: -0.1,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("mutation_rate"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_ga_config_mutation_rate_above_one() {
+        let cfg = JobShopGaConfig {
+            mutation_rate: 1.5,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("mutation_rate"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_ga_config_mutation_rate_boundary_ok() {
+        // 0.0 and 1.0 are both valid
+        let cfg0 = JobShopGaConfig {
+            mutation_rate: 0.0,
+            ..Default::default()
+        };
+        assert!(validate_ga_config(&cfg0).is_ok());
+
+        let cfg1 = JobShopGaConfig {
+            mutation_rate: 1.0,
+            ..Default::default()
+        };
+        assert!(validate_ga_config(&cfg1).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ga_config_tardiness_weight_invalid() {
+        let cfg = JobShopGaConfig {
+            tardiness_weight: -0.5,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.contains("tardiness_weight"), "got: {}", err);
+
+        let cfg2 = JobShopGaConfig {
+            tardiness_weight: 2.0,
+            ..Default::default()
+        };
+        let err2 = validate_ga_config(&cfg2).unwrap_err();
+        assert!(err2.contains("tardiness_weight"), "got: {}", err2);
+    }
+
+    #[test]
+    fn test_jobshop_invalid_population_returns_error() {
+        // Verify that invalid GA config is caught as an error, not a panic.
+        // We test via validate_ga_config since solve_jobshop requires JsValue (WASM).
+        let cfg = JobShopGaConfig {
+            population_size: 0,
+            max_generations: 10,
+            mutation_rate: 0.1,
+            seed: Some(42),
+            tardiness_weight: 0.0,
+            crossover: "POX".to_string(),
+            mutation: "Swap".to_string(),
+        };
+        assert!(validate_ga_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_jobshop_edge_case_single_job_single_op() {
+        // Minimal valid jobshop: 1 job, 1 operation, 1 machine
+        let input = JobShopInput {
+            jobs: vec![JobShopJob {
+                id: "J1".to_string(),
+                operations: vec![JobShopOperation {
+                    machine: Some("M1".to_string()),
+                    machines: vec![],
+                    processing_time: 5.0,
+                }],
+                due_date: None,
+                release_time: None,
+            }],
+            num_machines: Some(1),
+            ga_config: JobShopGaConfig {
+                population_size: 4,
+                max_generations: 5,
+                mutation_rate: 0.1,
+                seed: Some(1),
+                tardiness_weight: 0.0,
+                crossover: "POX".to_string(),
+                mutation: "Swap".to_string(),
+            },
+        };
+
+        let tasks = build_jobshop_tasks(&input).expect("valid input");
+        let machine_ids = collect_machine_ids(&input);
+        let resources: Vec<Resource> = machine_ids
+            .iter()
+            .map(|id| Resource::new(id, ResourceType::Primary))
+            .collect();
+
+        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let config = GaConfig::default()
+            .with_population_size(4)
+            .with_max_generations(5)
+            .with_seed(1)
+            .with_parallel(false);
+
+        config.validate().expect("config should be valid");
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
+        let schedule = problem.decode(&result.best);
+
+        assert_eq!(schedule.assignments.len(), 1);
+        assert!(schedule.makespan_ms() > 0);
     }
 }

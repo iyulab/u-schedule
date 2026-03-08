@@ -186,6 +186,26 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
 
 Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Insert"` | `"Invert"`.
 
+**GA config constraints:**
+
+| Parameter | Constraint | Default |
+|-----------|-----------|---------|
+| `population_size` | >= 2 | 100 |
+| `max_generations` | >= 1 | 200 |
+| `mutation_rate` | 0.0 -- 1.0 | 0.1 |
+| `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
+| `seed` | optional u64 | random |
+
+**Error handling:** Invalid parameters return a JS error string (not a thrown exception). Check the return value:
+
+```javascript
+try {
+  const result = solve_jobshop({ jobs: [...], ga_config: { population_size: 0 } });
+} catch (e) {
+  console.error("Scheduling error:", e); // "ga_config.population_size must be >= 2, got 0"
+}
+```
+
 ## Related
 
 - [u-numflow](https://github.com/iyulab/u-numflow) — Mathematical primitives

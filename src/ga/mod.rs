@@ -31,7 +31,7 @@
 //! // 3. Configure and run GA
 //! let config = GaConfig::auto_select(tasks.len())
 //!     .with_seed(42);
-//! let result = GaRunner::run(&problem, &config);
+//! let result = GaRunner::run(&problem, &config).expect("GA failed");
 //!
 //! // 4. Decode best solution
 //! let schedule = problem.decode(&result.best);

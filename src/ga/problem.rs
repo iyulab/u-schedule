@@ -409,7 +409,7 @@ mod tests {
             .with_seed(42)
             .with_parallel(false);
 
-        let result = GaRunner::run(&problem, &config);
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
         assert!(result.best_fitness.is_finite());
         assert!(result.best_fitness < f64::INFINITY);
         assert!(result.generations > 0);
@@ -487,7 +487,7 @@ mod tests {
             .with_seed(42)
             .with_parallel(false);
 
-        let result = GaRunner::run(&problem, &config);
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
         assert!(result.best_fitness.is_finite());
         assert!(result.best_fitness < f64::INFINITY);
     }
@@ -506,7 +506,7 @@ mod tests {
             .with_seed(99)
             .with_parallel(false);
 
-        let result = GaRunner::run(&problem, &config);
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
         assert!(result.best_fitness.is_finite());
         assert!(result.best_fitness < f64::INFINITY);
     }
@@ -541,7 +541,7 @@ mod tests {
             .with_seed(42)
             .with_parallel(false);
 
-        let result = GaRunner::run(&problem, &config);
+        let result = GaRunner::run(&problem, &config).expect("GA should succeed");
         assert!(result.best_fitness.is_finite());
         assert!(result.best_fitness < f64::INFINITY);
     }
