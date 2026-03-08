@@ -28,8 +28,6 @@
 //! JSON uses seconds (f64). Internally, the scheduling model uses
 //! milliseconds (i64), converted by multiplying/dividing by 1000.
 
-#![cfg(feature = "wasm")]
-
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -711,6 +709,7 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
 // ── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::useless_vec)]
 mod tests {
     use super::*;
 
