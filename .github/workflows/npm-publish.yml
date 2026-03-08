@@ -43,15 +43,12 @@ jobs:
       - name: Publish to npm
         run: |
           cd pkg
-          npm publish --access public || {
-            EXIT=$?
-            PKG_NAME=$(node -p "require('./package.json').name")
-            PKG_VER=$(node -p "require('./package.json').version")
-            if npm view "${PKG_NAME}@${PKG_VER}" version 2>/dev/null; then
-              echo "Version ${PKG_VER} already published, skipping"
-              exit 0
-            fi
-            exit $EXIT
-          }
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VER=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VER}" version 2>/dev/null; then
+            echo "Version ${PKG_VER} already published, skipping"
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
