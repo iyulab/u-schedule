@@ -95,6 +95,97 @@ cargo test
 
 MIT License — see [LICENSE](LICENSE).
 
+## WebAssembly / npm
+
+Available as an npm package via [wasm-pack](https://rustwasm.github.io/wasm-pack/).
+
+```bash
+npm install @iyulab/u-schedule
+```
+
+### Quick Start
+
+```javascript
+import init, { run_schedule, solve_jobshop } from '@iyulab/u-schedule';
+
+await init();
+const result = run_schedule({
+  jobs: [
+    { id: "A", processing_time: 5.0, due_date: 10.0 },
+    { id: "B", processing_time: 3.0, due_date: 8.0 },
+  ],
+  config: { rule: "EDD" }
+});
+```
+
+### Functions
+
+#### `run_schedule(input) -> ScheduleOutput`
+
+Priority dispatching on a flat job list (single or parallel machines). Supports 12 rules: SPT, LPT, EDD, FCFS, CR, WSPT, MST, S/RO, ATC, LWKR, MWKR, PRIORITY.
+
+**Input:**
+```json
+{
+  "jobs": [
+    { "id": "A", "processing_time": 5.0, "due_date": 10.0, "release_time": 0.0, "weight": 1.0 }
+  ],
+  "config": { "rule": "SPT", "num_machines": 1, "atc_k": 2.0 }
+}
+```
+
+**Output:**
+```json
+{
+  "schedule": [{ "id": "A", "start": 0.0, "end": 5.0, "tardiness": 0.0, "machine": 0 }],
+  "makespan": 5.0,
+  "total_tardiness": 0.0,
+  "machine_utilization": [{ "machine": 0, "busy_time": 5.0, "utilization": 1.0 }]
+}
+```
+
+Times are in seconds. `machine_utilization` is present only when `num_machines > 1`.
+
+#### `solve_jobshop(input) -> JobShopOutput`
+
+GA-based job-shop scheduling with multi-machine routing and precedence constraints.
+
+**Input:**
+```json
+{
+  "jobs": [
+    {
+      "id": "J1",
+      "operations": [
+        { "machine": "M1", "processing_time": 3.0 },
+        { "machines": ["M2", "M3"], "processing_time": 2.0 }
+      ],
+      "due_date": 15.0
+    }
+  ],
+  "num_machines": 3,
+  "ga_config": {
+    "population_size": 100, "max_generations": 200,
+    "mutation_rate": 0.1, "seed": 42,
+    "tardiness_weight": 0.5,
+    "crossover": "POX", "mutation": "Swap"
+  }
+}
+```
+
+**Output:**
+```json
+{
+  "schedule": [{ "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 3.0 }],
+  "makespan": 5.0,
+  "fitness": 5.0,
+  "generations": 200,
+  "fitness_history": [10.0, 8.0, 5.0]
+}
+```
+
+Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Insert"` | `"Invert"`.
+
 ## Related
 
 - [u-numflow](https://github.com/iyulab/u-numflow) — Mathematical primitives
