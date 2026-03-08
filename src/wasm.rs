@@ -33,7 +33,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::dispatching::rules;
 use crate::dispatching::{RuleEngine, SchedulingContext};
-use crate::ga::operators::{CrossoverType, MutationType, GeneticOperators};
+use crate::ga::operators::{CrossoverType, GeneticOperators, MutationType};
 use crate::ga::SchedulingGaProblem;
 use crate::models::{
     Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task,
@@ -241,11 +241,7 @@ fn simulate_single(tasks: &[Task], engine: &RuleEngine) -> Vec<OutputJob> {
 ///
 /// # Reference
 /// Graham (1969), "Bounds on multiprocessing timing anomalies"
-fn simulate_parallel(
-    tasks: &[Task],
-    engine: &RuleEngine,
-    num_machines: usize,
-) -> Vec<OutputJob> {
+fn simulate_parallel(tasks: &[Task], engine: &RuleEngine, num_machines: usize) -> Vec<OutputJob> {
     let context = SchedulingContext::at_time(0);
     let order = engine.sort_indices(tasks, &context);
 
@@ -558,8 +554,7 @@ fn parse_mutation(s: &str) -> Result<MutationType, String> {
 /// ```
 #[wasm_bindgen]
 pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
-    let input: JobShopInput =
-        serde_wasm_bindgen::from_value(problem_json).map_err(js_err)?;
+    let input: JobShopInput = serde_wasm_bindgen::from_value(problem_json).map_err(js_err)?;
 
     if input.jobs.is_empty() {
         let output = JobShopOutput {
@@ -618,15 +613,9 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
                 )));
             }
 
-            let activity = Activity::new(
-                format!("{}_{}", job.id, i + 1),
-                &job.id,
-                i as i32,
-            )
-            .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
-            .with_requirement(
-                ResourceRequirement::new("Machine").with_candidates(candidates),
-            );
+            let activity = Activity::new(format!("{}_{}", job.id, i + 1), &job.id, i as i32)
+                .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
+                .with_requirement(ResourceRequirement::new("Machine").with_candidates(candidates));
 
             task = task.with_activity(activity);
         }
@@ -641,10 +630,8 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
         .collect();
 
     // ── Configure operators ──
-    let crossover_type =
-        parse_crossover(&input.ga_config.crossover).map_err(js_err)?;
-    let mutation_type =
-        parse_mutation(&input.ga_config.mutation).map_err(js_err)?;
+    let crossover_type = parse_crossover(&input.ga_config.crossover).map_err(js_err)?;
+    let mutation_type = parse_mutation(&input.ga_config.mutation).map_err(js_err)?;
 
     // ── Build GA problem ──
     let problem = SchedulingGaProblem::new(&tasks, &resources)
@@ -1124,20 +1111,13 @@ mod tests {
             for (i, op) in job.operations.iter().enumerate() {
                 let candidates = op.candidates();
                 if candidates.is_empty() {
-                    return Err(format!(
-                        "Job '{}' operation {} has no machine",
-                        job.id, i
-                    ));
+                    return Err(format!("Job '{}' operation {} has no machine", job.id, i));
                 }
-                let activity = Activity::new(
-                    format!("{}_{}", job.id, i + 1),
-                    &job.id,
-                    i as i32,
-                )
-                .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
-                .with_requirement(
-                    ResourceRequirement::new("Machine").with_candidates(candidates),
-                );
+                let activity = Activity::new(format!("{}_{}", job.id, i + 1), &job.id, i as i32)
+                    .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(candidates),
+                    );
                 task = task.with_activity(activity);
             }
             tasks.push(task);
