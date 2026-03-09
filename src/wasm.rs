@@ -702,22 +702,7 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
     config.validate().map_err(js_err)?;
 
     // ── Run GA ──
-    // Wrap in catch_unwind to convert any panic (e.g., from u-metaheur
-    // internals) into a JS error instead of WASM `RuntimeError: unreachable`.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        GaRunner::run(&problem, &config)
-    }))
-    .map_err(|panic| {
-        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-            format!("GA internal panic: {s}")
-        } else if let Some(s) = panic.downcast_ref::<String>() {
-            format!("GA internal panic: {s}")
-        } else {
-            "GA internal panic (unknown cause)".to_string()
-        };
-        js_err(msg)
-    })?
-    .map_err(js_err)?;
+    let result = GaRunner::run(&problem, &config).map_err(js_err)?;
 
     // ── Decode best solution ──
     let best_schedule = problem.decode(&result.best);
