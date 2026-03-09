@@ -678,10 +678,20 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
     // ── Validate & configure GA ──
     validate_ga_config(&input.ga_config).map_err(js_err)?;
 
+    // Compute a safe elite_ratio: ensure at least 1 elite for any population_size.
+    // Default 0.1 gives elite_count=0 when population_size < 10.
+    let elite_ratio = {
+        let pop = input.ga_config.population_size;
+        let default_ratio = 0.1_f64;
+        let min_ratio = 1.0 / pop as f64; // guarantees at least 1 elite
+        default_ratio.max(min_ratio)
+    };
+
     let mut config = GaConfig::default()
         .with_population_size(input.ga_config.population_size)
         .with_max_generations(input.ga_config.max_generations)
         .with_mutation_rate(input.ga_config.mutation_rate)
+        .with_elite_ratio(elite_ratio)
         .with_parallel(false); // WASM is single-threaded
 
     if let Some(seed) = input.ga_config.seed {
@@ -692,7 +702,22 @@ pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
     config.validate().map_err(js_err)?;
 
     // ── Run GA ──
-    let result = GaRunner::run(&problem, &config).map_err(js_err)?;
+    // Wrap in catch_unwind to convert any panic (e.g., from u-metaheur
+    // internals) into a JS error instead of WASM `RuntimeError: unreachable`.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        GaRunner::run(&problem, &config)
+    }))
+    .map_err(|panic| {
+        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+            format!("GA internal panic: {s}")
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            format!("GA internal panic: {s}")
+        } else {
+            "GA internal panic (unknown cause)".to_string()
+        };
+        js_err(msg)
+    })?
+    .map_err(js_err)?;
 
     // ── Decode best solution ──
     let best_schedule = problem.decode(&result.best);
