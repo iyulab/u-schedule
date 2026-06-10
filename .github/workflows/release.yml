@@ -35,10 +35,22 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Current version: $VERSION"
 
-      - name: Check if version changed
+      - name: Check if version is unpublished on crates.io
         id: check
+        # Compare against the registry, not "git diff HEAD~1": a multi-commit
+        # push whose last commit lacks the version bump silently skipped
+        # publishing (u-routing 0.2.3 incident).
         run: |
-          git diff HEAD~1 HEAD -- Cargo.toml | grep -q '+version = ' && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
+          CRATE=$(grep -m1 '^name = ' Cargo.toml | sed 's/name = "\(.*\)"/\1/')
+          VERSION=${{ steps.get_version.outputs.version }}
+          HTTP=$(curl -s -o /dev/null -w '%{http_code}' -H "User-Agent: ${CRATE}-ci/1.0" "https://crates.io/api/v1/crates/${CRATE}/${VERSION}")
+          if [ "$HTTP" = "200" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "${CRATE} ${VERSION} already on crates.io — skipping"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "${CRATE} ${VERSION} not on crates.io (HTTP ${HTTP}) — will publish"
+          fi
 
   publish:
     name: Publish to crates.io
@@ -61,4 +73,6 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty || true
+        # No "|| true": a failed publish must fail the run. The check-version
+        # gate (crates.io API) already prevents same-version re-publish.
+        run: cargo publish --allow-dirty
