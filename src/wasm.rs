@@ -46,6 +46,18 @@ fn js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
 
+/// Deserialize a native JS value, rejecting JSON strings with an actionable
+/// message and prefixing the offending parameter name to any serde error.
+fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Result<T, JsValue> {
+    if value.as_string().is_some() {
+        return Err(JsValue::from_str(&format!(
+            "{param}: expected a native JS object/array, got a string — \
+             pass the value directly, not JSON.stringify(...)"
+        )));
+    }
+    serde_wasm_bindgen::from_value(value).map_err(|e| JsValue::from_str(&format!("{param}: {e}")))
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // run_schedule — dispatching rules (single / parallel machines)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -312,7 +324,7 @@ fn compute_utilization(
 /// Run a dispatching schedule on single or parallel identical machines.
 ///
 /// # Arguments
-/// `jobs_json` -- A JS object matching `ScheduleInput`.
+/// `jobs` -- A native JS object matching `ScheduleInput`.
 ///
 /// # Returns
 /// A JS object matching `ScheduleOutput` on success, or a JS string error.
@@ -321,8 +333,8 @@ fn compute_utilization(
 /// When `config.num_machines` is omitted (defaults to 1), behavior is
 /// identical to the original single-machine implementation.
 #[wasm_bindgen]
-pub fn run_schedule(jobs_json: JsValue) -> Result<JsValue, JsValue> {
-    let input: ScheduleInput = serde_wasm_bindgen::from_value(jobs_json).map_err(js_err)?;
+pub fn run_schedule(jobs: JsValue) -> Result<JsValue, JsValue> {
+    let input: ScheduleInput = from_js(jobs, "jobs")?;
 
     if input.jobs.is_empty() {
         let output = ScheduleOutput {
@@ -587,8 +599,8 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
 /// }
 /// ```
 #[wasm_bindgen]
-pub fn solve_jobshop(problem_json: JsValue) -> Result<JsValue, JsValue> {
-    let input: JobShopInput = serde_wasm_bindgen::from_value(problem_json).map_err(js_err)?;
+pub fn solve_jobshop(problem: JsValue) -> Result<JsValue, JsValue> {
+    let input: JobShopInput = from_js(problem, "problem")?;
 
     if input.jobs.is_empty() {
         let output = JobShopOutput {
