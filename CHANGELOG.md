@@ -8,6 +8,25 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-12
+
+### Changed — BREAKING (WASM)
+
+- WASM input/config objects (`run_schedule`, `solve_jobshop` — including nested
+  job, operation, and `ga_config` objects) now **reject unknown keys** with an
+  explicit `unknown field` error instead of silently ignoring them
+  (`serde(deny_unknown_fields)`). Remove any extra keys when upgrading.
+
+### Changed
+
+- Dependency: `u-metaheur` `^0.2` → `^0.3`.
+
+### Fixed
+
+- Latent test defect (wasm feature only): minimal jobshop GA test used
+  population 4 with the default elite ratio, flooring to 0 elites, which
+  `GaConfig::validate` rejects.
+
 ## [0.2.3] - 2026-06-10
 
 ### Changed

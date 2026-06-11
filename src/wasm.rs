@@ -55,7 +55,12 @@ fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Resul
              pass the value directly, not JSON.stringify(...)"
         )));
     }
-    serde_wasm_bindgen::from_value(value).map_err(|e| JsValue::from_str(&format!("{param}: {e}")))
+    // serde-wasm-bindgen reads only a struct's declared fields from a JS
+    // object, so `deny_unknown_fields` never sees extra keys. Round-trip
+    // through serde_json::Value so the strict wire schema is enforced.
+    let json: serde_json::Value = serde_wasm_bindgen::from_value(value)
+        .map_err(|e| JsValue::from_str(&format!("{param}: {e}")))?;
+    serde_json::from_value(json).map_err(|e| JsValue::from_str(&format!("{param}: {e}")))
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -65,6 +70,7 @@ fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Resul
 // ── input schema ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InputJob {
     id: String,
     processing_time: f64,
@@ -93,6 +99,7 @@ fn default_atc_k() -> f64 {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ScheduleConfig {
     #[serde(default = "default_rule")]
     rule: String,
@@ -105,6 +112,7 @@ struct ScheduleConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScheduleInput {
     jobs: Vec<InputJob>,
     #[serde(default)]
@@ -382,6 +390,7 @@ pub fn run_schedule(jobs: JsValue) -> Result<JsValue, JsValue> {
 // ── input schema ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobShopOperation {
     /// Machine ID (e.g., "M1", "M2"). If multiple candidates, use an array.
     #[serde(default)]
@@ -407,6 +416,7 @@ impl JobShopOperation {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobShopJob {
     id: String,
     operations: Vec<JobShopOperation>,
@@ -441,6 +451,7 @@ fn default_mutation_type() -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobShopGaConfig {
     #[serde(default = "default_population_size")]
     population_size: usize,
@@ -473,6 +484,7 @@ impl Default for JobShopGaConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobShopInput {
     jobs: Vec<JobShopJob>,
     /// Number of machines. If omitted, inferred from operation machine IDs.
@@ -1339,6 +1351,9 @@ mod tests {
         let config = GaConfig::default()
             .with_population_size(4)
             .with_max_generations(5)
+            // population 4 × default elite_ratio 0.1 floors to 0 elites, which
+            // GaConfig::validate rejects; 0.25 keeps exactly 1 elite.
+            .with_elite_ratio(0.25)
             .with_seed(1)
             .with_parallel(false);
 
@@ -1348,5 +1363,59 @@ mod tests {
 
         assert_eq!(schedule.assignments.len(), 1);
         assert!(schedule.makespan_ms() > 0);
+    }
+}
+
+// ── Wire-schema strictness tests ─────────────────────────────────────
+
+#[cfg(test)]
+mod dto_strictness_tests {
+    use serde_json::json;
+
+    fn assert_rejects_unknown<T: serde::de::DeserializeOwned>(v: serde_json::Value) {
+        match serde_json::from_value::<T>(v) {
+            Ok(_) => panic!("unknown key must be rejected"),
+            Err(e) => assert!(e.to_string().contains("unknown field"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn schedule_input_rejects_unknown_keys() {
+        assert_rejects_unknown::<super::ScheduleInput>(json!({
+            "jobs": [{ "id": "j1", "processing_time": 1.0 }],
+            "rule": "spt"
+        }));
+    }
+
+    #[test]
+    fn schedule_nested_job_and_config_reject_unknown_keys() {
+        assert_rejects_unknown::<super::ScheduleInput>(json!({
+            "jobs": [{ "id": "j1", "processing_time": 1.0, "priority": 2 }]
+        }));
+        assert_rejects_unknown::<super::ScheduleInput>(json!({
+            "jobs": [{ "id": "j1", "processing_time": 1.0 }],
+            "config": { "rule": "spt", "machines": 2 }
+        }));
+    }
+
+    #[test]
+    fn jobshop_input_rejects_unknown_keys() {
+        assert_rejects_unknown::<super::JobShopInput>(json!({
+            "jobs": [{ "id": "j1", "operations": [{ "machine": "M1", "processing_time": 1.0 }] }],
+            "time_limit": 5
+        }));
+    }
+
+    #[test]
+    fn jobshop_nested_structs_reject_unknown_keys() {
+        assert_rejects_unknown::<super::JobShopJob>(json!({
+            "id": "j1", "operations": [], "priority": 1
+        }));
+        assert_rejects_unknown::<super::JobShopOperation>(json!({
+            "machine": "M1", "processing_time": 1.0, "setup_time": 0.5
+        }));
+        assert_rejects_unknown::<super::JobShopGaConfig>(json!({
+            "population_size": 10, "elitism": true
+        }));
     }
 }

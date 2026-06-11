@@ -1,6 +1,6 @@
 [package]
 name = "u-schedule"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 authors = ["iyulab"]
 license = "MIT"
@@ -14,15 +14,16 @@ categories = ["algorithms"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_json"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-u-metaheur = { version = "0.2", path = "../../algorithms/u-metaheur" }
+u-metaheur = { version = "0.3", path = "../../algorithms/u-metaheur" }
 u-numflow = { version = "0.2", path = "../../foundation/u-numflow" }
 rand = "0.9"
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
