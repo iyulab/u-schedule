@@ -21,12 +21,33 @@
 //! It depends on `u-metaheur` and `u-numflow` but contains only scheduling
 //! domain logic — no nesting, packing, or manufacturing concepts.
 //!
+//! # Solver enforcement matrix (0.4.0)
+//!
+//! Model expressiveness and solver enforcement are distinct. What each
+//! execution path actually enforces:
+//!
+//! | Feature | `SimpleScheduler` | GA decode | CP builder |
+//! |---|---|---|---|
+//! | Multi-requirement simultaneous hold | ✅ | ❌ (single resource per activity) | ❌ (first candidate) |
+//! | Resource calendar | ✅ | ❌ | ❌ |
+//! | Capacity > 1 | ✅ | ❌ | ❌ |
+//! | Setup/teardown duration components | ✅ | ❌ | ❌ |
+//! | `TransitionMatrix` sequence-dependent setup | ✅ | ✅ | ❌ |
+//! | `Constraint::{TimeWindow, Synchronize}` | validated only | validated only | ❌ (skipped) |
+//! | `Constraint::TransitionCost` | ❌ (unsupported) | ❌ | ❌ |
+//!
+//! Every [`scheduler::SimpleScheduler`] result self-annotates via
+//! [`scheduler::check_schedule`], so `Schedule::is_valid()` is
+//! meaningful on that path. Run the checker manually on GA/CP output to
+//! obtain honest violation reports.
+//!
 //! # References
 //!
 //! - Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems"
 //! - Brucker (2007), "Scheduling Algorithms"
 //! - Blazewicz et al. (2019), "Handbook on Scheduling"
 //! - Haupt (1989), "A Survey of Priority Rule-Based Scheduling"
+//! - Kolisch & Hartmann (1999), "Heuristic algorithms for the RCPSP" (serial SGS)
 
 pub mod cp;
 pub mod dispatching;

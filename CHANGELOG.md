@@ -8,6 +8,60 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-18
+
+Closes the model-solver enforcement gap surfaced by a consumer-side
+runtime probe: models expressed multi-resource requirements, calendars,
+capacities, and duration components, but no solver enforced them and
+`Schedule::is_valid()` was vacuously true.
+
+### Added
+
+- `scheduler::ResourceTimeline` — capacity- and calendar-aware booking
+  ledger (`earliest_fit`/`fits`/`book`), verified against brute-force by
+  property tests.
+- `scheduler::{check_schedule, annotate_schedule, FeasibilityInput}` —
+  post-hoc feasibility validation filling `Schedule::violations`
+  (requirement coverage, simultaneity, skills, capacity incl.
+  `Constraint::Capacity` tightening, calendars, precedence, deadlines,
+  `TimeWindow`/`NoOverlap`/`Synchronize`).
+- `Calendar::interval_fits` — whole-interval working-time check
+  (single-window containment semantics).
+- `ViolationType::{RequirementUnfilled, TimeWindowViolation,
+  SynchronizeViolation}` + `Violation` constructors.
+- `Schedule::assignments_for_activity_all` — full assignment set of a
+  multi-resource activity.
+- `ScheduleRequest::constraints` + `with_constraints` — validated
+  post-hoc on `schedule_request` output.
+- `TransitionMatrixCollection::has_matrix`.
+- Integration + property test suite `tests/enforcement.rs`
+  (proptest dev-dependency).
+
+### Changed
+
+- **`SimpleScheduler` now enforces the model** (serial SGS fixed-point,
+  Kolisch & Hartmann 1999): an activity books **all** its resource
+  requirements (`quantity` units each) for one simultaneous interval;
+  calendars and capacities are honored; the occupied span is
+  `max(setup) + process + teardown` where setup comes from a resource's
+  transition matrix when defined, else `ActivityDuration::setup_ms`.
+  Consequences: multi-requirement activities now yield one `Assignment`
+  per held resource (`assignment_for_activity` returns the first);
+  schedules may differ from 0.3.x where declared constraints were being
+  silently ignored. Unfillable requirements leave the activity
+  unassigned and are reported as `RequirementUnfilled` instead of being
+  silently dropped.
+- `SimpleScheduler` output self-annotates via the feasibility checker —
+  `Schedule::is_valid()` is now meaningful on this path.
+
+### Unchanged
+
+- GA decode and CP builder enforcement (single-resource, no calendar) —
+  see the solver enforcement matrix in the crate docs; run
+  `check_schedule` on their output for honest violation reports.
+- WASM surface (`run_schedule`, `solve_jobshop`) — separate dispatching
+  DTOs, no schema change.
+
 ## [0.3.2] - 2026-07-05
 
 ### Fixed
