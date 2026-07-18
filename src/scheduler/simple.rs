@@ -281,10 +281,9 @@ impl SimpleScheduler {
             let mut t_next = t;
             for (rid, _) in &selections {
                 let tl = timelines.get(rid).expect("selected resource has timeline");
-                match tl.earliest_fit(t, d) {
-                    Some(fit) => t_next = t_next.max(fit),
-                    None => return None, // 캘린더가 D를 영원히 못 담음
-                }
+                // None: 캘린더가 D를 영원히 못 담음
+                let fit = tl.earliest_fit(t, d)?;
+                t_next = t_next.max(fit);
             }
             if t_next == t {
                 return Some(Placement {
