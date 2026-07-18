@@ -206,6 +206,11 @@ impl TransitionMatrixCollection {
         self
     }
 
+    /// Whether a matrix is defined for the given resource.
+    pub fn has_matrix(&self, resource_id: &str) -> bool {
+        self.matrices.contains_key(resource_id)
+    }
+
     /// Gets the transition time for a resource between two categories.
     ///
     /// Returns 0 if no matrix exists for the resource.

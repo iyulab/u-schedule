@@ -15,8 +15,15 @@
 
 use std::collections::HashMap;
 
+use super::timeline::ResourceTimeline;
 use crate::dispatching::{RuleEngine, SchedulingContext};
-use crate::models::{Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
+use crate::models::{
+    Activity, Assignment, Resource, ResourceRequirement, Schedule, Task,
+    TransitionMatrixCollection,
+};
+
+/// Safety bound for the serial-SGS fixed-point search.
+const MAX_FIXED_POINT_ITERS: usize = 10_000;
 
 /// Input container for scheduling.
 #[derive(Debug, Clone)]
@@ -29,6 +36,10 @@ pub struct ScheduleRequest {
     pub start_time_ms: i64,
     /// Sequence-dependent setup time matrices.
     pub transition_matrices: TransitionMatrixCollection,
+    /// Additional constraints. The greedy scheduler does not yet place
+    /// against these — they are validated post-hoc, so any breach shows
+    /// up honestly in `Schedule::violations`.
+    pub constraints: Vec<crate::models::Constraint>,
 }
 
 impl ScheduleRequest {
@@ -39,6 +50,7 @@ impl ScheduleRequest {
             resources,
             start_time_ms: 0,
             transition_matrices: TransitionMatrixCollection::new(),
+            constraints: Vec::new(),
         }
     }
 
@@ -51,6 +63,12 @@ impl ScheduleRequest {
     /// Sets transition matrices.
     pub fn with_transition_matrices(mut self, matrices: TransitionMatrixCollection) -> Self {
         self.transition_matrices = matrices;
+        self
+    }
+
+    /// Sets additional constraints (validated post-hoc).
+    pub fn with_constraints(mut self, constraints: Vec<crate::models::Constraint>) -> Self {
+        self.constraints = constraints;
         self
     }
 }
@@ -115,91 +133,186 @@ impl SimpleScheduler {
 
     /// Schedules tasks on resources.
     ///
-    /// # Algorithm
+    /// # Algorithm (serial SGS)
     /// 1. Sort tasks by rule engine or priority (descending).
     /// 2. For each task, schedule activities in sequence order.
-    /// 3. For each activity, find the earliest-available candidate resource.
-    /// 4. Apply setup time from transition matrices.
+    /// 3. For each activity, find via fixed-point search the earliest
+    ///    common start where **every** resource requirement can hold
+    ///    `quantity` resources simultaneously — honoring calendars and
+    ///    capacities through [`ResourceTimeline`].
+    /// 4. The occupied span is `max(setup) + process + teardown`, where a
+    ///    resource's setup comes from its transition matrix if one is
+    ///    defined, else from `ActivityDuration::setup_ms`.
+    ///
+    /// Activities whose requirements cannot be met (unknown candidates,
+    /// calendar that can never contain the duration) are left unassigned;
+    /// the self-annotating feasibility check reports them as
+    /// `RequirementUnfilled` rather than silently shrinking the schedule.
+    ///
+    /// # Reference
+    /// Kolisch & Hartmann (1999), serial schedule generation scheme.
     pub fn schedule(&self, tasks: &[Task], resources: &[Resource], start_time_ms: i64) -> Schedule {
         let mut schedule = Schedule::new();
-        let mut resource_available: HashMap<String, i64> = HashMap::new();
+        let mut timelines: HashMap<String, ResourceTimeline> = resources
+            .iter()
+            .map(|r| (r.id.clone(), ResourceTimeline::new(r)))
+            .collect();
         let mut last_category: HashMap<String, String> = HashMap::new();
 
-        // Initialize resource availability
-        for resource in resources {
-            resource_available.insert(resource.id.clone(), start_time_ms);
-        }
-
-        // Determine task order
         let task_order = self.sort_tasks(tasks, start_time_ms);
 
-        // Schedule each task
         for &task_idx in &task_order {
             let task = &tasks[task_idx];
-            let mut task_start = task
+            let mut ready = task
                 .release_time
                 .unwrap_or(start_time_ms)
                 .max(start_time_ms);
 
             for activity in &task.activities {
-                let candidates = activity.candidate_resources();
-                if candidates.is_empty() {
-                    continue;
+                if activity.resource_requirements.is_empty() {
+                    continue; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
                 }
+                let Some(placement) =
+                    self.place_activity(activity, task, &timelines, &last_category, resources, ready)
+                else {
+                    continue; // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
+                };
 
-                // Select resource with earliest availability
-                let mut best_resource: Option<&str> = None;
-                let mut best_start = i64::MAX;
-
-                for candidate in &candidates {
-                    if let Some(&available) = resource_available.get(*candidate) {
-                        let actual_start = available.max(task_start);
-                        if actual_start < best_start {
-                            best_start = actual_start;
-                            best_resource = Some(candidate);
-                        }
+                for (resource_id, setup_ms) in &placement.selections {
+                    let tl = timelines
+                        .get_mut(resource_id)
+                        .expect("selection references known resource");
+                    tl.book(placement.start_ms, placement.end_ms);
+                    schedule.add_assignment(
+                        Assignment::new(
+                            &activity.id,
+                            &task.id,
+                            resource_id,
+                            placement.start_ms,
+                            placement.end_ms,
+                        )
+                        .with_setup(*setup_ms),
+                    );
+                    if self.transition_matrices.has_matrix(resource_id) {
+                        last_category.insert(resource_id.clone(), task.category.clone());
                     }
                 }
-
-                if let Some(resource_id) = best_resource {
-                    // Calculate setup time from transition matrices
-                    let setup_time = if let Some(prev_cat) = last_category.get(resource_id) {
-                        self.transition_matrices.get_transition_time(
-                            resource_id,
-                            prev_cat,
-                            &task.category,
-                        )
-                    } else {
-                        0
-                    };
-
-                    let start = best_start;
-                    let end = start + setup_time + activity.duration.process_ms;
-
-                    let assignment =
-                        Assignment::new(&activity.id, &task.id, resource_id, start, end)
-                            .with_setup(setup_time);
-
-                    schedule.add_assignment(assignment);
-
-                    // Update state
-                    resource_available.insert(resource_id.to_string(), end);
-                    last_category.insert(resource_id.to_string(), task.category.clone());
-                    task_start = end; // Enforce intra-task precedence
-                }
+                ready = placement.end_ms;
             }
         }
 
+        let input = super::feasibility::FeasibilityInput {
+            tasks,
+            resources,
+            constraints: &[],
+        };
+        super::feasibility::annotate_schedule(&mut schedule, &input);
         schedule
     }
 
+    /// Finds the earliest common start for an activity across all its
+    /// resource requirements (serial-SGS fixed point).
+    fn place_activity(
+        &self,
+        activity: &Activity,
+        task: &Task,
+        timelines: &HashMap<String, ResourceTimeline>,
+        last_category: &HashMap<String, String>,
+        resources: &[Resource],
+        ready: i64,
+    ) -> Option<Placement> {
+        let process = activity.duration.process_ms;
+        let teardown = activity.duration.teardown_ms;
+        let setup_for = |resource_id: &str| -> i64 {
+            if self.transition_matrices.has_matrix(resource_id) {
+                match last_category.get(resource_id) {
+                    Some(prev) => self.transition_matrices.get_transition_time(
+                        resource_id,
+                        prev,
+                        &task.category,
+                    ),
+                    None => 0, // 첫 작업엔 changeover 없음 (기존 의미 유지)
+                }
+            } else {
+                activity.duration.setup_ms
+            }
+        };
+
+        // Phase 1: 고정점 — 모든 requirement가 t에서 시작 가능한 최소 t
+        let mut t = ready;
+        let mut selections: Vec<(String, i64)> = Vec::new();
+        for _ in 0..MAX_FIXED_POINT_ITERS {
+            selections.clear();
+            let mut t_next = t;
+            for req in &activity.resource_requirements {
+                let mut fits: Vec<(i64, &str, i64)> = resolve_candidates(req, resources)
+                    .into_iter()
+                    .filter_map(|rid| {
+                        let setup = setup_for(rid);
+                        timelines
+                            .get(rid)?
+                            .earliest_fit(t, setup + process + teardown)
+                            .map(|fit| (fit, rid, setup))
+                    })
+                    .collect();
+                fits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+                if (fits.len() as i32) < req.quantity {
+                    return None; // 후보 부족 — 영원히 충족 불가
+                }
+                for &(fit, rid, setup) in fits.iter().take(req.quantity as usize) {
+                    t_next = t_next.max(fit);
+                    selections.push((rid.to_string(), setup));
+                }
+            }
+            if t_next == t {
+                break;
+            }
+            t = t_next;
+        }
+
+        // Phase 2: 공통 duration D(최대 setup 기준)로 전 자원 동시 fit 재검증
+        let max_setup = selections.iter().map(|&(_, s)| s).max().unwrap_or(0);
+        let d = max_setup + process + teardown;
+        for _ in 0..MAX_FIXED_POINT_ITERS {
+            let mut t_next = t;
+            for (rid, _) in &selections {
+                let tl = timelines.get(rid).expect("selected resource has timeline");
+                match tl.earliest_fit(t, d) {
+                    Some(fit) => t_next = t_next.max(fit),
+                    None => return None, // 캘린더가 D를 영원히 못 담음
+                }
+            }
+            if t_next == t {
+                return Some(Placement {
+                    start_ms: t,
+                    end_ms: t + d,
+                    selections,
+                });
+            }
+            t = t_next;
+        }
+        None // 고정점 미수렴 (방어적 상한 — property test가 실질 커버)
+    }
+
     /// Schedules from a request.
+    ///
+    /// Re-annotates with the request's constraints so `TimeWindow`,
+    /// `Synchronize`, `NoOverlap`, tightened `Capacity`, and cross-task
+    /// `Precedence` breaches are reported in `Schedule::violations`.
     pub fn schedule_request(&self, request: &ScheduleRequest) -> Schedule {
         let scheduler = Self {
             transition_matrices: request.transition_matrices.clone(),
             rule_engine: self.rule_engine.clone(),
         };
-        scheduler.schedule(&request.tasks, &request.resources, request.start_time_ms)
+        let mut schedule =
+            scheduler.schedule(&request.tasks, &request.resources, request.start_time_ms);
+        let input = super::feasibility::FeasibilityInput {
+            tasks: &request.tasks,
+            resources: &request.resources,
+            constraints: &request.constraints,
+        };
+        super::feasibility::annotate_schedule(&mut schedule, &input);
+        schedule
     }
 
     /// Returns task indices sorted by rule engine or priority.
@@ -219,6 +332,32 @@ impl SimpleScheduler {
 impl Default for SimpleScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A resolved activity placement: common interval plus per-resource setup.
+struct Placement {
+    start_ms: i64,
+    end_ms: i64,
+    selections: Vec<(String, i64)>, // (resource_id, setup_ms)
+}
+
+/// Candidate resources for a requirement: explicit candidates (skill-filtered)
+/// if any, otherwise every skill-satisfying resource.
+fn resolve_candidates<'a>(req: &'a ResourceRequirement, resources: &'a [Resource]) -> Vec<&'a str> {
+    let skill_ok = |r: &Resource| req.required_skills.iter().all(|s| r.has_skill(s));
+    if req.candidates.is_empty() {
+        resources
+            .iter()
+            .filter(|r| skill_ok(r))
+            .map(|r| r.id.as_str())
+            .collect()
+    } else {
+        req.candidates
+            .iter()
+            .filter(|id| resources.iter().any(|r| &r.id == *id && skill_ok(r)))
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -251,6 +390,104 @@ mod tests {
                             .with_candidates(vec![resource_id.into()]),
                     ),
             )
+    }
+
+    #[test]
+    fn test_multi_resource_simultaneous_hold() {
+        // probe S1: 설비+금형 — 금형(TOOL1) 공유로 두 작업 직렬화
+        let mk = |tid: &str, machine: &str| {
+            Task::new(tid)
+                .with_priority(1)
+                .with_category("default")
+                .with_activity(
+                    Activity::new(format!("{tid}_O1"), tid, 0)
+                        .with_duration(ActivityDuration::fixed(1000))
+                        .with_requirement(
+                            ResourceRequirement::new("Machine")
+                                .with_candidates(vec![machine.into()]),
+                        )
+                        .with_requirement(
+                            ResourceRequirement::new("Mold")
+                                .with_candidates(vec!["TOOL1".into()]),
+                        ),
+                )
+        };
+        let tasks = vec![mk("J1", "M1"), mk("J2", "M2")];
+        let resources = vec![
+            Resource::new("M1", ResourceType::Primary),
+            Resource::new("M2", ResourceType::Primary),
+            Resource::new("TOOL1", ResourceType::Secondary),
+        ];
+        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+
+        // 각 activity가 설비+금형 2개 배정
+        assert_eq!(s.assignments_for_task("J1").len(), 2);
+        assert_eq!(s.assignments_for_task("J2").len(), 2);
+        // 금형 위에서 직렬화 (겹침 없음)
+        let tool = s.assignments_for_resource("TOOL1");
+        assert_eq!(tool.len(), 2);
+        let (a, b) = (tool[0], tool[1]);
+        assert!(
+            a.end_ms <= b.start_ms || b.end_ms <= a.start_ms,
+            "TOOL1 double-booked: {a:?} vs {b:?}"
+        );
+        // 동시 점유: 같은 activity의 두 배정 구간 동일
+        let j1 = s.assignments_for_task("J1");
+        assert_eq!(j1[0].start_ms, j1[1].start_ms);
+        assert_eq!(j1[0].end_ms, j1[1].end_ms);
+    }
+
+    #[test]
+    fn test_calendar_enforced() {
+        // probe S3: 가용창 [0,5000)∪[10000,20000), 3000ms 작업 2건 → 둘째는 10000 시작
+        let cal = crate::models::Calendar::new("shift")
+            .with_window(0, 5000)
+            .with_window(10_000, 20_000);
+        let tasks = vec![
+            make_task_with_resource("J1", 3000, "M1", 10),
+            make_task_with_resource("J2", 3000, "M1", 5),
+        ];
+        let resources = vec![Resource::new("M1", ResourceType::Primary).with_calendar(cal)];
+        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        let j2 = s.assignment_for_activity("J2_O1").unwrap();
+        assert_eq!(j2.start_ms, 10_000);
+        assert_eq!(j2.end_ms, 13_000);
+    }
+
+    #[test]
+    fn test_capacity_two_parallel() {
+        // probe S4: capacity=2 → 두 작업 병렬
+        let tasks = vec![
+            make_task_with_resource("J1", 1000, "M1", 10),
+            make_task_with_resource("J2", 1000, "M1", 5),
+        ];
+        let resources = vec![Resource::new("M1", ResourceType::Primary).with_capacity(2)];
+        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        assert_eq!(s.assignment_for_activity("J1_O1").unwrap().start_ms, 0);
+        assert_eq!(s.assignment_for_activity("J2_O1").unwrap().start_ms, 0);
+    }
+
+    #[test]
+    fn test_duration_components_enforced() {
+        // probe S5: (500,1000,300) → 점유 1800ms, setup 기록 500
+        let task = Task::new("J1")
+            .with_priority(1)
+            .with_category("default")
+            .with_activity(
+                Activity::new("J1_O1", "J1", 0)
+                    .with_duration(ActivityDuration::new(500, 1000, 300))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                    ),
+            );
+        let s = SimpleScheduler::new().schedule(
+            &[task],
+            &[Resource::new("M1", ResourceType::Primary)],
+            0,
+        );
+        let a = s.assignment_for_activity("J1_O1").unwrap();
+        assert_eq!(a.end_ms - a.start_ms, 1800);
+        assert_eq!(a.setup_ms, 500);
     }
 
     #[test]

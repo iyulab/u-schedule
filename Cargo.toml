@@ -29,4 +29,5 @@ serde_json = { version = "1.0", optional = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
+proptest = "1.4"
 serde_json = "1.0"
