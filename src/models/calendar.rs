@@ -111,6 +111,25 @@ impl Calendar {
         self.time_windows.iter().any(|w| w.contains(time_ms))
     }
 
+    /// Whether the whole interval [start_ms, end_ms) is working time.
+    ///
+    /// The interval must fit inside a single availability window (no
+    /// cross-window spans — window boundaries are treated as hard breaks)
+    /// and must not overlap any blocked period. With no windows defined,
+    /// only blocked periods constrain the interval.
+    pub fn interval_fits(&self, start_ms: i64, end_ms: i64) -> bool {
+        let in_window = self.time_windows.is_empty()
+            || self
+                .time_windows
+                .iter()
+                .any(|w| start_ms >= w.start_ms && end_ms <= w.end_ms);
+        let hits_blocked = self
+            .blocked_periods
+            .iter()
+            .any(|b| start_ms < b.end_ms && b.start_ms < end_ms);
+        in_window && !hits_blocked
+    }
+
     /// Finds the next available time at or after `from_ms`.
     ///
     /// Returns `from_ms` if already available, or the start of the
@@ -232,6 +251,21 @@ mod tests {
 
         let c = TimeWindow::new(100, 200); // touching but not overlapping
         assert!(!a.overlaps(&c));
+    }
+
+    #[test]
+    fn test_interval_fits() {
+        let cal = Calendar::new("shift").with_window(0, 5000).with_window(10_000, 20_000);
+        assert!(cal.interval_fits(0, 3000));
+        assert!(cal.interval_fits(2000, 5000)); // 창 끝에 딱 맞음
+        assert!(!cal.interval_fits(3000, 6000)); // 창 밖으로 삐져나감
+        assert!(!cal.interval_fits(4000, 11_000)); // 두 창에 걸침 — 비분할 의미론
+        assert!(cal.interval_fits(10_000, 13_000));
+
+        let blocked = Calendar::new("mnt").with_blocked(5000, 6000); // 창 없음 = 상시 가용
+        assert!(blocked.interval_fits(0, 5000));
+        assert!(!blocked.interval_fits(4000, 5500));
+        assert!(blocked.interval_fits(6000, 9000));
     }
 
     #[test]
