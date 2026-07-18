@@ -67,6 +67,12 @@ pub enum ViolationType {
     ResourceUnavailable,
     /// Resource lacks a required skill.
     SkillMismatch,
+    /// An activity's resource requirement has no or insufficient assignments.
+    RequirementUnfilled,
+    /// Activity scheduled outside its required time window.
+    TimeWindowViolation,
+    /// Synchronized activities do not share the same start time.
+    SynchronizeViolation,
     /// Domain-specific violation.
     Custom(String),
 }
@@ -142,6 +148,62 @@ impl Violation {
             severity: 95,
         }
     }
+
+    /// Creates an unfilled-requirement violation.
+    pub fn requirement_unfilled(
+        activity_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            violation_type: ViolationType::RequirementUnfilled,
+            entity_id: activity_id.into(),
+            message: message.into(),
+            severity: 95,
+        }
+    }
+
+    /// Creates a resource-unavailable (outside calendar) violation.
+    pub fn resource_unavailable(
+        resource_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            violation_type: ViolationType::ResourceUnavailable,
+            entity_id: resource_id.into(),
+            message: message.into(),
+            severity: 85,
+        }
+    }
+
+    /// Creates a skill-mismatch violation.
+    pub fn skill_mismatch(resource_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::SkillMismatch,
+            entity_id: resource_id.into(),
+            message: message.into(),
+            severity: 70,
+        }
+    }
+
+    /// Creates a time-window violation.
+    pub fn time_window(activity_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::TimeWindowViolation,
+            entity_id: activity_id.into(),
+            message: message.into(),
+            severity: 75,
+        }
+    }
+
+    /// Creates a synchronization violation.
+    pub fn synchronize(entity_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::SynchronizeViolation,
+            entity_id: entity_id.into(),
+            message: message.into(),
+            severity: 75,
+        }
+    }
 }
 
 impl Schedule {
@@ -170,11 +232,24 @@ impl Schedule {
         self.assignments.iter().map(|a| a.end_ms).max().unwrap_or(0)
     }
 
-    /// Finds the assignment for a given activity.
+    /// Finds the first assignment for a given activity.
+    ///
+    /// A multi-resource activity has one assignment per held resource;
+    /// this returns the first in insertion order. Use
+    /// [`assignments_for_activity_all`](Self::assignments_for_activity_all)
+    /// for the full set.
     pub fn assignment_for_activity(&self, activity_id: &str) -> Option<&Assignment> {
         self.assignments
             .iter()
             .find(|a| a.activity_id == activity_id)
+    }
+
+    /// Returns all assignments for a given activity (one per held resource).
+    pub fn assignments_for_activity_all(&self, activity_id: &str) -> Vec<&Assignment> {
+        self.assignments
+            .iter()
+            .filter(|a| a.activity_id == activity_id)
+            .collect()
     }
 
     /// Returns all assignments for a given task.
@@ -252,6 +327,29 @@ mod tests {
         s.add_assignment(Assignment::new("O2", "J1", "M2", 1000, 4000));
         s.add_assignment(Assignment::new("O3", "J2", "M1", 5000, 8000));
         s
+    }
+
+    #[test]
+    fn test_new_violation_ctors() {
+        let v = Violation::requirement_unfilled("O1", "Mold requirement unfilled");
+        assert_eq!(v.violation_type, ViolationType::RequirementUnfilled);
+        let v = Violation::resource_unavailable("M1", "outside calendar");
+        assert_eq!(v.violation_type, ViolationType::ResourceUnavailable);
+        let v = Violation::skill_mismatch("M1", "missing welding");
+        assert_eq!(v.violation_type, ViolationType::SkillMismatch);
+        let v = Violation::time_window("O1", "outside [5000,8000)");
+        assert_eq!(v.violation_type, ViolationType::TimeWindowViolation);
+        let v = Violation::synchronize("O1", "start differs");
+        assert_eq!(v.violation_type, ViolationType::SynchronizeViolation);
+    }
+
+    #[test]
+    fn test_assignments_for_activity_all() {
+        let mut s = sample_schedule();
+        s.add_assignment(Assignment::new("O1", "J1", "T1", 0, 5000));
+        assert_eq!(s.assignments_for_activity_all("O1").len(), 2);
+        assert_eq!(s.assignments_for_activity_all("O2").len(), 1);
+        assert!(s.assignments_for_activity_all("O99").is_empty());
     }
 
     #[test]
