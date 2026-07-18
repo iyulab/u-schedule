@@ -71,13 +71,15 @@ fn check_requirements(
                 {
                     out.push(Violation::requirement_unfilled(
                         &activity.id,
-                        format!("activity '{}' assignments are not simultaneous", activity.id),
+                        format!(
+                            "activity '{}' assignments are not simultaneous",
+                            activity.id
+                        ),
                     ));
                 }
             }
             // greedy 귀속: 요구별로 미귀속 자원 claim
-            let mut unclaimed: Vec<&str> =
-                assigns.iter().map(|a| a.resource_id.as_str()).collect();
+            let mut unclaimed: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
             for req in &activity.resource_requirements {
                 let candidates = candidate_id_set(req, input.resources);
                 let mut claimed = 0;
@@ -172,7 +174,9 @@ fn check_capacity(
         if max_concurrent > cap {
             out.push(Violation::capacity_exceeded(
                 rid,
-                format!("resource '{rid}' peak concurrency {max_concurrent} exceeds capacity {cap}"),
+                format!(
+                    "resource '{rid}' peak concurrency {max_concurrent} exceeds capacity {cap}"
+                ),
             ));
         }
     }
@@ -214,9 +218,10 @@ fn activity_span(schedule: &Schedule, activity_id: &str) -> Option<(i64, i64)> {
 
 fn check_precedence(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
     let mut push = |before: &str, after: &str, delay: i64| {
-        if let (Some((_, before_end)), Some((after_start, _))) =
-            (activity_span(schedule, before), activity_span(schedule, after))
-        {
+        if let (Some((_, before_end)), Some((after_start, _))) = (
+            activity_span(schedule, before),
+            activity_span(schedule, after),
+        ) {
             if after_start < before_end + delay {
                 out.push(Violation::precedence_violation(
                     after,
@@ -309,9 +314,7 @@ fn check_constraints(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
                         if sa < eb && sb < ea {
                             out.push(Violation::capacity_exceeded(
                                 resource_id,
-                                format!(
-                                    "no-overlap: '{ia}' and '{ib}' overlap on '{resource_id}'"
-                                ),
+                                format!("no-overlap: '{ia}' and '{ib}' overlap on '{resource_id}'"),
                             ));
                         }
                     }

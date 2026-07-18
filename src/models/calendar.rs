@@ -255,7 +255,9 @@ mod tests {
 
     #[test]
     fn test_interval_fits() {
-        let cal = Calendar::new("shift").with_window(0, 5000).with_window(10_000, 20_000);
+        let cal = Calendar::new("shift")
+            .with_window(0, 5000)
+            .with_window(10_000, 20_000);
         assert!(cal.interval_fits(0, 3000));
         assert!(cal.interval_fits(2000, 5000)); // 창 끝에 딱 맞음
         assert!(!cal.interval_fits(3000, 6000)); // 창 밖으로 삐져나감

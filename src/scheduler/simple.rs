@@ -18,8 +18,7 @@ use std::collections::HashMap;
 use super::timeline::ResourceTimeline;
 use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::models::{
-    Activity, Assignment, Resource, ResourceRequirement, Schedule, Task,
-    TransitionMatrixCollection,
+    Activity, Assignment, Resource, ResourceRequirement, Schedule, Task, TransitionMatrixCollection,
 };
 
 /// Safety bound for the serial-SGS fixed-point search.
@@ -172,9 +171,14 @@ impl SimpleScheduler {
                 if activity.resource_requirements.is_empty() {
                     continue; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
                 }
-                let Some(placement) =
-                    self.place_activity(activity, task, &timelines, &last_category, resources, ready)
-                else {
+                let Some(placement) = self.place_activity(
+                    activity,
+                    task,
+                    &timelines,
+                    &last_category,
+                    resources,
+                    ready,
+                ) else {
                     continue; // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
                 };
 
@@ -407,8 +411,7 @@ mod tests {
                                 .with_candidates(vec![machine.into()]),
                         )
                         .with_requirement(
-                            ResourceRequirement::new("Mold")
-                                .with_candidates(vec!["TOOL1".into()]),
+                            ResourceRequirement::new("Mold").with_candidates(vec!["TOOL1".into()]),
                         ),
                 )
         };
