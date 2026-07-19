@@ -137,12 +137,19 @@ fn conflicting_fixed_assignment_reports_violation_not_silent_move() {
 fn multi_resource_pin_seeds_all_holds() {
     // 다중 requirement(Machine+Mold) activity를 두 자원 모두 pin.
     // 기대: 두 배정 모두 그대로 emit + 두 요구 모두 충족 → is_valid.
-    let task = Task::new("J1").with_priority(1).with_category("default").with_activity(
-        Activity::new("J1_O1", "J1", 0)
-            .with_duration(ActivityDuration::fixed(1000))
-            .with_requirement(ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]))
-            .with_requirement(ResourceRequirement::new("Mold").with_candidates(vec!["T1".into()])),
-    );
+    let task = Task::new("J1")
+        .with_priority(1)
+        .with_category("default")
+        .with_activity(
+            Activity::new("J1_O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                )
+                .with_requirement(
+                    ResourceRequirement::new("Mold").with_candidates(vec!["T1".into()]),
+                ),
+        );
     let resources = vec![Resource::primary("M1"), Resource::secondary("T1")];
     let pins = vec![
         Assignment::new("J1_O1", "J1", "M1", 2000, 3000),
@@ -152,9 +159,17 @@ fn multi_resource_pin_seeds_all_holds() {
         .with_fixed_assignments(pins)
         .schedule(&[task], &resources, 0);
     let holds = s.assignments_for_activity_all("J1_O1");
-    assert_eq!(holds.len(), 2, "both resource holds must be seeded: {holds:?}");
+    assert_eq!(
+        holds.len(),
+        2,
+        "both resource holds must be seeded: {holds:?}"
+    );
     assert!(holds.iter().all(|a| (a.start_ms, a.end_ms) == (2000, 3000)));
-    assert!(s.is_valid(), "fully-pinned multi-resource flagged: {:?}", s.violations);
+    assert!(
+        s.is_valid(),
+        "fully-pinned multi-resource flagged: {:?}",
+        s.violations
+    );
 }
 
 #[test]
@@ -184,7 +199,10 @@ fn pinned_activity_pushes_successor_after_pin_end() {
         .with_fixed_assignments(vec![pin])
         .schedule(&[task], &resources, 0);
     let o2 = s.assignment_for_activity("J1_O2").unwrap();
-    assert!(o2.start_ms >= 3000, "successor started before pin end: {o2:?}");
+    assert!(
+        o2.start_ms >= 3000,
+        "successor started before pin end: {o2:?}"
+    );
     assert!(s.is_valid(), "flagged: {:?}", s.violations);
 }
 
