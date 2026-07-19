@@ -6,7 +6,9 @@
 
 use proptest::prelude::*;
 use u_schedule::models::*;
-use u_schedule::scheduler::{check_schedule, FeasibilityInput, ResourceTimeline, SimpleScheduler};
+use u_schedule::scheduler::{
+    check_schedule, FeasibilityInput, ResourceTimeline, ScheduleRequest, SimpleScheduler,
+};
 
 #[test]
 fn scheduler_output_is_feasible_end_to_end() {
@@ -153,6 +155,51 @@ fn multi_resource_pin_seeds_all_holds() {
     assert_eq!(holds.len(), 2, "both resource holds must be seeded: {holds:?}");
     assert!(holds.iter().all(|a| (a.start_ms, a.end_ms) == (2000, 3000)));
     assert!(s.is_valid(), "fully-pinned multi-resource flagged: {:?}", s.violations);
+}
+
+#[test]
+fn pinned_activity_pushes_successor_after_pin_end() {
+    // 같은 task J1: O1 을 [2000,3000)에 pin, O2(sequence 1)는 normal — 같은 M1.
+    // 기대(③): O2 는 pin end(3000) 이후 시작하고 스케줄은 valid.
+    let task = Task::new("J1")
+        .with_priority(1)
+        .with_category("default")
+        .with_activity(
+            Activity::new("J1_O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        )
+        .with_activity(
+            Activity::new("J1_O2", "J1", 1)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        );
+    let resources = vec![Resource::primary("M1")];
+    let pin = Assignment::new("J1_O1", "J1", "M1", 2000, 3000);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![pin])
+        .schedule(&[task], &resources, 0);
+    let o2 = s.assignment_for_activity("J1_O2").unwrap();
+    assert!(o2.start_ms >= 3000, "successor started before pin end: {o2:?}");
+    assert!(s.is_valid(), "flagged: {:?}", s.violations);
+}
+
+#[test]
+fn schedule_request_honors_fixed_assignments() {
+    // schedule_request 진입점도 seed 를 존중해야 함 (Self 재구성 시 fixed 전파).
+    let (tasks, resources) = two_job_single_machine();
+    let pin = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
+    let request = ScheduleRequest::new(tasks, resources);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![pin])
+        .schedule_request(&request);
+    let j2 = s.assignment_for_activity("J2_O1").unwrap();
+    assert_eq!((j2.start_ms, j2.end_ms), (2000, 3000));
+    assert!(s.is_valid(), "flagged: {:?}", s.violations);
 }
 
 #[test]
