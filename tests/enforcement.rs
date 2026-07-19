@@ -189,6 +189,103 @@ fn pinned_activity_pushes_successor_after_pin_end() {
 }
 
 #[test]
+fn pinned_successor_precedes_conflicting_unpinned_predecessor_reports_violation() {
+    // 같은 task J1: O1(선행, unpinned, seq 0)·O2(후행, seq 1, [500,1500) pin) — 같은 M1(cap 1).
+    // 기대: pin의 선점 예약이 O1을 pin 이후([1500,2500))로 밀어내고, annotate_schedule 후
+    // O1(뒤로 밀림)이 O2(pin, 앞자리) 보다 늦게 끝나므로 PrecedenceViolation이 정직 보고되며,
+    // pin 자체는 무단 이동 없이 정확히 [500,1500) 를 유지한다(회귀 가드 — Important #1).
+    let task = Task::new("J1")
+        .with_priority(1)
+        .with_category("default")
+        .with_activity(
+            Activity::new("J1_O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        )
+        .with_activity(
+            Activity::new("J1_O2", "J1", 1)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        );
+    let resources = vec![Resource::primary("M1")];
+    let pin = Assignment::new("J1_O2", "J1", "M1", 500, 1500);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![pin])
+        .schedule(&[task], &resources, 0);
+
+    // ① 선점 예약: O1(선행)이 pin 구간 [500,1500)을 회피해 [1500,2500)으로 밀림.
+    let o1 = s.assignment_for_activity("J1_O1").unwrap();
+    assert_eq!(
+        (o1.start_ms, o1.end_ms),
+        (1500, 2500),
+        "unpinned predecessor should be pushed past the pinned successor's reservation: {o1:?}"
+    );
+
+    // ④ 무단 이동 금지: pin(O2)은 정확히 명시 구간에 그대로.
+    let o2 = s.assignment_for_activity("J1_O2").unwrap();
+    assert_eq!(
+        (o2.start_ms, o2.end_ms),
+        (500, 1500),
+        "pin must remain unmoved even though it now conflicts with precedence"
+    );
+
+    // ④ 정직 보고: O1이 O2보다 늦게 끝나므로 선후행 위반이 침묵 없이 발화한다.
+    assert!(
+        s.violations
+            .iter()
+            .any(|v| v.violation_type == ViolationType::PrecedenceViolation),
+        "expected PrecedenceViolation for predecessor-after-pin ordering: {:?}",
+        s.violations
+    );
+    assert!(!s.is_valid());
+}
+
+#[test]
+fn pinned_activity_coexists_with_sgs_activity_under_capacity_two() {
+    // M1 capacity=2. J1_O1을 [0,1000)에 pin, J2_O1(unpinned, 1000ms)은 같은 M1 사용.
+    // 기대: pin이 1 유닛만 소비하므로 J2는 같은 [0,1000) 구간에 병렬 배정된다
+    // (capacity=1 이었다면 J2는 pin 이후로 밀렸을 것) — 공존 가드 (Minor #2).
+    let mk = |tid: &str| {
+        Task::new(tid)
+            .with_priority(1)
+            .with_category("default")
+            .with_activity(
+                Activity::new(format!("{tid}_O1"), tid, 0)
+                    .with_duration(ActivityDuration::fixed(1000))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                    ),
+            )
+    };
+    let tasks = vec![mk("J1"), mk("J2")];
+    let resources = vec![Resource::primary("M1").with_capacity(2)];
+    let pin = Assignment::new("J1_O1", "J1", "M1", 0, 1000);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![pin])
+        .schedule(&tasks, &resources, 0);
+
+    let j1 = s.assignment_for_activity("J1_O1").unwrap();
+    assert_eq!((j1.start_ms, j1.end_ms), (0, 1000));
+
+    let j2 = s.assignment_for_activity("J2_O1").unwrap();
+    assert_eq!(
+        (j2.start_ms, j2.end_ms),
+        (0, 1000),
+        "SGS activity should coexist with the pin under capacity 2, not be pushed out: {j2:?}"
+    );
+
+    assert!(
+        s.is_valid(),
+        "capacity-2 pin/SGS coexistence flagged: {:?}",
+        s.violations
+    );
+}
+
+#[test]
 fn schedule_request_honors_fixed_assignments() {
     // schedule_request 진입점도 seed 를 존중해야 함 (Self 재구성 시 fixed 전파).
     let (tasks, resources) = two_job_single_machine();

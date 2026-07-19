@@ -165,6 +165,21 @@ impl SimpleScheduler {
     /// the given interval, so they do not participate in
     /// `TransitionMatrix` changeover accounting.
     ///
+    /// # Known limitation: setup underestimation right after a pin
+    ///
+    /// A pinned activity never updates `last_category` (that update only
+    /// happens for SGS-placed activities on a resource with a matrix — see
+    /// `schedule()`). So the **next SGS-placed activity on the same
+    /// resource** computes its changeover against whatever category was
+    /// current *before* the pin, not against the pin's own task category.
+    /// If the pin's task differs from that pre-pin category, the following
+    /// activity's setup is **understated** (it should reflect a changeover
+    /// *from* the pin, but doesn't). This is a deliberate, documented gap —
+    /// not a bug to work around here. Changeover-aware pin accounting
+    /// (treating a pin as a `last_category` update) is carried forward as
+    /// future U-Engine work; see the solver enforcement matrix footnote in
+    /// `crate` docs.
+    ///
     /// [`ViolationType::RequirementUnfilled`]: crate::models::ViolationType::RequirementUnfilled
     pub fn with_fixed_assignments(mut self, fixed: Vec<Assignment>) -> Self {
         self.fixed = fixed;

@@ -28,7 +28,7 @@
 //!
 //! | Feature | `SimpleScheduler` | GA decode | CP builder |
 //! |---|---|---|---|
-//! | Fixed-assignment seeding (pin) | ✅ | ❌ | ❌ |
+//! | Fixed-assignment seeding (pin) [^pin-setup] | ✅ | ❌ | ❌ |
 //! | Multi-requirement simultaneous hold | ✅ | ❌ (single resource per activity) | ❌ (first candidate) |
 //! | Resource calendar | ✅ | ❌ | ❌ |
 //! | Capacity > 1 | ✅ | ❌ | ❌ |
@@ -41,6 +41,17 @@
 //! [`scheduler::check_schedule`], so `Schedule::is_valid()` is
 //! meaningful on that path. Run the checker manually on GA/CP output to
 //! obtain honest violation reports.
+//!
+//! [^pin-setup]: Pins are **opaque reservations** — they never update
+//! `last_category`, so the next `TransitionMatrix`-governed activity
+//! placed on the same resource computes its changeover against the
+//! category that was current *before* the pin, understating the true
+//! setup from the pin's task. See
+//! [`scheduler::SimpleScheduler::with_fixed_assignments`] for the full
+//! writeup. **Carry-forward (U-Engine, not yet scheduled)**:
+//! changeover-aware pin accounting — treat a pin as a `last_category`
+//! update so the following activity's setup reflects a transition *from*
+//! the pinned task's category.
 //!
 //! # References
 //!
