@@ -105,6 +105,7 @@ impl ScheduleRequest {
 pub struct SimpleScheduler {
     transition_matrices: TransitionMatrixCollection,
     rule_engine: Option<RuleEngine>,
+    fixed: Vec<Assignment>,
 }
 
 impl SimpleScheduler {
@@ -113,6 +114,7 @@ impl SimpleScheduler {
         Self {
             transition_matrices: TransitionMatrixCollection::new(),
             rule_engine: None,
+            fixed: Vec::new(),
         }
     }
 
@@ -127,6 +129,45 @@ impl SimpleScheduler {
     /// When set, tasks are sorted by the rule engine instead of by priority.
     pub fn with_rule_engine(mut self, engine: RuleEngine) -> Self {
         self.rule_engine = Some(engine);
+        self
+    }
+
+    /// Seeds the schedule with fixed (pinned) assignments.
+    ///
+    /// Each pin is an externally-decided `Assignment` — a specific
+    /// (`activity_id`, `resource_id`, `[start_ms, end_ms)`) hold. Seeded
+    /// activities are honored verbatim: the scheduler
+    ///
+    /// 1. **pre-books** each pin's resource timeline, so SGS-scheduled
+    ///    activities steer clear of the reserved interval;
+    /// 2. **skips** the pinned activity in the SGS loop and emits the pin
+    ///    unchanged into the result;
+    /// 3. advances the intra-task cursor to the pin's `end_ms`, so later
+    ///    activities of the same task start no earlier than the pin ends;
+    /// 4. **never silently moves** a pin: if a pin itself is infeasible
+    ///    (double-booked resource, outside a calendar, over capacity), the
+    ///    self-annotating feasibility pass reports it in
+    ///    [`Schedule::violations`] rather than relocating it.
+    ///
+    /// # Multi-requirement / quantity semantics
+    ///
+    /// A pin is per-(activity, resource). An activity that holds several
+    /// resources simultaneously (multiple requirements, or `quantity > 1`)
+    /// is pinned by supplying one `Assignment` **per held resource**, all
+    /// sharing the `activity_id`. An activity that appears in the fixed set
+    /// is treated **all-or-nothing**: it is skipped by SGS entirely, so the
+    /// caller must fully specify every resource hold. A partially pinned
+    /// activity leaves its un-pinned requirements unfilled, honestly
+    /// reported as [`ViolationType::RequirementUnfilled`] — the scheduler
+    /// does not fill them in.
+    ///
+    /// Pins are **opaque reservations**: their setup is assumed baked into
+    /// the given interval, so they do not participate in
+    /// `TransitionMatrix` changeover accounting.
+    ///
+    /// [`ViolationType::RequirementUnfilled`]: crate::models::ViolationType::RequirementUnfilled
+    pub fn with_fixed_assignments(mut self, fixed: Vec<Assignment>) -> Self {
+        self.fixed = fixed;
         self
     }
 
@@ -158,6 +199,21 @@ impl SimpleScheduler {
             .collect();
         let mut last_category: HashMap<String, String> = HashMap::new();
 
+        // Fixed-assignment seeding: index pins by activity, pre-book their
+        // resources, and emit them verbatim. Pins are opaque reservations —
+        // feasibility (below) validates them; we never relocate them.
+        let mut fixed_by_activity: HashMap<&str, Vec<&Assignment>> = HashMap::new();
+        for pin in &self.fixed {
+            fixed_by_activity
+                .entry(pin.activity_id.as_str())
+                .or_default()
+                .push(pin);
+            if let Some(tl) = timelines.get_mut(&pin.resource_id) {
+                tl.book(pin.start_ms, pin.end_ms); // 선점 예약 (자원 미상이면 feasibility가 보고)
+            }
+            schedule.add_assignment(pin.clone());
+        }
+
         let task_order = self.sort_tasks(tasks, start_time_ms);
 
         for &task_idx in &task_order {
@@ -168,6 +224,12 @@ impl SimpleScheduler {
                 .max(start_time_ms);
 
             for activity in &task.activities {
+                if let Some(pins) = fixed_by_activity.get(activity.id.as_str()) {
+                    // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
+                    let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready);
+                    ready = ready.max(pin_end);
+                    continue;
+                }
                 if activity.resource_requirements.is_empty() {
                     continue; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
                 }
@@ -306,6 +368,7 @@ impl SimpleScheduler {
         let scheduler = Self {
             transition_matrices: request.transition_matrices.clone(),
             rule_engine: self.rule_engine.clone(),
+            fixed: self.fixed.clone(),
         };
         let mut schedule =
             scheduler.schedule(&request.tasks, &request.resources, request.start_time_ms);

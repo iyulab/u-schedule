@@ -53,6 +53,108 @@ fn scheduler_output_is_feasible_end_to_end() {
     assert!(v.is_empty(), "external check found: {v:?}");
 }
 
+/// Two single-activity jobs contending for one machine (enforcement.rs style).
+fn two_job_single_machine() -> (Vec<Task>, Vec<Resource>) {
+    let mk = |tid: &str| {
+        Task::new(tid)
+            .with_priority(1)
+            .with_category("default")
+            .with_activity(
+                Activity::new(format!("{tid}_O1"), tid, 0)
+                    .with_duration(ActivityDuration::fixed(1000))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                    ),
+            )
+    };
+    let tasks = vec![mk("J1"), mk("J2")];
+    let resources = vec![Resource::primary("M1")];
+    (tasks, resources)
+}
+
+#[test]
+fn fixed_assignment_is_seeded_and_serializes_others() {
+    // M1 하나, J1(1000ms)·J2(1000ms). J2를 [2000,3000)에 pin.
+    // 기대: J2 배정이 정확히 [2000,3000), J1은 pin 구간을 회피.
+    let (tasks, resources) = two_job_single_machine();
+    let pinned = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![pinned])
+        .schedule(&tasks, &resources, 0);
+    let j2 = s
+        .assignments
+        .iter()
+        .find(|a| a.activity_id == "J2_O1")
+        .unwrap();
+    assert_eq!((j2.start_ms, j2.end_ms), (2000, 3000));
+    let j1 = s
+        .assignments
+        .iter()
+        .find(|a| a.activity_id == "J1_O1")
+        .unwrap();
+    assert!(
+        j1.end_ms <= 2000 || j1.start_ms >= 3000,
+        "pin 구간 침범: {j1:?}"
+    );
+    // 선점 예약이 phantom violation을 만들지 않았음을 증명
+    assert!(s.is_valid(), "seeded schedule flagged: {:?}", s.violations);
+}
+
+#[test]
+fn conflicting_fixed_assignment_reports_violation_not_silent_move() {
+    // M1 capacity 1. J1_O1·J2_O1을 둘 다 [2000,3000)에 pin → 자원 중복.
+    // 기대: 무단 이동 없이 둘 다 그대로 배치되고 violation으로 정직 보고.
+    let (tasks, resources) = two_job_single_machine();
+    let p1 = Assignment::new("J1_O1", "J1", "M1", 2000, 3000);
+    let p2 = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(vec![p1, p2])
+        .schedule(&tasks, &resources, 0);
+    assert!(!s.violations.is_empty(), "conflict not reported");
+    assert!(!s.is_valid());
+    assert!(s
+        .violations
+        .iter()
+        .any(|v| v.violation_type == ViolationType::CapacityExceeded));
+    // 무단 이동 금지: 두 pin 모두 명시 구간에 그대로
+    let j1 = s
+        .assignments
+        .iter()
+        .find(|a| a.activity_id == "J1_O1")
+        .unwrap();
+    assert_eq!((j1.start_ms, j1.end_ms), (2000, 3000));
+    let j2 = s
+        .assignments
+        .iter()
+        .find(|a| a.activity_id == "J2_O1")
+        .unwrap();
+    assert_eq!((j2.start_ms, j2.end_ms), (2000, 3000));
+}
+
+#[test]
+fn multi_resource_pin_seeds_all_holds() {
+    // 다중 requirement(Machine+Mold) activity를 두 자원 모두 pin.
+    // 기대: 두 배정 모두 그대로 emit + 두 요구 모두 충족 → is_valid.
+    let task = Task::new("J1").with_priority(1).with_category("default").with_activity(
+        Activity::new("J1_O1", "J1", 0)
+            .with_duration(ActivityDuration::fixed(1000))
+            .with_requirement(ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]))
+            .with_requirement(ResourceRequirement::new("Mold").with_candidates(vec!["T1".into()])),
+    );
+    let resources = vec![Resource::primary("M1"), Resource::secondary("T1")];
+    let pins = vec![
+        Assignment::new("J1_O1", "J1", "M1", 2000, 3000),
+        Assignment::new("J1_O1", "J1", "T1", 2000, 3000),
+    ];
+    let s = SimpleScheduler::new()
+        .with_fixed_assignments(pins)
+        .schedule(&[task], &resources, 0);
+    let holds = s.assignments_for_activity_all("J1_O1");
+    assert_eq!(holds.len(), 2, "both resource holds must be seeded: {holds:?}");
+    assert!(holds.iter().all(|a| (a.start_ms, a.end_ms) == (2000, 3000)));
+    assert!(s.is_valid(), "fully-pinned multi-resource flagged: {:?}", s.violations);
+}
+
 #[test]
 fn unfillable_requirement_reported_not_silent() {
     // probe S1의 정직성 요구: 충족 불가가 침묵하지 않는다
