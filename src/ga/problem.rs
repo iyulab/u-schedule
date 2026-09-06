@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use u_metaheur::ga::GaProblem;
 
 use super::chromosome::ScheduleChromosome;

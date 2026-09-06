@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use rand::prelude::IndexedRandom;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use u_metaheur::ga::Individual;
 
 use super::ActivityInfo;
@@ -267,7 +267,7 @@ pub fn pox_crossover<R: Rng>(
     }
 
     let set_size = rng.random_range(1..=task_ids.len().max(1));
-    let selected: Vec<String> = task_ids.choose_multiple(rng, set_size).cloned().collect();
+    let selected: Vec<String> = task_ids.sample(rng, set_size).cloned().collect();
     let selected_set: std::collections::HashSet<&str> =
         selected.iter().map(|s| s.as_str()).collect();
 
@@ -434,7 +434,7 @@ pub fn jox_crossover<R: Rng>(
 
     let set_size = rng.random_range(1..=task_ids.len().max(1));
     let selected: std::collections::HashSet<String> =
-        task_ids.choose_multiple(rng, set_size).cloned().collect();
+        task_ids.sample(rng, set_size).cloned().collect();
 
     let child1_osv = jox_build_child(&p1.osv, &p2.osv, &selected);
     let child2_osv = jox_build_child(&p2.osv, &p1.osv, &selected);
