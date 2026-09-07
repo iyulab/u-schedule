@@ -176,9 +176,8 @@ impl SimpleScheduler {
     /// activity's setup is **understated** (it should reflect a changeover
     /// *from* the pin, but doesn't). This is a deliberate, documented gap —
     /// not a bug to work around here. Changeover-aware pin accounting
-    /// (treating a pin as a `last_category` update) is carried forward as
-    /// future U-Engine work; see the solver enforcement matrix footnote in
-    /// `crate` docs.
+    /// (treating a pin as a `last_category` update) is a known limitation;
+    /// see the solver enforcement matrix footnote in `crate` docs.
     ///
     /// [`ViolationType::RequirementUnfilled`]: crate::models::ViolationType::RequirementUnfilled
     pub fn with_fixed_assignments(mut self, fixed: Vec<Assignment>) -> Self {

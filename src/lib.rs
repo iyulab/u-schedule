@@ -1,4 +1,4 @@
-//! Scheduling framework for the U-Engine ecosystem.
+//! A scheduling framework.
 //!
 //! Provides domain models, constraints, validation, dispatching rules,
 //! and a greedy scheduler for scheduling problems. This crate defines
@@ -17,8 +17,7 @@
 //!
 //! # Architecture
 //!
-//! This crate sits at Layer 3 (Frameworks) in the U-Engine ecosystem.
-//! It depends on `u-metaheur` and `u-numflow` but contains only scheduling
+//! This crate depends on `u-metaheur` and `u-numflow`, and contains only scheduling
 //! domain logic — no nesting, packing, or manufacturing concepts.
 //!
 //! # Solver enforcement matrix (0.4.0)
@@ -48,7 +47,7 @@
 //! category that was current *before* the pin, understating the true
 //! setup from the pin's task. See
 //! [`scheduler::SimpleScheduler::with_fixed_assignments`] for the full
-//! writeup. **Carry-forward (U-Engine, not yet scheduled)**:
+//! writeup. **Known limitation, not yet addressed**:
 //! changeover-aware pin accounting — treat a pin as a `last_category`
 //! update so the following activity's setup reflects a transition *from*
 //! the pinned task's category.
