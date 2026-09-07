@@ -81,6 +81,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --all-targets
+      # `--all-targets` expands to lib/bins/tests/benches/examples and
+      # deliberately excludes doc-tests, so they need their own invocation.
+      # Without this step the examples in the public docs go unverified.
+      - run: cargo test --doc
 
   docs:
     name: Documentation
