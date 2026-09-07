@@ -176,3 +176,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check public API against the latest crates.io release
         uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  changelog:
+    name: Changelog Entry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Changelog has an entry for the version in Cargo.toml
+        run: bash scripts/check-changelog-entry.sh

@@ -8,6 +8,50 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-07
+
+### Changed (breaking)
+
+- **`rand` is now 0.10** (previously 0.9). `rand::Rng` appears in this crate's
+  public signatures, so the two versions are not interchangeable at the boundary
+  and callers must move to `rand` 0.10 as well. The generated sequences for a
+  given seed are unchanged, so seeded runs reproduce the previous release's
+  results.
+- **The minimum supported Rust version is now declared as 1.87** and is verified
+  by building on that exact toolchain; 1.86 and below fail. The requirement comes
+  from this crate's own use of `unsigned_is_multiple_of`, stabilised in 1.87.
+  The crate previously declared no `rust-version` at all.
+- **`u-metaheur` is now required at 0.4 and `u-numflow` at 0.4** (previously 0.3
+  for both), following those crates' own `rand` 0.10 breaks.
+
+### Changed
+
+- **`getrandom` is now 0.4** on WebAssembly targets, reaching the browser entropy
+  source through its `wasm_js` crate feature alone. The
+  `RUSTFLAGS --cfg getrandom_backend="wasm_js"` that 0.3 required is no longer
+  needed.
+
+## [0.5.0] - 2026-07-19
+
+Recorded retroactively: 0.5.0 was released without a changelog entry, and this
+one is reconstructed from the release commits (`9ec48f6`, `7576eaf`, `9fca2d8`,
+`30ed271`). Dates and contents come from those commits, not from a contemporary
+note.
+
+### Added
+
+- `SimpleScheduler::with_fixed_assignments` — seeds the schedule with
+  assignments that are fixed in advance ("pins"). At most one pin applies per
+  `(activity, resource)` pair. The serial SGS honours a pin all-or-nothing: an
+  activity whose pin cannot be placed is skipped rather than partially placed,
+  and pins that conflict with each other are reported through the existing
+  feasibility annotation as violations rather than being silently dropped.
+
+### Known limitations
+
+- Setup time from `TransitionMatrix` does not participate in pin accounting, so
+  a pinned start does not reserve its own changeover window.
+
 ## [0.4.0] - 2026-07-18
 
 Closes the model-solver enforcement gap surfaced by a consumer-side
