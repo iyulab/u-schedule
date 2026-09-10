@@ -29,6 +29,12 @@ jobs:
           save-if: false
 
       - uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          # Not 'latest': the action resolves that at run time and silently falls
+          # back to v0.9.1 when the lookup fails, which predates `--features` and
+          # fails the build below. Two runs three minutes apart got v0.15.0 and
+          # v0.9.1 from the same pinned action.
+          version: 'v0.15.0'
 
       - name: Build WASM package (bundler + nodejs)
         run: |
