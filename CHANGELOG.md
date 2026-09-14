@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
-## [Unreleased]
+## [0.6.1] - 2026-09-15
+
+### Fixed
+
+- Confidence-based durations and on-time probabilities use `u-numflow` 0.6's
+  normal quantile and CDF: the quantile was accurate only to 4.5e-4
+  (Abramowitz & Stegun 26.2.23) and the CDF to an absolute 7.5e-8; both are now
+  accurate to double precision, so these values change in their trailing digits.
 
 ## [0.6.0] - 2026-09-07
 
