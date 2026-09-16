@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Fixed
+
+- **A job-shop schedule says which step of its job each entry is.** Every row
+  of `solve_jobshop`'s `schedule` reported `operation: 1`, whatever step it
+  actually was. Machines, start/end times and makespan were all correct, so
+  nothing downstream could detect it.
+
+  The cause was two things covering for each other. `ActivityInfo`, which the
+  genetic decoder works from, dropped the activity's own id -- so with nothing
+  else to hand, the decoder put the *task* id in each assignment's
+  `activity_id`, the same string for every step of a job. The WebAssembly
+  binding then recovered the step by parsing a trailing number out of that id
+  and falling back to `1` when it could not. The CP solver never had the
+  defect; it passes the activity id.
+
+### Changed (breaking)
+
+- **`Assignment` carries `sequence: Option<i32>`** -- which step of its task
+  the activity is, counting from 1 in the order the task lists them. Both
+  solvers set it; `Assignment::new` leaves it `None` and `with_sequence` sets
+  it. It is an `Option` rather than a number because a schedule that reports
+  every entry as step 1 is exactly the failure above.
+
+- **`ActivityInfo` carries `id`** -- the activity's own id, which it used to
+  discard.
+
+- `solve_jobshop`'s `operation` is read from `sequence` rather than parsed out
+  of an id. The value and its base are unchanged (counting from 1, in the order
+  the job's `operations` array lists them); the README now says so.
+
 ## [0.6.1] - 2026-09-15
 
 ### Fixed

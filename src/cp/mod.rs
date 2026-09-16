@@ -166,7 +166,7 @@ impl<'a> ScheduleCpBuilder<'a> {
         }
 
         for task in self.tasks {
-            for activity in &task.activities {
+            for (step, activity) in task.activities.iter().enumerate() {
                 if let Some(interval_sol) = solution.intervals.get(&activity.id) {
                     if interval_sol.is_present {
                         // Determine resource (from candidates, pick first for now)
@@ -176,13 +176,16 @@ impl<'a> ScheduleCpBuilder<'a> {
                             .map(|s| s.to_string())
                             .unwrap_or_default();
 
-                        schedule.add_assignment(Assignment::new(
-                            &activity.id,
-                            &task.id,
-                            &resource_id,
-                            interval_sol.start,
-                            interval_sol.end,
-                        ));
+                        schedule.add_assignment(
+                            Assignment::new(
+                                &activity.id,
+                                &task.id,
+                                &resource_id,
+                                interval_sol.start,
+                                interval_sol.end,
+                            )
+                            .with_sequence(step as i32 + 1),
+                        );
                     }
                 }
             }

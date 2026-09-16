@@ -499,6 +499,8 @@ struct JobShopInput {
 #[derive(Serialize)]
 struct JobShopAssignment {
     job_id: String,
+    /// Which step of its job this is, counting from 1 in the order the job's
+    /// `operations` array lists them -- not the order they run on the timeline.
     operation: usize,
     machine: String,
     start: f64,
@@ -735,23 +737,26 @@ pub fn solve_jobshop(problem: JsValue) -> Result<JsValue, JsValue> {
         .assignments
         .iter()
         .map(|a| {
-            // Parse operation index from activity_id pattern "JOB_N"
-            let operation = a
-                .activity_id
-                .rsplit('_')
-                .next()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(1);
+            // The schedule says which step this is; it used to be recovered by
+            // parsing the trailing number out of `activity_id`, with a fallback
+            // of 1 -- so when the decoder stopped putting an activity id there,
+            // every row silently read "operation 1".
+            let operation = a.sequence.ok_or_else(|| {
+                js_err(format!(
+                    "internal: assignment for job '{}' on '{}' carries no operation number",
+                    a.task_id, a.resource_id
+                ))
+            })? as usize;
 
-            JobShopAssignment {
+            Ok(JobShopAssignment {
                 job_id: a.task_id.clone(),
                 operation,
                 machine: a.resource_id.clone(),
                 start: ms_to_sec(a.start_ms),
                 end: ms_to_sec(a.end_ms),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, JsValue>>()?;
 
     let makespan = ms_to_sec(best_schedule.makespan_ms());
 
@@ -1196,6 +1201,111 @@ mod tests {
             tasks.push(task);
         }
         Ok(tasks)
+    }
+
+    /// The reporter's job shop: two jobs of three operations each. Every row
+    /// used to read `operation: 1`, while machines, times and makespan were
+    /// all correct -- a silent wrong column.
+    #[test]
+    fn jobshop_numbers_each_operation_within_its_job() {
+        use crate::models::{Resource, ResourceType};
+        use u_metaheur::ga::{GaConfig, GaRunner};
+
+        let input = JobShopInput {
+            jobs: vec![
+                JobShopJob {
+                    id: "J1".into(),
+                    operations: vec![
+                        JobShopOperation {
+                            machine: Some("M1".into()),
+                            machines: Vec::new(),
+                            processing_time: 3.0,
+                        },
+                        JobShopOperation {
+                            machine: Some("M2".into()),
+                            machines: Vec::new(),
+                            processing_time: 2.0,
+                        },
+                        JobShopOperation {
+                            machine: Some("M3".into()),
+                            machines: Vec::new(),
+                            processing_time: 4.0,
+                        },
+                    ],
+                    due_date: Some(20.0),
+                    release_time: Some(0.0),
+                },
+                JobShopJob {
+                    id: "J2".into(),
+                    operations: vec![
+                        JobShopOperation {
+                            machine: Some("M2".into()),
+                            machines: Vec::new(),
+                            processing_time: 3.0,
+                        },
+                        JobShopOperation {
+                            machine: Some("M3".into()),
+                            machines: Vec::new(),
+                            processing_time: 2.0,
+                        },
+                        JobShopOperation {
+                            machine: Some("M1".into()),
+                            machines: Vec::new(),
+                            processing_time: 5.0,
+                        },
+                    ],
+                    due_date: Some(18.0),
+                    release_time: Some(0.0),
+                },
+            ],
+            num_machines: Some(3),
+            ga_config: JobShopGaConfig {
+                population_size: 30,
+                max_generations: 20,
+                mutation_rate: 0.1,
+                seed: Some(42),
+                ..JobShopGaConfig::default()
+            },
+        };
+
+        let tasks = build_jobshop_tasks(&input).expect("every operation names a machine");
+        let resources: Vec<Resource> = ["M1", "M2", "M3"]
+            .iter()
+            .map(|id| Resource::new(*id, ResourceType::Primary))
+            .collect();
+        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let config = GaConfig::default()
+            .with_population_size(30)
+            .with_max_generations(20)
+            .with_seed(42)
+            .with_parallel(false);
+        let result = GaRunner::run(&problem, &config).expect("a valid GA problem");
+        let schedule = problem.decode(&result.best);
+
+        assert_eq!(schedule.assignment_count(), 6, "two jobs of three steps");
+        for job in ["J1", "J2"] {
+            let mut steps: Vec<i32> = schedule
+                .assignments
+                .iter()
+                .filter(|a| a.task_id == job)
+                .map(|a| a.sequence.expect("the schedule says the step"))
+                .collect();
+            steps.sort_unstable();
+            assert_eq!(steps, vec![1, 2, 3], "{job} must number its own steps");
+        }
+
+        // The step order is the order the job lists its machines, whatever
+        // order the solver puts them in on the timeline.
+        for (job, machines) in [("J1", ["M1", "M2", "M3"]), ("J2", ["M2", "M3", "M1"])] {
+            for (idx, machine) in machines.iter().enumerate() {
+                let a = schedule
+                    .assignments
+                    .iter()
+                    .find(|a| a.task_id == job && a.sequence == Some(idx as i32 + 1))
+                    .unwrap_or_else(|| panic!("{job} step {}", idx + 1));
+                assert_eq!(&a.resource_id, machine, "{job} step {}", idx + 1);
+            }
+        }
     }
 
     // ── GA config validation tests ──

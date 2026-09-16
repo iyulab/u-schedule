@@ -20,6 +20,12 @@ use crate::models::{Assignment, Resource, Schedule, Task, TransitionMatrixCollec
 /// Extracted from `Task`/`Activity` to avoid cloning full domain objects.
 #[derive(Debug, Clone)]
 pub struct ActivityInfo {
+    /// The activity's own ID.
+    ///
+    /// Dropping it here is what made the decoder put the *task* id in each
+    /// assignment's `activity_id`: with nothing else to hand, a plausible
+    /// string filled the slot.
+    pub id: String,
     /// Parent task ID.
     pub task_id: String,
     /// Activity sequence within task (1-based).
@@ -37,6 +43,7 @@ impl ActivityInfo {
         for task in tasks {
             for (i, activity) in task.activities.iter().enumerate() {
                 infos.push(ActivityInfo {
+                    id: activity.id.clone(),
                     task_id: task.id.clone(),
                     sequence: (i + 1) as i32,
                     process_ms: activity.duration.process_ms,
@@ -232,7 +239,9 @@ impl SchedulingGaProblem {
             let end = start + setup + act.process_ms;
 
             schedule.add_assignment(
-                Assignment::new(&act.task_id, task_id, resource_id, start, end).with_setup(setup),
+                Assignment::new(&act.id, task_id, resource_id, start, end)
+                    .with_sequence(act.sequence)
+                    .with_setup(setup),
             );
 
             // Update state
@@ -368,10 +377,67 @@ mod tests {
         let (tasks, _) = make_test_problem();
         let infos = ActivityInfo::from_tasks(&tasks);
         assert_eq!(infos.len(), 3);
+        assert_eq!(infos[0].id, "T1_O1");
         assert_eq!(infos[0].task_id, "T1");
         assert_eq!(infos[0].sequence, 1);
         assert_eq!(infos[0].process_ms, 1000);
+        assert_eq!(infos[1].id, "T1_O2");
+        assert_eq!(infos[2].id, "T2_O1");
         assert_eq!(infos[2].task_id, "T2");
+    }
+
+    /// An assignment names the activity it scheduled, and says which step of
+    /// its task that activity is.
+    ///
+    /// Both used to be wrong together, and one hid the other. `ActivityInfo`
+    /// dropped the activity's own id, so the decoder had nothing to put in the
+    /// `activity_id` slot and put the *task* id there -- the same string for
+    /// every step of a job. The WebAssembly binding then recovered the step by
+    /// parsing a trailing number out of that id, falling back to 1 when it
+    /// could not, so every row of every job-shop schedule read "operation 1"
+    /// while machines, times and makespan were all correct.
+    #[test]
+    fn an_assignment_names_its_activity_and_its_step() {
+        let (tasks, resources) = make_test_problem();
+        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let ch = problem.create_individual(&mut rng);
+        let schedule = problem.decode(&ch);
+        assert_eq!(schedule.assignment_count(), 3);
+
+        for a in &schedule.assignments {
+            assert_ne!(
+                a.activity_id, a.task_id,
+                "the activity id must not be the task id: {a:?}"
+            );
+            assert!(
+                a.activity_id.starts_with(&a.task_id),
+                "activity ids in this fixture are '<task>_O<n>': {a:?}"
+            );
+        }
+
+        // T1 has two steps and they are distinct, in the order the task lists
+        // them; T2 has one.
+        let steps = |task: &str| {
+            let mut v: Vec<_> = schedule
+                .assignments
+                .iter()
+                .filter(|a| a.task_id == task)
+                .map(|a| {
+                    (
+                        a.sequence.expect("the decoder says the step"),
+                        a.activity_id.clone(),
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            steps("T1"),
+            vec![(1, "T1_O1".to_string()), (2, "T1_O2".to_string())]
+        );
+        assert_eq!(steps("T2"), vec![(1, "T2_O1".to_string())]);
     }
 
     #[test]

@@ -176,13 +176,19 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
 **Output:**
 ```json
 {
-  "schedule": [{ "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 3.0 }],
+  "schedule": [
+    { "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 3.0 },
+    { "job_id": "J1", "operation": 2, "machine": "M2", "start": 3.0, "end": 5.0 }
+  ],
   "makespan": 5.0,
   "fitness": 5.0,
   "generations": 200,
   "fitness_history": [10.0, 8.0, 5.0]
 }
 ```
+
+`operation` counts from 1 in the order the job's `operations` array lists them,
+not the order they run on the timeline.
 
 Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Insert"` | `"Invert"`.
 

@@ -548,18 +548,21 @@ mod tests {
     fn sample_activities() -> Vec<ActivityInfo> {
         vec![
             ActivityInfo {
+                id: "T1_1".into(),
                 task_id: "T1".into(),
                 sequence: 1,
                 process_ms: 1000,
                 candidates: vec!["M1".into(), "M2".into()],
             },
             ActivityInfo {
+                id: "T1_2".into(),
                 task_id: "T1".into(),
                 sequence: 2,
                 process_ms: 2000,
                 candidates: vec!["M2".into()],
             },
             ActivityInfo {
+                id: "T2_1".into(),
                 task_id: "T2".into(),
                 sequence: 1,
                 process_ms: 1500,

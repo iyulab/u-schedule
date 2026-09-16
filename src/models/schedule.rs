@@ -29,6 +29,14 @@ pub struct Schedule {
 pub struct Assignment {
     /// Assigned activity ID.
     pub activity_id: String,
+    /// Which step of its task this activity is, counting from 1 in the order
+    /// the task lists them.
+    ///
+    /// `None` when the solver that produced the assignment did not say. That
+    /// is deliberately not a number: a schedule that reports every entry as
+    /// step 1 is wrong in a way nothing downstream can detect, which is
+    /// exactly how this field came to exist.
+    pub sequence: Option<i32>,
     /// Parent task ID (denormalized for query convenience).
     pub task_id: String,
     /// Assigned resource ID.
@@ -88,12 +96,19 @@ impl Assignment {
     ) -> Self {
         Self {
             activity_id: activity_id.into(),
+            sequence: None,
             task_id: task_id.into(),
             resource_id: resource_id.into(),
             start_ms,
             end_ms,
             setup_ms: 0,
         }
+    }
+
+    /// Records which step of its task this activity is, counting from 1.
+    pub fn with_sequence(mut self, sequence: i32) -> Self {
+        self.sequence = Some(sequence);
+        self
     }
 
     /// Sets the setup time.
