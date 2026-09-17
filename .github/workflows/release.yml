@@ -28,6 +28,9 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Changelog has an entry for this version
+        run: bash scripts/check-changelog-entry.sh
+
       - name: Get current version
         id: get_version
         run: |
