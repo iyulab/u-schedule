@@ -28,10 +28,21 @@ fi
 builtins='number|string|boolean|any|void|bigint|symbol|unknown|never|null|undefined|object|Array|Promise|Record|Map|Set|Date|Uint8Array|Uint16Array|Uint32Array|Int8Array|Int16Array|Int32Array|Float32Array|Float64Array|BigInt64Array|BigUint64Array|ArrayBuffer|Function|Error|readonly'
 
 status=0
+checked=0
 for dts in "$@"; do
     if [ ! -f "$dts" ]; then
         echo "FAIL: $dts does not exist" >&2
         status=1
+        continue
+    fi
+
+    # wasm-bindgen emits a second declaration file beside the package's own --
+    # `<name>_bg.wasm.d.ts` -- describing the raw module's ABI: `export const`
+    # bindings with pointer-level signatures, and the module's memory. It is
+    # not a public API surface and declares no `export function` by design, so
+    # it is skipped. Recognised by that memory export rather than by filename,
+    # so a renamed or relocated file is still classified correctly.
+    if grep -q '^export const memory: WebAssembly.Memory;' "$dts"; then
         continue
     fi
 
@@ -41,6 +52,7 @@ for dts in "$@"; do
         status=1
         continue
     fi
+    checked=$((checked + 1))
 
     untyped=$(grep '^export function' "$dts" | grep -E '\):[[:space:]]*any;')
     if [ -n "$untyped" ]; then
@@ -84,5 +96,11 @@ for dts in "$@"; do
         echo "OK: $dts -- $total exported function(s), every return type declared"
     fi
 done
+
+if [ "$checked" -eq 0 ]; then
+    echo "FAIL: none of the given files declares a public API surface -- every one" >&2
+    echo "  looked like a raw-module shim. Point this at the package's own .d.ts." >&2
+    status=1
+fi
 
 exit "$status"
