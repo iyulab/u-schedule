@@ -121,7 +121,7 @@ struct ScheduleInput {
 
 // ── output schema ────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, tsify::Tsify)]
 struct OutputJob {
     id: String,
     start: f64,
@@ -131,14 +131,14 @@ struct OutputJob {
     machine: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, tsify::Tsify)]
 struct MachineUtilization {
     machine: usize,
     busy_time: f64,
     utilization: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, tsify::Tsify)]
 struct ScheduleOutput {
     schedule: Vec<OutputJob>,
     makespan: f64,
@@ -340,7 +340,7 @@ fn compute_utilization(
 /// # Backward Compatibility
 /// When `config.num_machines` is omitted (defaults to 1), behavior is
 /// identical to the original single-machine implementation.
-#[wasm_bindgen]
+#[wasm_bindgen(unchecked_return_type = "ScheduleOutput")]
 pub fn run_schedule(jobs: JsValue) -> Result<JsValue, JsValue> {
     let input: ScheduleInput = from_js(jobs, "jobs")?;
 
@@ -496,7 +496,7 @@ struct JobShopInput {
 
 // ── output schema ───────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, tsify::Tsify)]
 struct JobShopAssignment {
     job_id: String,
     /// Which step of its job this is, counting from 1 in the order the job's
@@ -507,7 +507,7 @@ struct JobShopAssignment {
     end: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, tsify::Tsify)]
 struct JobShopOutput {
     schedule: Vec<JobShopAssignment>,
     makespan: f64,
@@ -612,7 +612,7 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
 ///   }
 /// }
 /// ```
-#[wasm_bindgen]
+#[wasm_bindgen(unchecked_return_type = "JobShopOutput")]
 pub fn solve_jobshop(problem: JsValue) -> Result<JsValue, JsValue> {
     let input: JobShopInput = from_js(problem, "problem")?;
 

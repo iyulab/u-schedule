@@ -15,10 +15,13 @@ categories = ["algorithms"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_json"]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:serde_json", "dep:tsify"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+# Derives the TypeScript declaration from the same struct serde reads, so the
+# published .d.ts cannot drift from the shape the binding actually returns.
+tsify = { version = "0.5", default-features = false, features = ["js"], optional = true }
 u-metaheur = "0.4"
 u-numflow = "0.6"
 rand = "0.10"

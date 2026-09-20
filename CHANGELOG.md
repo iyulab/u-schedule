@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Added
+
+- **Every exported WASM function declares its return type.** They were typed
+  `(...) => any`, with the output's field *names* in the doc comment and the
+  element types only in the README -- so a consumer's wrong assumption about a
+  result's shape compiled and shipped. `as` is the only thing that can be
+  written against `any`, and it is exactly the construct that silences this.
+
+  The declarations are derived from the structs the binding already
+  serialises, so there is no second copy to drift: `tsify` emits the interface
+  and `unchecked_return_type` names it in the signature. The runtime path is
+  unchanged -- same serializer, same bytes. An optional field is declared
+  `T | undefined`, which is what the binding sends.
+
+  A publish-path check (`scripts/check-typed-dts.sh`) fails the release if any
+  exported function returns `any`, or if a declaration names a type the file
+  does not declare. It runs before publishing rather than beside it in CI,
+  because the two run on the same push.
+
+  Inputs remain `any`; they are validated at the boundary.
+
 ## [0.7.0] - 2026-09-16
 
 ### Fixed
