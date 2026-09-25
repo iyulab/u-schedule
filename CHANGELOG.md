@@ -8,6 +8,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-25
+
 ### Fixed
 
 - **`PertEstimate` percentiles stay within the estimate.**
