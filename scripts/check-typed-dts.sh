@@ -4,6 +4,7 @@
 #
 #   1. an exported function whose return type is `any`
 #   2. a type named in a signature or a field that the file never declares
+#   3. with --params: an exported function taking a parameter typed `any`
 #
 # (1) is the reported harm: `as` is the only thing a consumer can write against
 # `any`, and `as` is exactly the construct that silences a wrong assumption
@@ -13,14 +14,26 @@
 # does not exist, because the struct behind it is missing its derive, and the
 # consumer's build then fails on our file instead of on their mistake.
 #
+# (3) is the same harm on the way in: `estimate_effects(full_factorial(3), ...)`
+# compiled under strict TypeScript -- the generator's result object handed to
+# a parameter that wants its `data` matrix -- and failed only at run time. It
+# is opt-in while the bindings are migrated one package at a time; a package's
+# publishing workflow passes the flag once its inputs are declared.
+#
 # This runs on the publish path, not only in CI: the two run side by side on
 # the same push, so a check that lives only in CI cannot stop a publish.
 #
-# Usage: check-typed-dts.sh <file.d.ts> [more.d.ts ...]
+# Usage: check-typed-dts.sh [--params] <file.d.ts> [more.d.ts ...]
 set -uo pipefail
 
+params=0
+if [ "${1:-}" = "--params" ]; then
+    params=1
+    shift
+fi
+
 if [ "$#" -eq 0 ]; then
-    echo "usage: $(basename "$0") <file.d.ts> [more.d.ts ...]" >&2
+    echo "usage: $(basename "$0") [--params] <file.d.ts> [more.d.ts ...]" >&2
     exit 2
 fi
 
@@ -64,12 +77,31 @@ for dts in "$@"; do
         status=1
     fi
 
+    # The parameter list of each exported function: everything between the
+    # function's name and the `):` that opens its return type.
+    signatures=$(grep -E '^export function' "$dts" | sed -E 's/^export function [A-Za-z_0-9]*\((.*)\):[^)]*$/\1/')
+
+    untyped_params=''
+    if [ "$params" -eq 1 ]; then
+        untyped_params=$(grep -E '^export function' "$dts" | grep -E '[(,][[:space:]]*[A-Za-z_][A-Za-z_0-9]*\??:[[:space:]]*any[,)]')
+        if [ -n "$untyped_params" ]; then
+            count=$(printf '%s\n' "$untyped_params" | wc -l | tr -d ' ')
+            echo "FAIL: $dts takes an \`any\` parameter in $count of $total exported function(s):" >&2
+            printf '%s\n' "$untyped_params" | sed 's/^/  /' >&2
+            echo "  Name the parameter's type in" >&2
+            echo "  #[wasm_bindgen(unchecked_param_type = \"...\")] on the parameter." >&2
+            status=1
+        fi
+    fi
+
     # Every capitalised name a signature or a field mentions has to be declared
-    # in the same file.
+    # in the same file. String literals are removed first: a literal union such
+    # as `"Maximize" | "Minimize"` names values, not types.
     declared=$(grep -oE '^export (interface|type|class|enum) [A-Za-z_][A-Za-z_0-9]*' "$dts" | awk '{print $3}' | sort -u)
     returns=$(grep -E '^export function' "$dts" | sed -E 's/.*\):[[:space:]]*//')
     fields=$(grep -E '^    [a-z_][a-z_0-9]*\??:' "$dts" | sed -E 's/^[^:]*:[[:space:]]*//')
-    referenced=$(printf '%s\n%s\n' "$returns" "$fields" \
+    referenced=$(printf '%s\n%s\n%s\n' "$returns" "$fields" "$signatures" \
+        | sed -E 's/"[^"]*"//g' \
         | grep -oE '[A-Za-z_][A-Za-z_0-9]*' \
         | grep -E '^[A-Z]' \
         | grep -vE "^($builtins)$" \
@@ -92,8 +124,12 @@ for dts in "$@"; do
         status=1
     fi
 
-    if [ -z "$untyped" ] && [ -z "${missing// /}" ]; then
-        echo "OK: $dts -- $total exported function(s), every return type declared"
+    if [ -z "$untyped" ] && [ -z "$untyped_params" ] && [ -z "${missing// /}" ]; then
+        if [ "$params" -eq 1 ]; then
+            echo "OK: $dts -- $total exported function(s), every return and parameter type declared"
+        else
+            echo "OK: $dts -- $total exported function(s), every return type declared"
+        fi
     fi
 done
 
