@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Fixed
+
+- **`PertEstimate` percentiles stay within the estimate.**
+  `duration_at_confidence` (and so `p85`, `p95` and
+  `DurationDistribution::Pert`) used the textbook normal approximation
+  without bounds, so a low confidence level returned a duration shorter than
+  the optimistic estimate: for O = M − s, the 0.1 % point was M − 1.03 s. It
+  is now clamped to `[O, P]`, and `probability_of_completion` is 0 before O
+  and 1 from P on -- including a zero-width estimate, which divided by zero.
+  Inside the interval the textbook values are unchanged; the type
+  documentation now says it is the textbook convention, not the Beta-PERT
+  quantile.
+
 ## [0.7.1] - 2026-09-20
 
 ### Added

@@ -328,6 +328,23 @@ impl ConstraintViolation {
 ///
 /// Mean = (O + 4M + P) / 6, StdDev = (P - O) / 6
 ///
+/// # Textbook PERT, not the Beta distribution
+///
+/// Percentiles use the classical PERT convention: a normal distribution with
+/// the mean and standard deviation above. This is the number project-planning
+/// practice expects, and its original justification is the central limit
+/// theorem over a *path* of activities. It is not the quantile of the
+/// Beta-PERT distribution itself (`u_numflow::distributions::Pert::quantile`),
+/// whose spread is defined differently.
+///
+/// A normal distribution is unbounded, whereas an activity cannot finish
+/// before O or after P. Percentiles and completion probabilities are therefore
+/// confined to `[O, P]`: [`duration_at_confidence`](Self::duration_at_confidence)
+/// clamps to that interval, and
+/// [`probability_of_completion`](Self::probability_of_completion) is 0 before O
+/// and 1 from P on. Without this, a low confidence level returned a duration
+/// shorter than the optimistic estimate.
+///
 /// # References
 ///
 /// Malcolm et al. (1959), Clark (1962)
@@ -389,19 +406,44 @@ impl PertEstimate {
         sd * sd
     }
 
+    /// Lower and upper end of the estimate, `[O, P]`, whichever order they
+    /// were given in.
+    fn support(&self) -> (i64, i64) {
+        let (o, p) = (self.optimistic_ms, self.pessimistic_ms);
+        (o.min(p), o.max(p))
+    }
+
     /// Duration at specified confidence level.
     ///
-    /// Uses normal approximation via `u_numflow::special::inverse_normal_cdf`.
+    /// Textbook PERT normal approximation (`mean + z·σ`, with `z` from
+    /// `u_numflow::special::inverse_normal_cdf`), clamped to `[O, P]` -- see
+    /// the type-level documentation.
     pub fn duration_at_confidence(&self, confidence: f64) -> i64 {
+        let (lo, hi) = self.support();
         let z = u_numflow::special::inverse_normal_cdf(confidence);
-        (self.mean_ms() + z * self.std_dev_ms()) as i64
+        let d = self.mean_ms() + z * self.std_dev_ms();
+        if d.is_nan() {
+            // Only reachable for a NaN confidence level; the estimate's
+            // centre is the least surprising answer.
+            return (self.mean_ms() as i64).clamp(lo, hi);
+        }
+        (d as i64).clamp(lo, hi)
     }
 
     /// Probability of completing within given duration.
     ///
-    /// Uses `u_numflow::special::standard_normal_cdf`.
+    /// Textbook PERT normal approximation via
+    /// `u_numflow::special::standard_normal_cdf`, confined to `[O, P]`:
+    /// 0 before O, 1 from P on. A zero-width estimate (O = P) is a step at O.
     pub fn probability_of_completion(&self, duration_ms: i64) -> f64 {
-        let z = (duration_ms as f64 - self.mean_ms()) / self.std_dev_ms();
+        let (lo, hi) = self.support();
+        if duration_ms < lo {
+            return 0.0;
+        }
+        if duration_ms >= hi {
+            return 1.0;
+        }
+        let z = (duration_ms as f64 - self.mean_ms()) / self.std_dev_ms().abs();
         u_numflow::special::standard_normal_cdf(z)
     }
 
@@ -567,6 +609,53 @@ mod tests {
         // P95 > P85 > P50
         assert!(pert.p95() > pert.p85());
         assert!(pert.p85() > pert.p50());
+    }
+
+    #[test]
+    fn pert_percentiles_stay_within_optimistic_and_pessimistic() {
+        // Symmetric O = M - s: the unclamped normal quantile at 0.001 is
+        // M - 1.03 s, below the optimistic estimate.
+        let pert = PertEstimate::symmetric(10_000, 3_000);
+        let unclamped =
+            pert.mean_ms() + u_numflow::special::inverse_normal_cdf(0.001) * pert.std_dev_ms();
+        assert!(
+            unclamped < 7_000.0,
+            "precondition: normal tail leaves [O, P]"
+        );
+
+        assert_eq!(pert.duration_at_confidence(0.001), 7_000);
+        assert_eq!(pert.duration_at_confidence(0.999), 13_000);
+        assert_eq!(pert.duration_at_confidence(0.0), 7_000);
+        assert_eq!(pert.duration_at_confidence(1.0), 13_000);
+        assert_eq!(pert.duration_at_confidence(f64::NAN), 10_000);
+
+        // Inside the support the textbook value is unchanged.
+        let expected = (pert.mean_ms()
+            + u_numflow::special::inverse_normal_cdf(0.85) * pert.std_dev_ms())
+            as i64;
+        assert_eq!(pert.p85(), expected);
+
+        let dist = DurationDistribution::Pert(pert);
+        assert_eq!(dist.duration_at_confidence(0.001), 7_000);
+    }
+
+    #[test]
+    fn pert_completion_probability_is_zero_before_optimistic_and_one_from_pessimistic() {
+        let pert = PertEstimate::new(4_000, 6_000, 14_000);
+        assert_eq!(pert.probability_of_completion(3_999), 0.0);
+        assert_eq!(pert.probability_of_completion(14_000), 1.0);
+        assert_eq!(pert.probability_of_completion(20_000), 1.0);
+        let mid = pert.probability_of_completion(7_000);
+        assert!(
+            (mid - 0.5).abs() < 1e-9,
+            "mean is the textbook median: {mid}"
+        );
+
+        // Zero-width estimate: a step at O, never NaN.
+        let fixed = PertEstimate::new(5_000, 5_000, 5_000);
+        assert_eq!(fixed.probability_of_completion(4_999), 0.0);
+        assert_eq!(fixed.probability_of_completion(5_000), 1.0);
+        assert_eq!(fixed.duration_at_confidence(0.95), 5_000);
     }
 
     #[test]
