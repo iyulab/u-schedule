@@ -8,6 +8,17 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- **Every exported WASM function declares its parameter types.** Inputs were
+  typed `any`; `run_schedule` takes `ScheduleInput` and `solve_jobshop`
+  `JobShopInput`, declared from the structs the binding deserialises, with the
+  rule, crossover and mutation as unions of the names accepted. **TypeScript
+  code that passed a wrong shape or an unknown name now fails to compile**;
+  the runtime path is unchanged.
+- The publishing workflow now also fails if an exported function takes a
+  parameter typed `any` (`check-typed-dts.sh --params`).
+
 ## [0.7.2] - 2026-09-25
 
 ### Fixed

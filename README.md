@@ -105,20 +105,23 @@ npm install @iyulab/u-schedule
 
 ### TypeScript
 
-Every exported function declares its return type, and the declarations are
-generated from the same structs the binding serialises, so they cannot drift
-from what it actually returns:
+Every exported function declares its parameter and return types, and the
+declarations are generated from the same structs the binding reads and
+serialises, so they cannot drift from what it actually accepts and returns:
 
 ```ts
-export function solve_jobshop(input: any): JobShopOutput;
+export function solve_jobshop(problem: JobShopInput): JobShopOutput;
 ```
 
 An absent optional value is declared `T | undefined`, which is what the binding
 sends. Nothing needs an `as` cast -- and a wrong assumption about a result's
 shape is a compile error rather than something that fails at run time.
 
-Inputs are still `any`: they are validated at the boundary, and a rejected one
-says what was wrong.
+The same holds on the way in: a dispatching rule, crossover or mutation the
+binding does not know (`"spt"` for `"SPT"`, `"PMX"`) does not compile. The
+binding still validates every input at the boundary, for JavaScript callers
+and for values that reach it through a cast, and a rejected one says what was
+wrong.
 
 ### Quick Start
 

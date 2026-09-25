@@ -69,16 +69,21 @@ fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Resul
 
 // ── input schema ─────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct InputJob {
     id: String,
     processing_time: f64,
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     due_date: Option<f64>,
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     release_time: Option<f64>,
     #[serde(default = "default_weight")]
+    #[tsify(optional)]
     weight: f64,
 }
 
@@ -98,24 +103,31 @@ fn default_atc_k() -> f64 {
     2.0
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct ScheduleConfig {
     #[serde(default = "default_rule")]
+    #[tsify(optional)]
+    #[tsify(
+        type = "\"SPT\" | \"LPT\" | \"EDD\" | \"FCFS\" | \"CR\" | \"WSPT\" | \"MST\" | \"S/RO\" | \"SRO\" | \"ATC\" | \"LWKR\" | \"MWKR\" | \"PRIORITY\""
+    )]
     rule: String,
     /// Number of identical parallel machines (default: 1 = single machine).
     #[serde(default = "default_num_machines")]
+    #[tsify(optional)]
     num_machines: usize,
     /// Lookahead parameter for ATC rule (default: 2.0).
     #[serde(default = "default_atc_k")]
+    #[tsify(optional)]
     atc_k: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct ScheduleInput {
     jobs: Vec<InputJob>,
     #[serde(default)]
+    #[tsify(optional)]
     config: ScheduleConfig,
 }
 
@@ -341,7 +353,9 @@ fn compute_utilization(
 /// When `config.num_machines` is omitted (defaults to 1), behavior is
 /// identical to the original single-machine implementation.
 #[wasm_bindgen(unchecked_return_type = "ScheduleOutput")]
-pub fn run_schedule(jobs: JsValue) -> Result<JsValue, JsValue> {
+pub fn run_schedule(
+    #[wasm_bindgen(unchecked_param_type = "ScheduleInput")] jobs: JsValue,
+) -> Result<JsValue, JsValue> {
     let input: ScheduleInput = from_js(jobs, "jobs")?;
 
     if input.jobs.is_empty() {
@@ -389,14 +403,17 @@ pub fn run_schedule(jobs: JsValue) -> Result<JsValue, JsValue> {
 
 // ── input schema ────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct JobShopOperation {
     /// Machine ID (e.g., "M1", "M2"). If multiple candidates, use an array.
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "string | null")]
     machine: Option<String>,
     /// Candidate machine IDs. Takes precedence over `machine`.
     #[serde(default)]
+    #[tsify(optional)]
     machines: Vec<String>,
     /// Processing time in seconds.
     processing_time: f64,
@@ -415,14 +432,18 @@ impl JobShopOperation {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct JobShopJob {
     id: String,
     operations: Vec<JobShopOperation>,
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     due_date: Option<f64>,
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     release_time: Option<f64>,
 }
 
@@ -450,22 +471,32 @@ fn default_mutation_type() -> String {
     "Swap".to_string()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct JobShopGaConfig {
     #[serde(default = "default_population_size")]
+    #[tsify(optional)]
     population_size: usize,
     #[serde(default = "default_max_generations")]
+    #[tsify(optional)]
     max_generations: usize,
     #[serde(default = "default_mutation_rate")]
+    #[tsify(optional)]
     mutation_rate: f64,
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     seed: Option<u64>,
     #[serde(default = "default_tardiness_weight")]
+    #[tsify(optional)]
     tardiness_weight: f64,
     #[serde(default = "default_crossover_type")]
+    #[tsify(optional)]
+    #[tsify(type = "\"POX\" | \"LOX\" | \"JOX\"")]
     crossover: String,
     #[serde(default = "default_mutation_type")]
+    #[tsify(optional)]
+    #[tsify(type = "\"Swap\" | \"Insert\" | \"Invert\"")]
     mutation: String,
 }
 
@@ -483,14 +514,17 @@ impl Default for JobShopGaConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct JobShopInput {
     jobs: Vec<JobShopJob>,
     /// Number of machines. If omitted, inferred from operation machine IDs.
     #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
     num_machines: Option<usize>,
     #[serde(default)]
+    #[tsify(optional)]
     ga_config: JobShopGaConfig,
 }
 
@@ -613,7 +647,9 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
 /// }
 /// ```
 #[wasm_bindgen(unchecked_return_type = "JobShopOutput")]
-pub fn solve_jobshop(problem: JsValue) -> Result<JsValue, JsValue> {
+pub fn solve_jobshop(
+    #[wasm_bindgen(unchecked_param_type = "JobShopInput")] problem: JsValue,
+) -> Result<JsValue, JsValue> {
     let input: JobShopInput = from_js(problem, "problem")?;
 
     if input.jobs.is_empty() {
