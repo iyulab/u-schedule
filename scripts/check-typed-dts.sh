@@ -83,7 +83,7 @@ for dts in "$@"; do
 
     untyped_params=''
     if [ "$params" -eq 1 ]; then
-        untyped_params=$(grep -E '^export function' "$dts" | grep -E '[(,][[:space:]]*[A-Za-z_][A-Za-z_0-9]*\??:[[:space:]]*any[,)]')
+        untyped_params=$(grep -E '^export function' "$dts" | grep -E '[(,][[:space:]]*[A-Za-z_][A-Za-z_0-9]*\??:[[:space:]]*any([[:space:]]*\|[^,)]*)?[,)]')
         if [ -n "$untyped_params" ]; then
             count=$(printf '%s\n' "$untyped_params" | wc -l | tr -d ' ')
             echo "FAIL: $dts takes an \`any\` parameter in $count of $total exported function(s):" >&2
