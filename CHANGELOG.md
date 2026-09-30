@@ -21,6 +21,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   is imported, in Node and in bundlers alike -- so the example threw
   `init is not a function` on its first line. It now imports the functions
   directly.
+- **A job `id` given to two jobs is refused** by `run_schedule` and
+  `solve_jobshop`, naming the id and both positions. `solve_jobshop` used to
+  drop one of the two jobs from the schedule without a word; `run_schedule`
+  listed both under one name. Input that used to be accepted is now refused.
+- The README said a rejected input is returned rather than thrown. Both
+  functions throw the message string.
 
 ## [0.8.0] - 2026-09-29
 

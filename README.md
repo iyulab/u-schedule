@@ -221,7 +221,9 @@ Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Inser
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
 | `seed` | optional u64 | random |
 
-**Error handling:** Invalid parameters return a JS error string (not a thrown exception). Check the return value:
+**Error handling:** A rejected input is thrown as the message string -- both functions are
+synchronous, so catch it with `try`/`catch`. Besides invalid settings, a job `id` given to two
+jobs is refused, since the schedule names jobs by id:
 
 ```javascript
 try {

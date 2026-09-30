@@ -199,6 +199,26 @@ fn build_task(job: &InputJob) -> Task {
     task
 }
 
+/// Refuses a job `id` given to two jobs.
+///
+/// The output names jobs by `id` alone. A dispatching schedule would list two
+/// entries under one name that the caller cannot tell apart, and the job-shop
+/// solver keys its problem by task id, so one of the two jobs silently left
+/// the schedule.
+fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    let mut first_at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (position, id) in ids.into_iter().enumerate() {
+        if let Some(first) = first_at.insert(id, position) {
+            return Err(format!(
+                "job {id:?}: the id is given twice, at positions {first} and {position} \
+                 of jobs (counting from 0); the schedule names jobs by id, so every \
+                 job needs its own"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── rule selection ──────────────────────────────────────────────────────────
 
 fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, String> {
@@ -368,6 +388,7 @@ pub fn run_schedule(
         return serde_wasm_bindgen::to_value(&output).map_err(js_err);
     }
 
+    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str())).map_err(js_err)?;
     let num_machines = input.config.num_machines.max(1);
     let engine = build_engine(&input.config.rule, &input.config).map_err(js_err)?;
     let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
@@ -662,6 +683,8 @@ pub fn solve_jobshop(
         };
         return serde_wasm_bindgen::to_value(&output).map_err(js_err);
     }
+
+    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str())).map_err(js_err)?;
 
     // ── Collect all machine IDs ──
     let mut machine_ids: Vec<String> = Vec::new();
@@ -1088,6 +1111,18 @@ mod tests {
     }
 
     // ── jobshop tests ──
+
+    #[test]
+    fn a_repeated_job_id_is_refused_naming_both_positions() {
+        let err = refuse_repeated_ids(["A", "B", "A"]).expect_err("A is given twice");
+        assert!(err.contains("job \"A\""), "{err}");
+        assert!(err.contains("positions 0 and 2"), "{err}");
+        assert!(
+            !err.contains("  "),
+            "a wrapped literal left a run of spaces: {err}"
+        );
+        assert!(refuse_repeated_ids(["A", "B", "C"]).is_ok());
+    }
 
     #[test]
     fn test_jobshop_basic() {
