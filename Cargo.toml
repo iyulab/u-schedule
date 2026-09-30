@@ -1,6 +1,6 @@
 [package]
 name = "u-schedule"
-version = "0.8.0"
+version = "0.9.0"
 rust-version = "1.87"
 edition = "2021"
 authors = ["iyulab"]
