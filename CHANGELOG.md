@@ -8,6 +8,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The README says a browser without a bundler is not supported (the package
+  loads its `.wasm` through an ES module import, which browsers refuse), instead
+  of listing only the environments that work.
+
 ## [0.9.0] - 2026-09-30
 
 ### Changed
