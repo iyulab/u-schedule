@@ -27,6 +27,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   listed both under one name. Input that used to be accepted is now refused.
 - The README said a rejected input is returned rather than thrown. Both
   functions throw the message string.
+- The README's Rust example did not compile: it imported a
+  `DispatchingEngine` and `Rule` that do not exist, called `Activity::new`
+  and `Resource::new` with the wrong arguments, and read `validate_input`'s
+  `Result` as a list. It now validates and schedules two jobs with
+  `SimpleScheduler`. The Quick Start pointed at the git repository instead of
+  the published crate.
+  The README's Rust examples are now compiled and run with the doc-tests,
+  so an example that stops matching the API fails CI.
 
 ## [0.8.0] - 2026-09-29
 

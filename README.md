@@ -51,23 +51,33 @@ The GA module uses dual-vector encoding for job-shop scheduling:
 
 ```toml
 [dependencies]
-u-schedule = { git = "https://github.com/iyulab/u-schedule" }
+u-schedule = "0.8"
 ```
 
 ```rust
-use u_schedule::models::{Task, Activity, Resource};
+use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task};
+use u_schedule::scheduler::SimpleScheduler;
 use u_schedule::validation::validate_input;
-use u_schedule::dispatching::{DispatchingEngine, Rule};
 
-// Define tasks with activities
-let task = Task::new("T1")
-    .with_activity(Activity::new("A1", 30_000)); // 30 seconds
+// Two jobs, one operation each, both on machine M1. Times are milliseconds.
+let job = |id: &str, ms: i64| {
+    Task::new(id).with_activity(
+        Activity::new(format!("{id}-op1"), id, 0)
+            .with_duration(ActivityDuration::fixed(ms))
+            .with_requirement(
+                ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+            ),
+    )
+};
+let tasks = vec![job("J1", 30_000), job("J2", 20_000)];
+let resources = vec![Resource::new("M1", ResourceType::Primary)];
 
-let resource = Resource::new("R1", "Machine 1");
+// Duplicate ids, unknown resources and precedence cycles are reported up front.
+validate_input(&tasks, &resources).expect("valid input");
 
-// Validate input
-let errors = validate_input(&[task], &[resource]);
-assert!(errors.is_empty());
+let schedule = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+assert!(schedule.is_valid());
+assert_eq!(schedule.makespan_ms(), 50_000); // the two jobs run back to back
 ```
 
 ## Build & Test
