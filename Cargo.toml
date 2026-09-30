@@ -1,6 +1,6 @@
 [package]
 name = "u-schedule"
-version = "0.9.0"
+version = "0.10.0"
 rust-version = "1.87"
 edition = "2021"
 authors = ["iyulab"]
@@ -22,8 +22,8 @@ serde = { version = "1.0", features = ["derive"] }
 # Derives the TypeScript declaration from the same struct serde reads, so the
 # published .d.ts cannot drift from the shape the binding actually returns.
 tsify = { version = "0.5", default-features = false, features = ["js"], optional = true }
-u-metaheur = "0.4"
-u-numflow = "0.6"
+u-metaheur = "0.5"
+u-numflow = "0.7"
 rand = "0.10"
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }

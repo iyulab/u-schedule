@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
-## [Unreleased]
+## [0.10.0] - 2026-09-30
 
 ### Added
 
@@ -16,6 +16,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `Display` and `std::error::Error`.
 
 ### Changed
+
+- Depends on u-numflow 0.7 and u-metaheur 0.5.
 
 - **Breaking:** the solvers take only a checked `Problem`:
   `SchedulingGaProblem::new(&problem)`, `ScheduleCpBuilder::new(&problem)`,
