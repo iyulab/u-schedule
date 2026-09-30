@@ -12,7 +12,8 @@ use std::collections::HashMap;
 
 use u_metaheur::cp::{CpModel, CpSolution, CpSolver, IntervalVar, Objective, SolverConfig};
 
-use crate::models::{Assignment, Constraint, Resource, Schedule, Task, TransitionMatrixCollection};
+use crate::models::{Assignment, Constraint, Schedule, TransitionMatrixCollection};
+use crate::Problem;
 
 /// Builds a CP model from scheduling domain objects.
 ///
@@ -23,27 +24,26 @@ use crate::models::{Assignment, Constraint, Resource, Schedule, Task, Transition
 /// ```no_run
 /// use u_schedule::cp::ScheduleCpBuilder;
 /// use u_schedule::models::{Task, Resource};
+/// use u_schedule::Problem;
 /// use u_metaheur::cp::{SimpleCpSolver, SolverConfig};
 ///
-/// let tasks = vec![/* ... */];
-/// let resources = vec![/* ... */];
-/// let builder = ScheduleCpBuilder::new(&tasks, &resources);
+/// let tasks: Vec<Task> = vec![/* ... */];
+/// let resources: Vec<Resource> = vec![/* ... */];
+/// let problem = Problem::new(tasks, resources).expect("valid input");
+/// let builder = ScheduleCpBuilder::new(&problem);
 /// let model = builder.build(100_000);
 /// ```
 pub struct ScheduleCpBuilder<'a> {
-    tasks: &'a [Task],
-    #[allow(dead_code)]
-    resources: &'a [Resource],
+    problem: &'a Problem,
     constraints: Vec<Constraint>,
     transition_matrices: TransitionMatrixCollection,
 }
 
 impl<'a> ScheduleCpBuilder<'a> {
     /// Creates a new CP builder.
-    pub fn new(tasks: &'a [Task], resources: &'a [Resource]) -> Self {
+    pub fn new(problem: &'a Problem) -> Self {
         Self {
-            tasks,
-            resources,
+            problem,
             constraints: Vec::new(),
             transition_matrices: TransitionMatrixCollection::new(),
         }
@@ -73,7 +73,7 @@ impl<'a> ScheduleCpBuilder<'a> {
         let mut model = CpModel::new("scheduling", horizon_ms);
 
         // Create interval variables for each activity
-        for task in self.tasks {
+        for task in self.problem.tasks() {
             let release = task.release_time.unwrap_or(0);
 
             for activity in &task.activities {
@@ -165,7 +165,7 @@ impl<'a> ScheduleCpBuilder<'a> {
             return schedule;
         }
 
-        for task in self.tasks {
+        for task in self.problem.tasks() {
             for (step, activity) in task.activities.iter().enumerate() {
                 if let Some(interval_sol) = solution.intervals.get(&activity.id) {
                     if interval_sol.is_present {
@@ -198,7 +198,7 @@ impl<'a> ScheduleCpBuilder<'a> {
     fn collect_resource_activities(&self) -> HashMap<String, Vec<String>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
-        for task in self.tasks {
+        for task in self.problem.tasks() {
             for activity in &task.activities {
                 for candidate in activity.candidate_resources() {
                     map.entry(candidate.to_string())
@@ -215,10 +215,12 @@ impl<'a> ScheduleCpBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Activity, ActivityDuration, ResourceRequirement, ResourceType};
+    use crate::models::{
+        Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task,
+    };
     use u_metaheur::cp::SimpleCpSolver;
 
-    fn make_test_data() -> (Vec<Task>, Vec<Resource>) {
+    fn make_test_data() -> Problem {
         let tasks = vec![
             Task::new("T1")
                 .with_activity(
@@ -245,13 +247,13 @@ mod tests {
         ];
 
         let resources = vec![Resource::new("M1", ResourceType::Primary)];
-        (tasks, resources)
+        Problem::new(tasks, resources).expect("a valid problem")
     }
 
     #[test]
     fn test_build_model() {
-        let (tasks, resources) = make_test_data();
-        let builder = ScheduleCpBuilder::new(&tasks, &resources);
+        let problem = make_test_data();
+        let builder = ScheduleCpBuilder::new(&problem);
         let model = builder.build(100_000);
 
         // 3 intervals (T1_O1, T1_O2, T2_O1)
@@ -262,9 +264,9 @@ mod tests {
 
     #[test]
     fn test_build_with_constraints() {
-        let (tasks, resources) = make_test_data();
+        let problem = make_test_data();
         let constraints = vec![Constraint::precedence("T1_O2", "T2_O1")];
-        let builder = ScheduleCpBuilder::new(&tasks, &resources).with_constraints(constraints);
+        let builder = ScheduleCpBuilder::new(&problem).with_constraints(constraints);
         let model = builder.build(100_000);
 
         // Additional precedence constraint
@@ -273,8 +275,8 @@ mod tests {
 
     #[test]
     fn test_solve_basic() {
-        let (tasks, resources) = make_test_data();
-        let builder = ScheduleCpBuilder::new(&tasks, &resources);
+        let problem = make_test_data();
+        let builder = ScheduleCpBuilder::new(&problem);
         let solver = SimpleCpSolver::new();
         let config = SolverConfig::default();
 
@@ -286,8 +288,8 @@ mod tests {
 
     #[test]
     fn test_intra_task_precedence() {
-        let (tasks, resources) = make_test_data();
-        let builder = ScheduleCpBuilder::new(&tasks, &resources);
+        let problem = make_test_data();
+        let builder = ScheduleCpBuilder::new(&problem);
         let solver = SimpleCpSolver::new();
         let config = SolverConfig::default();
 
@@ -304,8 +306,8 @@ mod tests {
 
     #[test]
     fn test_no_overlap() {
-        let (tasks, resources) = make_test_data();
-        let builder = ScheduleCpBuilder::new(&tasks, &resources);
+        let problem = make_test_data();
+        let builder = ScheduleCpBuilder::new(&problem);
         let solver = SimpleCpSolver::new();
         let config = SolverConfig::default();
 

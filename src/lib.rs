@@ -64,8 +64,11 @@ pub mod cp;
 pub mod dispatching;
 pub mod ga;
 pub mod models;
+pub mod problem;
 pub mod scheduler;
 pub mod validation;
+
+pub use problem::Problem;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

@@ -9,6 +9,12 @@ use u_schedule::models::*;
 use u_schedule::scheduler::{
     check_schedule, FeasibilityInput, ResourceTimeline, ScheduleRequest, SimpleScheduler,
 };
+use u_schedule::Problem;
+
+/// A checked problem, for scenarios whose input is valid by construction.
+fn valid(tasks: &[Task], resources: &[Resource]) -> Problem {
+    Problem::new(tasks.to_vec(), resources.to_vec()).expect("a valid problem")
+}
 
 #[test]
 fn scheduler_output_is_feasible_end_to_end() {
@@ -37,7 +43,7 @@ fn scheduler_output_is_feasible_end_to_end() {
         Resource::primary("M2"),
         Resource::secondary("T1").with_capacity(1),
     ];
-    let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+    let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
     assert!(
         s.violations.is_empty(),
         "self-reported violations: {:?}",
@@ -82,7 +88,7 @@ fn fixed_assignment_is_seeded_and_serializes_others() {
     let pinned = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pinned])
-        .schedule(&tasks, &resources, 0);
+        .schedule(&valid(&tasks, &resources), 0);
     let j2 = s
         .assignments
         .iter()
@@ -111,7 +117,7 @@ fn conflicting_fixed_assignment_reports_violation_not_silent_move() {
     let p2 = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![p1, p2])
-        .schedule(&tasks, &resources, 0);
+        .schedule(&valid(&tasks, &resources), 0);
     assert!(!s.violations.is_empty(), "conflict not reported");
     assert!(!s.is_valid());
     assert!(s
@@ -157,7 +163,7 @@ fn multi_resource_pin_seeds_all_holds() {
     ];
     let s = SimpleScheduler::new()
         .with_fixed_assignments(pins)
-        .schedule(&[task], &resources, 0);
+        .schedule(&valid(&[task], &resources), 0);
     let holds = s.assignments_for_activity_all("J1_O1");
     assert_eq!(
         holds.len(),
@@ -197,7 +203,7 @@ fn pinned_activity_pushes_successor_after_pin_end() {
     let pin = Assignment::new("J1_O1", "J1", "M1", 2000, 3000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
-        .schedule(&[task], &resources, 0);
+        .schedule(&valid(&[task], &resources), 0);
     let o2 = s.assignment_for_activity("J1_O2").unwrap();
     assert!(
         o2.start_ms >= 3000,
@@ -233,7 +239,7 @@ fn pinned_successor_precedes_conflicting_unpinned_predecessor_reports_violation(
     let pin = Assignment::new("J1_O2", "J1", "M1", 500, 1500);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
-        .schedule(&[task], &resources, 0);
+        .schedule(&valid(&[task], &resources), 0);
 
     // ① 선점 예약: O1(선행)이 pin 구간 [500,1500)을 회피해 [1500,2500)으로 밀림.
     let o1 = s.assignment_for_activity("J1_O1").unwrap();
@@ -284,7 +290,7 @@ fn pinned_activity_coexists_with_sgs_activity_under_capacity_two() {
     let pin = Assignment::new("J1_O1", "J1", "M1", 0, 1000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
-        .schedule(&tasks, &resources, 0);
+        .schedule(&valid(&tasks, &resources), 0);
 
     let j1 = s.assignment_for_activity("J1_O1").unwrap();
     assert_eq!((j1.start_ms, j1.end_ms), (0, 1000));
@@ -308,7 +314,7 @@ fn schedule_request_honors_fixed_assignments() {
     // schedule_request 진입점도 seed 를 존중해야 함 (Self 재구성 시 fixed 전파).
     let (tasks, resources) = two_job_single_machine();
     let pin = Assignment::new("J2_O1", "J2", "M1", 2000, 3000);
-    let request = ScheduleRequest::new(tasks, resources);
+    let request = ScheduleRequest::new(valid(&tasks, &resources));
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
         .schedule_request(&request);
@@ -319,7 +325,29 @@ fn schedule_request_honors_fixed_assignments() {
 
 #[test]
 fn unfillable_requirement_reported_not_silent() {
-    // probe S1의 정직성 요구: 충족 불가가 침묵하지 않는다
+    // probe S1의 정직성 요구: 충족 불가가 침묵하지 않는다.
+    // 캘린더가 작업 길이를 한 번도 담지 못하는 자원 — 존재하지 않는 자원을 가리키는
+    // 입력은 이제 `Problem::new` 가 거절하므로(아래 테스트), 충족 불가는 이 경로로 만든다.
+    let task = Task::new("J1").with_activity(
+        Activity::new("O1", "J1", 0)
+            .with_duration(ActivityDuration::fixed(1000))
+            .with_requirement(
+                ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+            ),
+    );
+    let short = Resource::primary("M1").with_calendar(Calendar::new("short").with_window(0, 500));
+    let s = SimpleScheduler::new().schedule(&valid(&[task], &[short]), 0);
+    assert!(!s.is_valid());
+    assert!(s
+        .violations
+        .iter()
+        .any(|v| v.violation_type == ViolationType::RequirementUnfilled));
+}
+
+#[test]
+fn a_candidate_that_names_no_resource_is_refused_before_scheduling() {
+    // 종전에는 스케줄은 만들어지고 `RequirementUnfilled` 로만 보고됐다 — 오타 난 자원 id 와
+    // 「그 시간에 쓸 수 없음」이 같은 위반으로 보였다.
     let task = Task::new("J1").with_activity(
         Activity::new("O1", "J1", 0)
             .with_duration(ActivityDuration::fixed(1000))
@@ -327,12 +355,29 @@ fn unfillable_requirement_reported_not_silent() {
                 ResourceRequirement::new("Machine").with_candidates(vec!["NOPE".into()]),
             ),
     );
-    let s = SimpleScheduler::new().schedule(&[task], &[Resource::primary("M1")], 0);
-    assert!(!s.is_valid());
-    assert!(s
-        .violations
-        .iter()
-        .any(|v| v.violation_type == ViolationType::RequirementUnfilled));
+    let errors = Problem::new(vec![task], vec![Resource::primary("M1")]).expect_err("unknown");
+    assert_eq!(errors[0].kind.code(), "invalid_resource_reference");
+}
+
+#[test]
+fn two_tasks_sharing_an_id_are_refused_not_merged() {
+    // 종전: job-shop 해에서 같은 id 의 작업 하나가 결과에서 조용히 사라졌다(C413).
+    let mk = |act: &str| {
+        Task::new("J1").with_activity(
+            Activity::new(act, "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        )
+    };
+    let errors =
+        Problem::new(vec![mk("A"), mk("B")], vec![Resource::primary("M1")]).expect_err("dup");
+    assert!(errors.iter().any(|e| e.kind
+        == u_schedule::validation::ValidationErrorKind::DuplicateId {
+            entity: u_schedule::validation::Entity::Task,
+            id: "J1".into(),
+        }));
 }
 
 fn arb_instance() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
@@ -392,7 +437,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     #[test]
     fn scheduler_output_always_self_consistent((tasks, resources) in arb_instance()) {
-        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         let non_unfilled: Vec<_> = s.violations.iter()
             .filter(|v| v.violation_type != ViolationType::RequirementUnfilled)
             .collect();

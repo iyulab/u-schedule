@@ -20,6 +20,7 @@ use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::models::{
     Activity, Assignment, Resource, ResourceRequirement, Schedule, Task, TransitionMatrixCollection,
 };
+use crate::Problem;
 
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
@@ -27,10 +28,8 @@ const MAX_FIXED_POINT_ITERS: usize = 10_000;
 /// Input container for scheduling.
 #[derive(Debug, Clone)]
 pub struct ScheduleRequest {
-    /// Tasks to schedule.
-    pub tasks: Vec<Task>,
-    /// Available resources.
-    pub resources: Vec<Resource>,
+    /// The tasks to schedule and the resources available to them.
+    pub problem: Problem,
     /// Schedule start time (ms).
     pub start_time_ms: i64,
     /// Sequence-dependent setup time matrices.
@@ -43,10 +42,9 @@ pub struct ScheduleRequest {
 
 impl ScheduleRequest {
     /// Creates a new schedule request.
-    pub fn new(tasks: Vec<Task>, resources: Vec<Resource>) -> Self {
+    pub fn new(problem: Problem) -> Self {
         Self {
-            tasks,
-            resources,
+            problem,
             start_time_ms: 0,
             transition_matrices: TransitionMatrixCollection::new(),
             constraints: Vec::new(),
@@ -83,6 +81,7 @@ impl ScheduleRequest {
 /// ```
 /// use u_schedule::scheduler::{SimpleScheduler, ScheduleRequest};
 /// use u_schedule::models::{Task, Resource, ResourceType, Activity, ActivityDuration, ResourceRequirement};
+/// use u_schedule::Problem;
 ///
 /// let tasks = vec![
 ///     Task::new("J1").with_activity(
@@ -95,7 +94,8 @@ impl ScheduleRequest {
 ///     ),
 /// ];
 /// let resources = vec![Resource::new("M1", ResourceType::Primary)];
-/// let request = ScheduleRequest::new(tasks, resources);
+/// let problem = Problem::new(tasks, resources).expect("valid input");
+/// let request = ScheduleRequest::new(problem);
 ///
 /// let scheduler = SimpleScheduler::new();
 /// let schedule = scheduler.schedule_request(&request);
@@ -205,7 +205,8 @@ impl SimpleScheduler {
     ///
     /// # Reference
     /// Kolisch & Hartmann (1999), serial schedule generation scheme.
-    pub fn schedule(&self, tasks: &[Task], resources: &[Resource], start_time_ms: i64) -> Schedule {
+    pub fn schedule(&self, problem: &Problem, start_time_ms: i64) -> Schedule {
+        let (tasks, resources) = (problem.tasks(), problem.resources());
         let mut schedule = Schedule::new();
         let mut timelines: HashMap<String, ResourceTimeline> = resources
             .iter()
@@ -384,11 +385,10 @@ impl SimpleScheduler {
             rule_engine: self.rule_engine.clone(),
             fixed: self.fixed.clone(),
         };
-        let mut schedule =
-            scheduler.schedule(&request.tasks, &request.resources, request.start_time_ms);
+        let mut schedule = scheduler.schedule(&request.problem, request.start_time_ms);
         let input = super::feasibility::FeasibilityInput {
-            tasks: &request.tasks,
-            resources: &request.resources,
+            tasks: request.problem.tasks(),
+            resources: request.problem.resources(),
             constraints: &request.constraints,
         };
         super::feasibility::annotate_schedule(&mut schedule, &input);
@@ -449,6 +449,11 @@ mod tests {
         Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, TransitionMatrix,
     };
 
+    /// A checked problem, for tests whose input is valid by construction.
+    fn valid(tasks: &[Task], resources: &[Resource]) -> crate::Problem {
+        crate::Problem::new(tasks.to_vec(), resources.to_vec()).expect("a valid problem")
+    }
+
     fn make_resource(id: &str) -> Resource {
         Resource::new(id, ResourceType::Primary)
     }
@@ -497,7 +502,7 @@ mod tests {
             Resource::new("M2", ResourceType::Primary),
             Resource::new("TOOL1", ResourceType::Secondary),
         ];
-        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
 
         // 각 activity가 설비+금형 2개 배정
         assert_eq!(s.assignments_for_task("J1").len(), 2);
@@ -527,7 +532,7 @@ mod tests {
             make_task_with_resource("J2", 3000, "M1", 5),
         ];
         let resources = vec![Resource::new("M1", ResourceType::Primary).with_calendar(cal)];
-        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         let j2 = s.assignment_for_activity("J2_O1").unwrap();
         assert_eq!(j2.start_ms, 10_000);
         assert_eq!(j2.end_ms, 13_000);
@@ -541,7 +546,7 @@ mod tests {
             make_task_with_resource("J2", 1000, "M1", 5),
         ];
         let resources = vec![Resource::new("M1", ResourceType::Primary).with_capacity(2)];
-        let s = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         assert_eq!(s.assignment_for_activity("J1_O1").unwrap().start_ms, 0);
         assert_eq!(s.assignment_for_activity("J2_O1").unwrap().start_ms, 0);
     }
@@ -560,8 +565,7 @@ mod tests {
                     ),
             );
         let s = SimpleScheduler::new().schedule(
-            &[task],
-            &[Resource::new("M1", ResourceType::Primary)],
+            &valid(&[task], &[Resource::new("M1", ResourceType::Primary)]),
             0,
         );
         let a = s.assignment_for_activity("J1_O1").unwrap();
@@ -575,7 +579,7 @@ mod tests {
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
         assert_eq!(schedule.assignment_count(), 1);
 
         let a = schedule.assignment_for_activity("J1_O1").unwrap();
@@ -593,7 +597,7 @@ mod tests {
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
 
         // High priority scheduled first
         let high_a = schedule.assignment_for_activity("high_O1").unwrap();
@@ -611,7 +615,7 @@ mod tests {
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
         let j1 = schedule.assignment_for_activity("J1_O1").unwrap();
         let j2 = schedule.assignment_for_activity("J2_O1").unwrap();
         assert_eq!(j1.start_ms, 0);
@@ -630,7 +634,7 @@ mod tests {
         let resources = vec![make_resource("M1"), make_resource("M2")];
         let scheduler = SimpleScheduler::new();
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
         let j1 = schedule.assignment_for_activity("J1_O1").unwrap();
         let j2 = schedule.assignment_for_activity("J2_O1").unwrap();
         // Both start at 0 since they use different resources
@@ -660,7 +664,7 @@ mod tests {
 
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
-        let schedule = scheduler.schedule(&[task], &resources, 0);
+        let schedule = scheduler.schedule(&valid(&[task], &resources), 0);
 
         let o1 = schedule.assignment_for_activity("O1").unwrap();
         let o2 = schedule.assignment_for_activity("O2").unwrap();
@@ -703,7 +707,7 @@ mod tests {
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new().with_transition_matrices(matrices);
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
         let o2 = schedule.assignment_for_activity("O2").unwrap();
         // J1 ends at 1000, setup A→B = 1000, J2 starts at 1000, ends at 1000+1000+1000 = 3000
         assert_eq!(o2.start_ms, 1000);
@@ -722,7 +726,7 @@ mod tests {
         let engine = RuleEngine::new().with_rule(rules::Spt);
         let scheduler = SimpleScheduler::new().with_rule_engine(engine);
 
-        let schedule = scheduler.schedule(&tasks, &resources, 0);
+        let schedule = scheduler.schedule(&valid(&tasks, &resources), 0);
         let short_a = schedule.assignment_for_activity("short_O1").unwrap();
         let long_a = schedule.assignment_for_activity("long_O1").unwrap();
         // SPT orders short first despite lower priority
@@ -734,7 +738,7 @@ mod tests {
     fn test_schedule_request() {
         let tasks = vec![make_task_with_resource("J1", 1000, "M1", 0)];
         let resources = vec![make_resource("M1")];
-        let request = ScheduleRequest::new(tasks, resources).with_start_time(5000);
+        let request = ScheduleRequest::new(valid(&tasks, &resources)).with_start_time(5000);
 
         let scheduler = SimpleScheduler::new();
         let schedule = scheduler.schedule_request(&request);
@@ -751,7 +755,7 @@ mod tests {
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
 
-        let schedule = scheduler.schedule(&[task], &resources, 0);
+        let schedule = scheduler.schedule(&valid(&[task], &resources), 0);
         let a = schedule.assignment_for_activity("J1_O1").unwrap();
         // Must not start before release_time
         assert_eq!(a.start_ms, 5000);
@@ -760,7 +764,7 @@ mod tests {
     #[test]
     fn test_empty_input() {
         let scheduler = SimpleScheduler::new();
-        let schedule = scheduler.schedule(&[], &[], 0);
+        let schedule = scheduler.schedule(&valid(&[], &[]), 0);
         assert_eq!(schedule.assignment_count(), 0);
         assert_eq!(schedule.makespan_ms(), 0);
     }
@@ -774,7 +778,7 @@ mod tests {
         );
         let resources = vec![make_resource("M1")];
         let scheduler = SimpleScheduler::new();
-        let schedule = scheduler.schedule(&[task], &resources, 0);
+        let schedule = scheduler.schedule(&valid(&[task], &resources), 0);
         assert_eq!(schedule.assignment_count(), 0);
     }
 }

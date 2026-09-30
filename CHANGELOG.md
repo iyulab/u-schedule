@@ -8,7 +8,32 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `Problem` — tasks and resources that passed `validate_input`. `Problem::new`
+  runs the check once and returns every finding.
+- `ValidationErrorKind::code()` and `Entity`; `ValidationError` implements
+  `Display` and `std::error::Error`.
+
 ### Changed
+
+- **Breaking:** the solvers take only a checked `Problem`:
+  `SchedulingGaProblem::new(&problem)`, `ScheduleCpBuilder::new(&problem)`,
+  `SimpleScheduler::schedule(&problem, start_time_ms)` and
+  `ScheduleRequest::new(problem)` (its `tasks`/`resources` fields are now one
+  `problem` field). The check existed but nothing made a caller run it, and the
+  solvers look entities up by id: two tasks sharing an id were solved as one,
+  and the other was missing from the schedule with nothing saying so. An
+  activity naming a resource that does not exist is now refused up front rather
+  than scheduled and reported as `RequirementUnfilled`.
+- **Breaking:** `ValidationErrorKind` variants carry the ids that locate the
+  problem (`DuplicateId { entity, id }`, `InvalidResourceReference { activity,
+  resource }`, ...).
+- **Breaking:** the WebAssembly functions throw an `Error` carrying a stable
+  `code` and the values behind it (`duplicate_id`, `unknown_option`,
+  `parameter_out_of_range`, `missing_machine`, ...) instead of a bare string —
+  `err.message` reads as before, but `String(err)` now starts with `Error: `.
+  The README lists every code and its fields.
 
 - The README says a browser without a bundler is not supported (the package
   loads its `.wasm` through an ES module import, which browsers refuse), instead

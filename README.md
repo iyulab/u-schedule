@@ -16,6 +16,7 @@ u-schedule provides domain models, constraints, validation, dispatching rules, a
 | Module | Description |
 |--------|-------------|
 | `models` | Domain types: `Task`, `Activity`, `Resource`, `Schedule`, `Assignment`, `Calendar`, `Constraint`, `TransitionMatrix` |
+| `problem` | `Problem` — tasks and resources that passed validation; the only input the solvers take |
 | `validation` | Input integrity checks: duplicate IDs, DAG cycle detection, resource reference validation |
 | `dispatching` | Priority dispatching rules and rule engine |
 | `scheduler` | Greedy scheduler and KPI evaluation |
@@ -57,7 +58,7 @@ u-schedule = "0.8"
 ```rust
 use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task};
 use u_schedule::scheduler::SimpleScheduler;
-use u_schedule::validation::validate_input;
+use u_schedule::Problem;
 
 // Two jobs, one operation each, both on machine M1. Times are milliseconds.
 let job = |id: &str, ms: i64| {
@@ -72,10 +73,11 @@ let job = |id: &str, ms: i64| {
 let tasks = vec![job("J1", 30_000), job("J2", 20_000)];
 let resources = vec![Resource::new("M1", ResourceType::Primary)];
 
-// Duplicate ids, unknown resources and precedence cycles are reported up front.
-validate_input(&tasks, &resources).expect("valid input");
+// Duplicate ids, unknown resources and precedence cycles are refused here, so
+// the solvers never see them: they take only a `Problem`.
+let problem = Problem::new(tasks, resources).expect("valid input");
 
-let schedule = SimpleScheduler::new().schedule(&tasks, &resources, 0);
+let schedule = SimpleScheduler::new().schedule(&problem, 0);
 assert!(schedule.is_valid());
 assert_eq!(schedule.makespan_ms(), 50_000); // the two jobs run back to back
 ```
@@ -231,17 +233,34 @@ Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Inser
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
 | `seed` | optional u64 | random |
 
-**Error handling:** A rejected input is thrown as the message string -- both functions are
-synchronous, so catch it with `try`/`catch`. Besides invalid settings, a job `id` given to two
-jobs is refused, since the schedule names jobs by id:
+**Errors:** both functions are synchronous and throw an `Error` whose `message` is
+readable text and which carries a `code` naming the reason, next to the values
+behind it — so a program can point at what to change without parsing the
+message:
 
-```javascript
+```js
+import { solve_jobshop } from '@iyulab/u-schedule';
+
 try {
-  const result = solve_jobshop({ jobs: [...], ga_config: { population_size: 0 } });
-} catch (e) {
-  console.error("Scheduling error:", e); // "ga_config.population_size must be >= 2, got 0"
+  solve_jobshop({
+    jobs: [{ id: 'J1', operations: [{ machine: 'M1', processing_time: 3 }] }],
+    ga_config: { population_size: 1 },
+  });
+} catch (err) {
+  console.log(err.code, err.parameter, err.min, err.got); // parameter_out_of_range ga_config.population_size 2 1
 }
 ```
+
+| `code` | Fields | Meaning |
+|---|---|---|
+| `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs) | Two jobs share an `id` (at positions `first` and `second`, from 0), or two tasks, activities or resources do |
+| `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
+| `parameter_out_of_range` | `parameter`, `min`, `max` (or `null`), `got` | A `ga_config` value outside the table above |
+| `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
+| `no_machines` | — | A job-shop request whose operations name no machine at all |
+| `empty_task` | `task` | A job with no operations |
+| `invalid_option` | `parameter` | GA settings the runner itself refuses |
+| `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), or a JSON string |
 
 ## npm (WebAssembly)
 

@@ -14,6 +14,7 @@ use u_metaheur::ga::GaProblem;
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
 use crate::models::{Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
+use crate::Problem;
 
 /// Compact activity descriptor for GA encoding.
 ///
@@ -67,11 +68,12 @@ impl ActivityInfo {
 /// ```no_run
 /// use u_schedule::ga::{SchedulingGaProblem, ActivityInfo};
 /// use u_schedule::models::{Task, Resource, ResourceType};
+/// use u_schedule::Problem;
 /// use u_metaheur::ga::{GaConfig, GaRunner};
 ///
-/// let tasks = vec![/* ... */];
-/// let resources = vec![/* ... */];
-/// let problem = SchedulingGaProblem::new(&tasks, &resources);
+/// let tasks: Vec<Task> = vec![/* ... */];
+/// let resources: Vec<Resource> = vec![/* ... */];
+/// let problem = SchedulingGaProblem::new(&Problem::new(tasks, resources).expect("valid input"));
 /// let config = GaConfig::default();
 /// let result = GaRunner::run(&problem, &config);
 /// ```
@@ -107,8 +109,9 @@ pub struct SchedulingGaProblem {
 }
 
 impl SchedulingGaProblem {
-    /// Creates a problem from domain models.
-    pub fn new(tasks: &[Task], resources: &[Resource]) -> Self {
+    /// Creates a GA problem from a checked scheduling problem.
+    pub fn new(problem: &Problem) -> Self {
+        let (tasks, resources) = (problem.tasks(), problem.resources());
         let activities = ActivityInfo::from_tasks(tasks);
         let mut task_categories = HashMap::new();
         let mut deadlines = HashMap::new();
@@ -176,8 +179,8 @@ impl SchedulingGaProblem {
     /// use u_schedule::ga::SchedulingGaProblem;
     /// use u_schedule::ga::operators::{GeneticOperators, CrossoverType, MutationType};
     ///
-    /// # let (tasks, resources) = (vec![], vec![]);
-    /// let problem = SchedulingGaProblem::new(&tasks, &resources)
+    /// # let checked = u_schedule::Problem::new(vec![], vec![]).unwrap();
+    /// let problem = SchedulingGaProblem::new(&checked)
     ///     .with_operators(GeneticOperators {
     ///         crossover_type: CrossoverType::LOX,
     ///         mutation_type: MutationType::Invert,
@@ -329,6 +332,11 @@ mod tests {
     use rand::SeedableRng;
     use u_metaheur::ga::{GaConfig, GaRunner};
 
+    /// A checked problem, for tests whose input is valid by construction.
+    fn valid(tasks: &[Task], resources: &[Resource]) -> crate::Problem {
+        crate::Problem::new(tasks.to_vec(), resources.to_vec()).expect("a valid problem")
+    }
+
     fn make_test_problem() -> (Vec<Task>, Vec<Resource>) {
         let tasks = vec![
             Task::new("T1")
@@ -399,7 +407,7 @@ mod tests {
     #[test]
     fn an_assignment_names_its_activity_and_its_step() {
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let mut rng = SmallRng::seed_from_u64(42);
         let ch = problem.create_individual(&mut rng);
         let schedule = problem.decode(&ch);
@@ -443,7 +451,7 @@ mod tests {
     #[test]
     fn test_decode_chromosome() {
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let mut rng = SmallRng::seed_from_u64(42);
         let ch = problem.create_individual(&mut rng);
 
@@ -456,7 +464,7 @@ mod tests {
     #[test]
     fn test_fitness_computation() {
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let mut rng = SmallRng::seed_from_u64(42);
         let ch = problem.create_individual(&mut rng);
 
@@ -468,7 +476,7 @@ mod tests {
     #[test]
     fn test_ga_runner_integration() {
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let config = GaConfig::default()
             .with_population_size(20)
             .with_max_generations(10)
@@ -484,7 +492,7 @@ mod tests {
     #[test]
     fn test_crossover_and_mutation() {
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let mut rng = SmallRng::seed_from_u64(42);
 
         let p1 = problem.create_individual(&mut rng);
@@ -502,8 +510,9 @@ mod tests {
     fn test_tardiness_weight() {
         let (tasks, resources) = make_test_problem();
         let problem_makespan =
-            SchedulingGaProblem::new(&tasks, &resources).with_tardiness_weight(0.0);
-        let problem_tardy = SchedulingGaProblem::new(&tasks, &resources).with_tardiness_weight(1.0);
+            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_tardiness_weight(0.0);
+        let problem_tardy =
+            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_tardiness_weight(1.0);
 
         let mut rng = SmallRng::seed_from_u64(42);
         let ch = problem_makespan.create_individual(&mut rng);
@@ -528,7 +537,7 @@ mod tests {
         .collect();
 
         let problem =
-            SchedulingGaProblem::new(&tasks, &resources).with_process_times(process_times);
+            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_process_times(process_times);
 
         // Generate many individuals to exercise all 3 init strategies
         let mut rng = SmallRng::seed_from_u64(42);
@@ -546,7 +555,7 @@ mod tests {
             crossover_type: CrossoverType::LOX,
             mutation_type: MutationType::Invert,
         };
-        let problem = SchedulingGaProblem::new(&tasks, &resources).with_operators(ops);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources)).with_operators(ops);
         let config = GaConfig::default()
             .with_population_size(20)
             .with_max_generations(10)
@@ -565,7 +574,7 @@ mod tests {
             crossover_type: CrossoverType::JOX,
             mutation_type: MutationType::Insert,
         };
-        let problem = SchedulingGaProblem::new(&tasks, &resources).with_operators(ops);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources)).with_operators(ops);
         let config = GaConfig::default()
             .with_population_size(20)
             .with_max_generations(10)
@@ -581,7 +590,7 @@ mod tests {
     fn test_default_operators_backward_compatible() {
         // Default operators should be POX + Swap (same as original hardcoded behavior)
         let (tasks, resources) = make_test_problem();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         assert_eq!(problem.operators.crossover_type, CrossoverType::POX);
         assert_eq!(problem.operators.mutation_type, MutationType::Swap);
     }
@@ -600,7 +609,7 @@ mod tests {
         .collect();
 
         let problem =
-            SchedulingGaProblem::new(&tasks, &resources).with_process_times(process_times);
+            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_process_times(process_times);
         let config = GaConfig::default()
             .with_population_size(20)
             .with_max_generations(10)

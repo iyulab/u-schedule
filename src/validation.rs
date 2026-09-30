@@ -1,7 +1,8 @@
 //! Input validation for scheduling problems.
 //!
 //! Checks structural integrity of tasks, activities, and resources
-//! before scheduling. Detects:
+//! before scheduling. [`Problem::new`](crate::Problem::new) runs it, and the
+//! solvers take only a [`Problem`](crate::Problem). Detects:
 //! - Duplicate IDs
 //! - Missing resource references
 //! - Circular precedence dependencies (DAG validation)
@@ -25,29 +26,107 @@ pub struct ValidationError {
     pub message: String,
 }
 
-/// Categories of validation errors.
+/// What a validation error is about, with the ids that locate it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationErrorKind {
-    /// Two entities share the same ID.
-    DuplicateId,
-    /// An activity references a resource that doesn't exist.
-    InvalidResourceReference,
-    /// Precedence graph contains a cycle.
-    CyclicDependency,
+    /// Two entities of the same kind share an id.
+    DuplicateId {
+        /// Which kind of entity the id is repeated among.
+        entity: Entity,
+        /// The repeated id.
+        id: String,
+    },
+    /// An activity names a candidate resource that doesn't exist.
+    InvalidResourceReference {
+        /// The activity naming the resource.
+        activity: String,
+        /// The resource id that matches no resource.
+        resource: String,
+    },
+    /// The precedence graph contains a cycle.
+    CyclicDependency {
+        /// An activity on the cycle.
+        activity: String,
+    },
     /// A task has no activities.
-    EmptyTask,
-    /// An activity references a predecessor that doesn't exist.
-    InvalidPredecessor,
+    EmptyTask {
+        /// The task.
+        task: String,
+    },
+    /// An activity names a predecessor that doesn't exist.
+    InvalidPredecessor {
+        /// The activity naming the predecessor.
+        activity: String,
+        /// The predecessor id that matches no activity.
+        predecessor: String,
+    },
 }
 
-impl ValidationError {
-    fn new(kind: ValidationErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
+/// The kinds of entity a scheduling problem identifies by id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entity {
+    /// A [`Task`].
+    Task,
+    /// An [`Activity`](crate::models::Activity).
+    Activity,
+    /// A [`Resource`].
+    Resource,
+}
+
+impl Entity {
+    /// The entity's name in lower case, as messages and wire fields spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Entity::Task => "task",
+            Entity::Activity => "activity",
+            Entity::Resource => "resource",
         }
     }
 }
+
+impl ValidationErrorKind {
+    /// A stable snake_case name for the reason, for callers that branch on it
+    /// across a wire (`duplicate_id`, `invalid_resource_reference`, ...).
+    pub fn code(&self) -> &'static str {
+        match self {
+            ValidationErrorKind::DuplicateId { .. } => "duplicate_id",
+            ValidationErrorKind::InvalidResourceReference { .. } => "invalid_resource_reference",
+            ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
+            ValidationErrorKind::EmptyTask { .. } => "empty_task",
+            ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
+        }
+    }
+}
+
+impl ValidationError {
+    fn new(kind: ValidationErrorKind) -> Self {
+        let message = match &kind {
+            ValidationErrorKind::DuplicateId { entity, id } => {
+                format!("Duplicate {} ID: {id}", entity.name())
+            }
+            ValidationErrorKind::InvalidResourceReference { activity, resource } => {
+                format!("Activity '{activity}' references unknown resource '{resource}'")
+            }
+            ValidationErrorKind::CyclicDependency { activity } => {
+                format!("Circular dependency detected involving activity '{activity}'")
+            }
+            ValidationErrorKind::EmptyTask { task } => format!("Task '{task}' has no activities"),
+            ValidationErrorKind::InvalidPredecessor {
+                activity,
+                predecessor,
+            } => format!("Activity '{activity}' references unknown predecessor '{predecessor}'"),
+        };
+        Self { kind, message }
+    }
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 /// Validates the input data for a scheduling problem.
 ///
@@ -69,10 +148,10 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
     let mut resource_ids = HashSet::new();
     for r in resources {
         if !resource_ids.insert(r.id.as_str()) {
-            errors.push(ValidationError::new(
-                ValidationErrorKind::DuplicateId,
-                format!("Duplicate resource ID: {}", r.id),
-            ));
+            errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {
+                entity: Entity::Resource,
+                id: r.id.clone(),
+            }));
         }
     }
 
@@ -82,25 +161,24 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
 
     for task in tasks {
         if !task_ids.insert(task.id.as_str()) {
-            errors.push(ValidationError::new(
-                ValidationErrorKind::DuplicateId,
-                format!("Duplicate task ID: {}", task.id),
-            ));
+            errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {
+                entity: Entity::Task,
+                id: task.id.clone(),
+            }));
         }
 
         if task.activities.is_empty() {
-            errors.push(ValidationError::new(
-                ValidationErrorKind::EmptyTask,
-                format!("Task '{}' has no activities", task.id),
-            ));
+            errors.push(ValidationError::new(ValidationErrorKind::EmptyTask {
+                task: task.id.clone(),
+            }));
         }
 
         for act in &task.activities {
             if !activity_ids.insert(act.id.as_str()) {
-                errors.push(ValidationError::new(
-                    ValidationErrorKind::DuplicateId,
-                    format!("Duplicate activity ID: {}", act.id),
-                ));
+                errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {
+                    entity: Entity::Activity,
+                    id: act.id.clone(),
+                }));
             }
         }
     }
@@ -112,11 +190,10 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                 for cand in &req.candidates {
                     if !resource_ids.contains(cand.as_str()) {
                         errors.push(ValidationError::new(
-                            ValidationErrorKind::InvalidResourceReference,
-                            format!(
-                                "Activity '{}' references unknown resource '{}'",
-                                act.id, cand
-                            ),
+                            ValidationErrorKind::InvalidResourceReference {
+                                activity: act.id.clone(),
+                                resource: cand.clone(),
+                            },
                         ));
                     }
                 }
@@ -130,11 +207,10 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
             for pred in &act.predecessors {
                 if !activity_ids.contains(pred.as_str()) {
                     errors.push(ValidationError::new(
-                        ValidationErrorKind::InvalidPredecessor,
-                        format!(
-                            "Activity '{}' references unknown predecessor '{}'",
-                            act.id, pred
-                        ),
+                        ValidationErrorKind::InvalidPredecessor {
+                            activity: act.id.clone(),
+                            predecessor: pred.clone(),
+                        },
                     ));
                 }
             }
@@ -182,8 +258,9 @@ fn detect_cycles(tasks: &[Task]) -> Option<ValidationError> {
     for &node in &all_ids {
         if !visited.contains(node) && has_cycle_dfs(node, &adj, &mut visited, &mut in_stack) {
             return Some(ValidationError::new(
-                ValidationErrorKind::CyclicDependency,
-                format!("Circular dependency detected involving activity '{node}'"),
+                ValidationErrorKind::CyclicDependency {
+                    activity: node.to_string(),
+                },
             ));
         }
     }
@@ -272,9 +349,11 @@ mod tests {
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.kind == ValidationErrorKind::DuplicateId));
+        assert!(errors.iter().any(|e| e.kind
+            == ValidationErrorKind::DuplicateId {
+                entity: Entity::Task,
+                id: "J1".into()
+            }));
     }
 
     #[test]
@@ -283,9 +362,11 @@ mod tests {
         let resources = vec![Resource::primary("M1"), Resource::primary("M1")];
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.kind == ValidationErrorKind::DuplicateId && e.message.contains("resource")));
+        assert!(errors.iter().any(|e| e.kind
+            == ValidationErrorKind::DuplicateId {
+                entity: Entity::Resource,
+                id: "M1".into()
+            }));
     }
 
     #[test]
@@ -294,9 +375,10 @@ mod tests {
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.kind == ValidationErrorKind::EmptyTask));
+        assert!(errors.iter().any(|e| e.kind
+            == ValidationErrorKind::EmptyTask {
+                task: "empty".into()
+            }));
     }
 
     #[test]
@@ -311,9 +393,11 @@ mod tests {
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.kind == ValidationErrorKind::InvalidResourceReference));
+        assert!(errors.iter().any(|e| e.kind
+            == ValidationErrorKind::InvalidResourceReference {
+                activity: "O1".into(),
+                resource: "NONEXISTENT".into()
+            }));
     }
 
     #[test]
@@ -326,9 +410,11 @@ mod tests {
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.kind == ValidationErrorKind::InvalidPredecessor));
+        assert!(errors.iter().any(|e| e.kind
+            == ValidationErrorKind::InvalidPredecessor {
+                activity: "O1".into(),
+                predecessor: "NONEXISTENT".into()
+            }));
     }
 
     #[test]
@@ -355,7 +441,7 @@ mod tests {
         let errors = validate_input(&tasks, &resources).unwrap_err();
         assert!(errors
             .iter()
-            .any(|e| e.kind == ValidationErrorKind::CyclicDependency));
+            .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency { .. })));
     }
 
     #[test]

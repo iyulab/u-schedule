@@ -21,8 +21,9 @@
 //! let tasks: Vec<Task> = vec![/* ... */];
 //! let resources: Vec<Resource> = vec![/* ... */];
 //!
-//! // 2. Create problem (optionally configure operators)
-//! let problem = SchedulingGaProblem::new(&tasks, &resources)
+//! // 2. Check the input, then create the GA problem (optionally configure operators)
+//! let checked = u_schedule::Problem::new(tasks.clone(), resources).expect("valid input");
+//! let problem = SchedulingGaProblem::new(&checked)
 //!     .with_operators(GeneticOperators {
 //!         crossover_type: CrossoverType::LOX,
 //!         mutation_type: MutationType::Invert,

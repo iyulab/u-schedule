@@ -29,6 +29,7 @@
 //! milliseconds (i64), converted by multiplying/dividing by 1000.
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use crate::dispatching::rules;
@@ -38,19 +39,145 @@ use crate::ga::SchedulingGaProblem;
 use crate::models::{
     Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task,
 };
+use crate::validation::{ValidationError, ValidationErrorKind};
+use crate::Problem;
 use u_metaheur::ga::{GaConfig, GaRunner};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn js_err(e: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&e.to_string())
+/// A refusal on its way to JavaScript: the text for `Error.message`, and the
+/// fields -- `code` first among them -- copied onto the `Error`.
+#[derive(Debug)]
+struct WireError {
+    message: String,
+    fields: serde_json::Value,
+}
+
+impl WireError {
+    fn new(code: &str, message: String, mut extra: serde_json::Value) -> Self {
+        let mut fields = serde_json::Map::new();
+        fields.insert("code".into(), json!(code));
+        if let Some(extra) = extra.as_object_mut() {
+            fields.append(extra);
+        }
+        WireError {
+            message,
+            fields: serde_json::Value::Object(fields),
+        }
+    }
+
+    /// An argument that is not the shape the function takes: a JSON string
+    /// instead of a value, a wrong type, a missing or unknown key.
+    fn malformed_input(parameter: &str, message: String) -> Self {
+        Self::new(
+            "malformed_input",
+            message,
+            json!({ "parameter": parameter }),
+        )
+    }
+
+    /// A string option that names none of the values the function knows.
+    fn unknown_option(parameter: &str, got: &str, expected: &[&str]) -> Self {
+        Self::new(
+            "unknown_option",
+            format!(
+                "Unknown {parameter} '{got}'. Supported: {}",
+                expected.join(", ")
+            ),
+            json!({ "parameter": parameter, "got": got, "expected": expected }),
+        )
+    }
+
+    /// A numeric option outside the range the solver accepts.
+    fn out_of_range(parameter: &str, min: f64, max: Option<f64>, got: f64) -> Self {
+        let range = match max {
+            Some(max) => format!("in {min}..={max}"),
+            None => format!(">= {min}"),
+        };
+        Self::new(
+            "parameter_out_of_range",
+            format!("{parameter} must be {range}, got {got}"),
+            json!({ "parameter": parameter, "min": min, "max": max, "got": got }),
+        )
+    }
+
+    /// The stable reason, as the `code` field carries it.
+    #[cfg(test)]
+    fn code(&self) -> &str {
+        self.fields["code"]
+            .as_str()
+            .expect("every refusal carries a code")
+    }
+}
+
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The checked problem's first finding, with every finding's text in the
+/// message. The code and fields are the first one's: they name one thing to
+/// fix, which is what a program branching on them can act on.
+impl From<Vec<ValidationError>> for WireError {
+    fn from(errors: Vec<ValidationError>) -> Self {
+        let message = errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let Some(first) = errors.first() else {
+            return WireError::new("invalid_input", message, json!({}));
+        };
+        let fields = match &first.kind {
+            ValidationErrorKind::DuplicateId { entity, id } => {
+                json!({ "entity": entity.name(), "id": id })
+            }
+            ValidationErrorKind::InvalidResourceReference { activity, resource } => {
+                json!({ "activity": activity, "resource": resource })
+            }
+            ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
+            ValidationErrorKind::EmptyTask { task } => json!({ "task": task }),
+            ValidationErrorKind::InvalidPredecessor {
+                activity,
+                predecessor,
+            } => json!({ "activity": activity, "predecessor": predecessor }),
+        };
+        WireError::new(first.kind.code(), message, fields)
+    }
+}
+
+/// Every refusal crosses into JavaScript as an `Error` whose `message` is the
+/// readable text and which carries `code` -- a stable reason -- and the values
+/// behind it as further properties (`id`, `parameter`, `got`, ...). A program
+/// branches on `err.code` and reads the fields; `err.message` reads as it
+/// always did.
+fn js_err(error: impl Into<WireError>) -> JsValue {
+    let error = error.into();
+    let js = js_sys::Error::new(&error.message);
+    // `json_compatible` turns the map into a plain object; the default would
+    // produce a JavaScript `Map`, which `Object.assign` does not read.
+    if let Ok(fields) = error
+        .fields
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+    {
+        js_sys::Object::assign(&js, &fields.into());
+    }
+    js.into()
+}
+
+/// Serializes a response; a failure is reported rather than unwrapped.
+fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(value)
+        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
 }
 
 /// Deserialize a native JS value, rejecting JSON strings with an actionable
 /// message and prefixing the offending parameter name to any serde error.
 fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Result<T, JsValue> {
+    let refuse = |message: String| js_err(WireError::malformed_input(param, message));
     if value.as_string().is_some() {
-        return Err(JsValue::from_str(&format!(
+        return Err(refuse(format!(
             "{param}: expected a native JS object/array, got a string — \
              pass the value directly, not JSON.stringify(...)"
         )));
@@ -58,9 +185,9 @@ fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Resul
     // serde-wasm-bindgen reads only a struct's declared fields from a JS
     // object, so `deny_unknown_fields` never sees extra keys. Round-trip
     // through serde_json::Value so the strict wire schema is enforced.
-    let json: serde_json::Value = serde_wasm_bindgen::from_value(value)
-        .map_err(|e| JsValue::from_str(&format!("{param}: {e}")))?;
-    serde_json::from_value(json).map_err(|e| JsValue::from_str(&format!("{param}: {e}")))
+    let json: serde_json::Value =
+        serde_wasm_bindgen::from_value(value).map_err(|e| refuse(format!("{param}: {e}")))?;
+    serde_json::from_value(json).map_err(|e| refuse(format!("{param}: {e}")))
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -205,14 +332,18 @@ fn build_task(job: &InputJob) -> Task {
 /// entries under one name that the caller cannot tell apart, and the job-shop
 /// solver keys its problem by task id, so one of the two jobs silently left
 /// the schedule.
-fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), WireError> {
     let mut first_at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (position, id) in ids.into_iter().enumerate() {
         if let Some(first) = first_at.insert(id, position) {
-            return Err(format!(
-                "job {id:?}: the id is given twice, at positions {first} and {position} \
-                 of jobs (counting from 0); the schedule names jobs by id, so every \
-                 job needs its own"
+            return Err(WireError::new(
+                "duplicate_id",
+                format!(
+                    "job {id:?}: the id is given twice, at positions {first} and {position} \
+                     of jobs (counting from 0); the schedule names jobs by id, so every \
+                     job needs its own"
+                ),
+                json!({ "entity": "job", "id": id, "first": first, "second": position }),
             ));
         }
     }
@@ -221,7 +352,13 @@ fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(),
 
 // ── rule selection ──────────────────────────────────────────────────────────
 
-fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, String> {
+/// The rule names `build_engine` accepts, in the order the README lists them.
+const RULES: [&str; 13] = [
+    "SPT", "LPT", "EDD", "FCFS", "CR", "WSPT", "MST", "S/RO", "SRO", "ATC", "LWKR", "MWKR",
+    "PRIORITY",
+];
+
+fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, WireError> {
     match rule {
         "SPT" => Ok(RuleEngine::new().with_rule(rules::Spt)),
         "LPT" => Ok(RuleEngine::new().with_rule(rules::Lpt)),
@@ -236,11 +373,7 @@ fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, Strin
         "LWKR" => Ok(RuleEngine::new().with_rule(rules::Lwkr)),
         "MWKR" => Ok(RuleEngine::new().with_rule(rules::Mwkr)),
         "PRIORITY" => Ok(RuleEngine::new().with_rule(rules::Priority)),
-        other => Err(format!(
-            "Unknown rule '{}'. Supported: SPT, LPT, EDD, FCFS, CR, WSPT, \
-             MST, S/RO, ATC, LWKR, MWKR, PRIORITY",
-            other
-        )),
+        other => Err(WireError::unknown_option("rule", other, &RULES)),
     }
 }
 
@@ -367,7 +500,8 @@ fn compute_utilization(
 /// `jobs` -- A native JS object matching `ScheduleInput`.
 ///
 /// # Returns
-/// A JS object matching `ScheduleOutput` on success, or a JS string error.
+/// A JS object matching `ScheduleOutput` on success. A refusal throws an
+/// `Error` carrying `code` (see the README's *Errors*).
 ///
 /// # Backward Compatibility
 /// When `config.num_machines` is omitted (defaults to 1), behavior is
@@ -385,7 +519,7 @@ pub fn run_schedule(
             total_tardiness: 0.0,
             machine_utilization: vec![],
         };
-        return serde_wasm_bindgen::to_value(&output).map_err(js_err);
+        return to_js(&output);
     }
 
     refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str())).map_err(js_err)?;
@@ -415,7 +549,7 @@ pub fn run_schedule(
         machine_utilization,
     };
 
-    serde_wasm_bindgen::to_value(&output).map_err(js_err)
+    to_js(&output)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -573,26 +707,28 @@ struct JobShopOutput {
 
 // ── conversion helpers ──────────────────────────────────────────────────────
 
-fn parse_crossover(s: &str) -> Result<CrossoverType, String> {
+fn parse_crossover(s: &str) -> Result<CrossoverType, WireError> {
     match s {
         "POX" => Ok(CrossoverType::POX),
         "LOX" => Ok(CrossoverType::LOX),
         "JOX" => Ok(CrossoverType::JOX),
-        other => Err(format!(
-            "Unknown crossover '{}'. Supported: POX, LOX, JOX",
-            other
+        other => Err(WireError::unknown_option(
+            "ga_config.crossover",
+            other,
+            &["POX", "LOX", "JOX"],
         )),
     }
 }
 
-fn parse_mutation(s: &str) -> Result<MutationType, String> {
+fn parse_mutation(s: &str) -> Result<MutationType, WireError> {
     match s {
         "Swap" => Ok(MutationType::Swap),
         "Insert" => Ok(MutationType::Insert),
         "Invert" => Ok(MutationType::Invert),
-        other => Err(format!(
-            "Unknown mutation '{}'. Supported: Swap, Insert, Invert",
-            other
+        other => Err(WireError::unknown_option(
+            "ga_config.mutation",
+            other,
+            &["Swap", "Insert", "Invert"],
         )),
     }
 }
@@ -603,32 +739,115 @@ fn parse_mutation(s: &str) -> Result<MutationType, String> {
 ///
 /// This catches invalid values at the WASM boundary with clear error messages,
 /// preventing panics deeper in the GA runner.
-fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
+fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), WireError> {
     if cfg.population_size < 2 {
-        return Err(format!(
-            "ga_config.population_size must be >= 2, got {}",
-            cfg.population_size
+        return Err(WireError::out_of_range(
+            "ga_config.population_size",
+            2.0,
+            None,
+            cfg.population_size as f64,
         ));
     }
     if cfg.max_generations < 1 {
-        return Err(format!(
-            "ga_config.max_generations must be >= 1, got {}",
-            cfg.max_generations
+        return Err(WireError::out_of_range(
+            "ga_config.max_generations",
+            1.0,
+            None,
+            cfg.max_generations as f64,
         ));
     }
     if !(0.0..=1.0).contains(&cfg.mutation_rate) {
-        return Err(format!(
-            "ga_config.mutation_rate must be in 0.0..=1.0, got {}",
-            cfg.mutation_rate
+        return Err(WireError::out_of_range(
+            "ga_config.mutation_rate",
+            0.0,
+            Some(1.0),
+            cfg.mutation_rate,
         ));
     }
     if !(0.0..=1.0).contains(&cfg.tardiness_weight) {
-        return Err(format!(
-            "ga_config.tardiness_weight must be in 0.0..=1.0, got {}",
-            cfg.tardiness_weight
+        return Err(WireError::out_of_range(
+            "ga_config.tardiness_weight",
+            0.0,
+            Some(1.0),
+            cfg.tardiness_weight,
         ));
     }
     Ok(())
+}
+
+/// The checked scheduling problem a job-shop request describes: one task per
+/// job, one activity per operation, one resource per machine id (named by the
+/// operations, padded to `num_machines`).
+fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
+    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str()))?;
+
+    // ── Collect all machine IDs ──
+    let mut machine_ids: Vec<String> = Vec::new();
+    for job in &input.jobs {
+        for op in &job.operations {
+            for m in op.candidates() {
+                if !machine_ids.contains(&m) {
+                    machine_ids.push(m);
+                }
+            }
+        }
+    }
+    machine_ids.sort();
+
+    // Pad machine IDs to match num_machines if needed.
+    if let Some(n) = input.num_machines {
+        while machine_ids.len() < n {
+            machine_ids.push(format!("M{}", machine_ids.len() + 1));
+        }
+    }
+
+    if machine_ids.is_empty() {
+        return Err(WireError::new(
+            "no_machines",
+            "No machines specified in operations".to_string(),
+            json!({}),
+        ));
+    }
+
+    // ── Build domain Tasks ──
+    let mut tasks = Vec::with_capacity(input.jobs.len());
+    for job in &input.jobs {
+        let mut task = Task::new(&job.id);
+
+        if let Some(dd) = job.due_date {
+            task.deadline = Some(sec_to_ms(dd));
+        }
+        if let Some(rt) = job.release_time {
+            task.release_time = Some(sec_to_ms(rt));
+        }
+
+        for (i, op) in job.operations.iter().enumerate() {
+            let candidates = op.candidates();
+            if candidates.is_empty() {
+                return Err(WireError::new(
+                    "missing_machine",
+                    format!("Job '{}' operation {} has no machine specified", job.id, i),
+                    json!({ "job": job.id, "operation": i }),
+                ));
+            }
+
+            let activity = Activity::new(format!("{}_{}", job.id, i + 1), &job.id, i as i32)
+                .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
+                .with_requirement(ResourceRequirement::new("Machine").with_candidates(candidates));
+
+            task = task.with_activity(activity);
+        }
+
+        tasks.push(task);
+    }
+
+    // ── Build Resources ──
+    let resources: Vec<Resource> = machine_ids
+        .iter()
+        .map(|id| Resource::new(id, ResourceType::Primary))
+        .collect();
+
+    Ok(Problem::new(tasks, resources)?)
 }
 
 // ── public API: solve_jobshop ───────────────────────────────────────────────
@@ -639,7 +858,8 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), String> {
 /// `problem_json` -- A JS object matching `JobShopInput`.
 ///
 /// # Returns
-/// A JS object matching `JobShopOutput` on success, or a JS string error.
+/// A JS object matching `JobShopOutput` on success. A refusal throws an
+/// `Error` carrying `code` (see the README's *Errors*).
 ///
 /// # Input Format
 /// ```json
@@ -681,79 +901,17 @@ pub fn solve_jobshop(
             generations: 0,
             fitness_history: vec![],
         };
-        return serde_wasm_bindgen::to_value(&output).map_err(js_err);
+        return to_js(&output);
     }
 
-    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str())).map_err(js_err)?;
-
-    // ── Collect all machine IDs ──
-    let mut machine_ids: Vec<String> = Vec::new();
-    for job in &input.jobs {
-        for op in &job.operations {
-            for m in op.candidates() {
-                if !machine_ids.contains(&m) {
-                    machine_ids.push(m);
-                }
-            }
-        }
-    }
-    machine_ids.sort();
-
-    // Validate: if num_machines given, ensure enough machines exist.
-    if let Some(n) = input.num_machines {
-        // Pad machine IDs to match num_machines if needed.
-        while machine_ids.len() < n {
-            machine_ids.push(format!("M{}", machine_ids.len() + 1));
-        }
-    }
-
-    if machine_ids.is_empty() {
-        return Err(js_err("No machines specified in operations"));
-    }
-
-    // ── Build domain Tasks ──
-    let mut tasks = Vec::with_capacity(input.jobs.len());
-    for job in &input.jobs {
-        let mut task = Task::new(&job.id);
-
-        if let Some(dd) = job.due_date {
-            task.deadline = Some(sec_to_ms(dd));
-        }
-        if let Some(rt) = job.release_time {
-            task.release_time = Some(sec_to_ms(rt));
-        }
-
-        for (i, op) in job.operations.iter().enumerate() {
-            let candidates = op.candidates();
-            if candidates.is_empty() {
-                return Err(js_err(format!(
-                    "Job '{}' operation {} has no machine specified",
-                    job.id, i
-                )));
-            }
-
-            let activity = Activity::new(format!("{}_{}", job.id, i + 1), &job.id, i as i32)
-                .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
-                .with_requirement(ResourceRequirement::new("Machine").with_candidates(candidates));
-
-            task = task.with_activity(activity);
-        }
-
-        tasks.push(task);
-    }
-
-    // ── Build Resources ──
-    let resources: Vec<Resource> = machine_ids
-        .iter()
-        .map(|id| Resource::new(id, ResourceType::Primary))
-        .collect();
+    let problem = jobshop_problem(&input).map_err(js_err)?;
 
     // ── Configure operators ──
     let crossover_type = parse_crossover(&input.ga_config.crossover).map_err(js_err)?;
     let mutation_type = parse_mutation(&input.ga_config.mutation).map_err(js_err)?;
 
     // ── Build GA problem ──
-    let problem = SchedulingGaProblem::new(&tasks, &resources)
+    let ga_problem = SchedulingGaProblem::new(&problem)
         .with_tardiness_weight(input.ga_config.tardiness_weight)
         .with_operators(GeneticOperators {
             crossover_type,
@@ -784,13 +942,20 @@ pub fn solve_jobshop(
     }
 
     // Defence-in-depth: call GaConfig's own validation as well.
-    config.validate().map_err(js_err)?;
+    let settings_refused = |e: &dyn std::fmt::Display| {
+        js_err(WireError::new(
+            "invalid_option",
+            format!("ga_config refused: {e}"),
+            json!({ "parameter": "ga_config" }),
+        ))
+    };
+    config.validate().map_err(|e| settings_refused(&e))?;
 
     // ── Run GA ──
-    let result = GaRunner::run(&problem, &config).map_err(js_err)?;
+    let result = GaRunner::run(&ga_problem, &config).map_err(|e| settings_refused(&e))?;
 
     // ── Decode best solution ──
-    let best_schedule = problem.decode(&result.best);
+    let best_schedule = ga_problem.decode(&result.best);
 
     let schedule: Vec<JobShopAssignment> = best_schedule
         .assignments
@@ -801,9 +966,13 @@ pub fn solve_jobshop(
             // of 1 -- so when the decoder stopped putting an activity id there,
             // every row silently read "operation 1".
             let operation = a.sequence.ok_or_else(|| {
-                js_err(format!(
-                    "internal: assignment for job '{}' on '{}' carries no operation number",
-                    a.task_id, a.resource_id
+                js_err(WireError::new(
+                    "internal",
+                    format!(
+                        "internal: assignment for job '{}' on '{}' carries no operation number",
+                        a.task_id, a.resource_id
+                    ),
+                    json!({}),
                 ))
             })? as usize;
 
@@ -827,7 +996,7 @@ pub fn solve_jobshop(
         fitness_history: result.fitness_history,
     };
 
-    serde_wasm_bindgen::to_value(&output).map_err(js_err)
+    to_js(&output)
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
@@ -1115,13 +1284,90 @@ mod tests {
     #[test]
     fn a_repeated_job_id_is_refused_naming_both_positions() {
         let err = refuse_repeated_ids(["A", "B", "A"]).expect_err("A is given twice");
-        assert!(err.contains("job \"A\""), "{err}");
-        assert!(err.contains("positions 0 and 2"), "{err}");
+        assert!(err.message.contains("job \"A\""), "{err}");
+        assert!(err.message.contains("positions 0 and 2"), "{err}");
         assert!(
-            !err.contains("  "),
+            !err.message.contains("  "),
             "a wrapped literal left a run of spaces: {err}"
         );
+        assert_eq!(err.code(), "duplicate_id");
+        assert_eq!(
+            err.fields,
+            json!({ "code": "duplicate_id", "entity": "job", "id": "A", "first": 0, "second": 2 })
+        );
         assert!(refuse_repeated_ids(["A", "B", "C"]).is_ok());
+    }
+
+    /// Every refusal on the job-shop path names its reason as a `code` and
+    /// carries the values behind it -- through the function `solve_jobshop`
+    /// itself calls, not a copy of it.
+    #[test]
+    fn jobshop_refusals_carry_their_code_and_values() {
+        let op = |machine: Option<&str>| JobShopOperation {
+            machine: machine.map(str::to_string),
+            machines: vec![],
+            processing_time: 1.0,
+        };
+        let job = |id: &str, ops: Vec<JobShopOperation>| JobShopJob {
+            id: id.to_string(),
+            operations: ops,
+            due_date: None,
+            release_time: None,
+        };
+        let input = |jobs: Vec<JobShopJob>| JobShopInput {
+            jobs,
+            num_machines: None,
+            ga_config: JobShopGaConfig::default(),
+        };
+
+        let missing = jobshop_problem(&input(vec![job("J1", vec![op(Some("M1")), op(None)])]))
+            .expect_err("an operation without a machine");
+        assert_eq!(
+            missing.fields,
+            json!({ "code": "missing_machine", "job": "J1", "operation": 1 })
+        );
+
+        let none = jobshop_problem(&input(vec![job("J1", vec![])])).expect_err("no machines");
+        assert_eq!(none.code(), "no_machines");
+
+        let empty = jobshop_problem(&input(vec![
+            job("J1", vec![op(Some("M1"))]),
+            job("J2", vec![]),
+        ]))
+        .expect_err("a job with no operations");
+        assert_eq!(empty.fields, json!({ "code": "empty_task", "task": "J2" }));
+
+        let rule = build_engine(
+            "FIFO",
+            &ScheduleConfig {
+                rule: "FIFO".to_string(),
+                num_machines: 1,
+                atc_k: 2.0,
+            },
+        )
+        .expect_err("FIFO is spelled FCFS here");
+        assert_eq!(rule.code(), "unknown_option");
+        assert_eq!(rule.fields["parameter"], "rule");
+        assert_eq!(rule.fields["got"], "FIFO");
+
+        let crossover = parse_crossover("OX").expect_err("unknown crossover");
+        assert_eq!(crossover.fields["parameter"], "ga_config.crossover");
+
+        let population = validate_ga_config(&JobShopGaConfig {
+            population_size: 1,
+            ..JobShopGaConfig::default()
+        })
+        .expect_err("population of one");
+        assert_eq!(
+            population.fields,
+            json!({
+                "code": "parameter_out_of_range",
+                "parameter": "ga_config.population_size",
+                "min": 2.0,
+                "max": null,
+                "got": 1.0,
+            })
+        );
     }
 
     #[test]
@@ -1176,14 +1422,8 @@ mod tests {
             },
         };
 
-        let tasks = build_jobshop_tasks(&input).expect("valid input");
-        let machine_ids = collect_machine_ids(&input);
-        let resources: Vec<Resource> = machine_ids
-            .iter()
-            .map(|id| Resource::new(id, ResourceType::Primary))
-            .collect();
-
-        let problem = SchedulingGaProblem::new(&tasks, &resources)
+        let checked = jobshop_problem(&input).expect("valid input");
+        let problem = SchedulingGaProblem::new(&checked)
             .with_tardiness_weight(input.ga_config.tardiness_weight);
 
         let config = GaConfig::default()
@@ -1225,53 +1465,9 @@ mod tests {
         assert_eq!(candidates.len(), 2);
     }
 
-    // ── test helpers for jobshop (used by tests only) ──
-
-    fn collect_machine_ids(input: &JobShopInput) -> Vec<String> {
-        let mut ids: Vec<String> = Vec::new();
-        for job in &input.jobs {
-            for op in &job.operations {
-                for m in op.candidates() {
-                    if !ids.contains(&m) {
-                        ids.push(m);
-                    }
-                }
-            }
-        }
-        ids.sort();
-        if let Some(n) = input.num_machines {
-            while ids.len() < n {
-                ids.push(format!("M{}", ids.len() + 1));
-            }
-        }
-        ids
-    }
-
-    fn build_jobshop_tasks(input: &JobShopInput) -> Result<Vec<Task>, String> {
-        let mut tasks = Vec::new();
-        for job in &input.jobs {
-            let mut task = Task::new(&job.id);
-            if let Some(dd) = job.due_date {
-                task.deadline = Some(sec_to_ms(dd));
-            }
-            if let Some(rt) = job.release_time {
-                task.release_time = Some(sec_to_ms(rt));
-            }
-            for (i, op) in job.operations.iter().enumerate() {
-                let candidates = op.candidates();
-                if candidates.is_empty() {
-                    return Err(format!("Job '{}' operation {} has no machine", job.id, i));
-                }
-                let activity = Activity::new(format!("{}_{}", job.id, i + 1), &job.id, i as i32)
-                    .with_duration(ActivityDuration::fixed(sec_to_ms(op.processing_time)))
-                    .with_requirement(
-                        ResourceRequirement::new("Machine").with_candidates(candidates),
-                    );
-                task = task.with_activity(activity);
-            }
-            tasks.push(task);
-        }
-        Ok(tasks)
+    /// The tasks of a job-shop request, through the same path `solve_jobshop` takes.
+    fn build_jobshop_tasks(input: &JobShopInput) -> Result<Vec<Task>, WireError> {
+        jobshop_problem(input).map(|p| p.into_parts().0)
     }
 
     /// The reporter's job shop: two jobs of three operations each. Every row
@@ -1279,7 +1475,6 @@ mod tests {
     /// all correct -- a silent wrong column.
     #[test]
     fn jobshop_numbers_each_operation_within_its_job() {
-        use crate::models::{Resource, ResourceType};
         use u_metaheur::ga::{GaConfig, GaRunner};
 
         let input = JobShopInput {
@@ -1339,12 +1534,8 @@ mod tests {
             },
         };
 
-        let tasks = build_jobshop_tasks(&input).expect("every operation names a machine");
-        let resources: Vec<Resource> = ["M1", "M2", "M3"]
-            .iter()
-            .map(|id| Resource::new(*id, ResourceType::Primary))
-            .collect();
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let checked = jobshop_problem(&input).expect("every operation names a machine");
+        let problem = SchedulingGaProblem::new(&checked);
         let config = GaConfig::default()
             .with_population_size(30)
             .with_max_generations(20)
@@ -1394,7 +1585,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("population_size"), "got: {}", err);
+        assert!(err.message.contains("population_size"), "got: {}", err);
     }
 
     #[test]
@@ -1404,7 +1595,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("population_size"), "got: {}", err);
+        assert!(err.message.contains("population_size"), "got: {}", err);
     }
 
     #[test]
@@ -1423,7 +1614,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("max_generations"), "got: {}", err);
+        assert!(err.message.contains("max_generations"), "got: {}", err);
     }
 
     #[test]
@@ -1433,7 +1624,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("mutation_rate"), "got: {}", err);
+        assert!(err.message.contains("mutation_rate"), "got: {}", err);
     }
 
     #[test]
@@ -1443,7 +1634,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("mutation_rate"), "got: {}", err);
+        assert!(err.message.contains("mutation_rate"), "got: {}", err);
     }
 
     #[test]
@@ -1469,14 +1660,14 @@ mod tests {
             ..Default::default()
         };
         let err = validate_ga_config(&cfg).unwrap_err();
-        assert!(err.contains("tardiness_weight"), "got: {}", err);
+        assert!(err.message.contains("tardiness_weight"), "got: {}", err);
 
         let cfg2 = JobShopGaConfig {
             tardiness_weight: 2.0,
             ..Default::default()
         };
         let err2 = validate_ga_config(&cfg2).unwrap_err();
-        assert!(err2.contains("tardiness_weight"), "got: {}", err2);
+        assert!(err2.message.contains("tardiness_weight"), "got: {}", err2);
     }
 
     #[test]
@@ -1521,14 +1712,8 @@ mod tests {
             },
         };
 
-        let tasks = build_jobshop_tasks(&input).expect("valid input");
-        let machine_ids = collect_machine_ids(&input);
-        let resources: Vec<Resource> = machine_ids
-            .iter()
-            .map(|id| Resource::new(id, ResourceType::Primary))
-            .collect();
-
-        let problem = SchedulingGaProblem::new(&tasks, &resources);
+        let checked = jobshop_problem(&input).expect("valid input");
+        let problem = SchedulingGaProblem::new(&checked);
         let config = GaConfig::default()
             .with_population_size(4)
             .with_max_generations(5)
