@@ -126,9 +126,8 @@ wrong.
 ### Quick Start
 
 ```javascript
-import init, { run_schedule, solve_jobshop } from '@iyulab/u-schedule';
+import { run_schedule, solve_jobshop } from '@iyulab/u-schedule';
 
-await init();
 const result = run_schedule({
   jobs: [
     { id: "A", processing_time: 5.0, due_date: 10.0 },
