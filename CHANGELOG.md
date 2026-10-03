@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Added
+
+- `Task::weight` (default 1) and `Task::with_weight` — the weight `w_j` that
+  WSPT and ATC read. `validate_input` refuses a weight that is not finite and
+  greater than 0 (`ValidationErrorKind::WeightOutOfRange`, code
+  `parameter_out_of_range`).
+- WASM `run_schedule`: a job's `priority` (integer, default 0), read by the
+  `PRIORITY` rule.
+
+### Fixed
+
+- **Breaking:** WSPT and ATC ranked a heavier job later. They derived the weight
+  from `Task::priority` as `1000 / (priority + 1)` — lower priority meaning more
+  important — while `Task::priority` and the `PRIORITY` rule treat a higher
+  value as more important, and the WASM binding stored `weight` as
+  `priority = 1000 × weight`. Every unequal pair of weights came out in the
+  reverse of Smith's order, and a weight below 0.001 rounded to the most
+  important job. Both rules now read `Task::weight`; `priority` no longer
+  affects them. Rust callers that encoded importance in `priority` for WSPT/ATC
+  set `with_weight` instead; JS callers that compensated by passing `1 / w`
+  pass `w` again.
+- **Breaking:** WASM `run_schedule` refuses `config.num_machines: 0`, which
+  was silently treated as 1, and a job with a negative `processing_time` or a
+  `weight` that is not above 0, with `parameter_out_of_range` naming the job by
+  `index` and `id`. An unknown `rule` or zero machines is refused even when
+  `jobs` is empty.
+- **Breaking (WASM):** the `PRIORITY` rule reads the new `priority` field
+  instead of `weight`.
+
+### Documentation
+
+- The README's rule table listed rules that do not exist (SLACK, MOPNR,
+  RANDOM) and left out MST, S/RO, WINQ and LPUL.
+
 ## [0.10.0] - 2026-09-30
 
 ### Added

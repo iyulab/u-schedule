@@ -117,8 +117,9 @@ impl DispatchingRule for Mwkr {
 
 /// Weighted Shortest Processing Time.
 ///
-/// Prioritizes by the ratio of importance to processing time.
-/// Weight is derived from priority: `weight = 1000 / (priority + 1)`.
+/// Prioritizes by the ratio of weight to processing time, `w_j / p_j`,
+/// reading `w_j` from [`Task::weight`]. Doubling a task's weight never moves
+/// it later.
 ///
 /// # Reference
 /// Smith (1956), optimal for minimizing weighted mean flow time.
@@ -135,8 +136,7 @@ impl DispatchingRule for Wspt {
         if processing_time <= 0.0 {
             return f64::MAX;
         }
-        let weight = 1000.0 / (task.priority as f64 + 1.0);
-        -(weight / processing_time) // Higher ratio = higher priority → negate
+        -(task.weight / processing_time) // Higher ratio = higher priority → negate
     }
 
     fn description(&self) -> &'static str {
@@ -320,7 +320,7 @@ impl DispatchingRule for Atc {
             return f64::MAX;
         }
 
-        let weight = 1000.0 / (task.priority as f64 + 1.0);
+        let weight = task.weight;
 
         let deadline = match task.deadline {
             Some(d) => d as f64,
@@ -517,11 +517,56 @@ mod tests {
     #[test]
     fn test_wspt() {
         let ctx = SchedulingContext::at_time(0);
-        // High priority + short duration → highest WSPT
-        let important_short = make_task("is", 1000, None, 1);
-        // Low priority + long duration → lowest WSPT
-        let unimportant_long = make_task("ul", 5000, None, 10);
-        assert!(Wspt.evaluate(&important_short, &ctx) < Wspt.evaluate(&unimportant_long, &ctx));
+        // Heavy + short → highest w/p; light + long → lowest
+        let heavy_short = make_task("hs", 1000, None, 0).with_weight(10.0);
+        let light_long = make_task("ll", 5000, None, 0).with_weight(1.0);
+        assert!(Wspt.evaluate(&heavy_short, &ctx) < Wspt.evaluate(&light_long, &ctx));
+    }
+
+    #[test]
+    fn wspt_follows_smiths_ratio_not_priority() {
+        // Smith's rule: p/w ascending. A: 4/10 = 0.4, B: 2/1 = 2 → A first,
+        // although B is shorter and carries the higher `priority`.
+        let ctx = SchedulingContext::at_time(0);
+        let a = make_task("A", 4000, None, 0).with_weight(10.0);
+        let b = make_task("B", 2000, None, 100).with_weight(1.0);
+        assert!(Wspt.evaluate(&a, &ctx) < Wspt.evaluate(&b, &ctx));
+        // Swapping the weights swaps the order.
+        let a = a.with_weight(1.0);
+        let b = b.with_weight(10.0);
+        assert!(Wspt.evaluate(&b, &ctx) < Wspt.evaluate(&a, &ctx));
+    }
+
+    #[test]
+    fn atc_prefers_the_heavier_of_two_otherwise_equal_tasks() {
+        let ctx = SchedulingContext::at_time(0).with_average_processing_time(2000.0);
+        let atc = Atc::default();
+        let heavy = make_task("heavy", 1000, Some(5000), 0).with_weight(3.0);
+        let light = make_task("light", 1000, Some(5000), 0).with_weight(1.0);
+        assert!(atc.evaluate(&heavy, &ctx) < atc.evaluate(&light, &ctx));
+        // Without deadlines ATC falls back to WSPT, which also prefers weight.
+        let heavy = make_task("heavy", 1000, None, 0).with_weight(3.0);
+        let light = make_task("light", 1000, None, 0).with_weight(1.0);
+        assert!(atc.evaluate(&heavy, &ctx) < atc.evaluate(&light, &ctx));
+    }
+
+    proptest::proptest! {
+        /// Raising a task's weight never makes WSPT or ATC rank it later.
+        #[test]
+        fn more_weight_never_ranks_later(
+            p in 1i64..100_000,
+            w in 0.001f64..1_000.0,
+            factor in 1.0f64..100.0,
+            deadline in proptest::option::of(0i64..200_000),
+            now in 0i64..100_000,
+        ) {
+            let ctx = SchedulingContext::at_time(now).with_average_processing_time(5000.0);
+            let base = make_task("t", p, deadline, 0).with_weight(w);
+            let heavier = make_task("t", p, deadline, 0).with_weight(w * factor);
+            proptest::prop_assert!(Wspt.evaluate(&heavier, &ctx) <= Wspt.evaluate(&base, &ctx));
+            let atc = Atc::default();
+            proptest::prop_assert!(atc.evaluate(&heavier, &ctx) <= atc.evaluate(&base, &ctx));
+        }
     }
 
     #[test]

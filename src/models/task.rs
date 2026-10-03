@@ -27,8 +27,15 @@ pub struct Task {
     pub name: String,
     /// Task category (for transition matrix lookups and grouping).
     pub category: String,
-    /// Scheduling priority (higher = more important).
+    /// Scheduling priority (higher = more important). Read by the
+    /// [`Priority`](crate::dispatching::rules::Priority) rule and by
+    /// [`SimpleScheduler`](crate::scheduler::SimpleScheduler)'s default order.
     pub priority: i32,
+    /// Weight `w_j` of the weighted rules (WSPT, ATC): a job with twice the
+    /// weight is worth twice as much per unit of time. Finite and `> 0`;
+    /// [`validate_input`](crate::validation::validate_input) refuses anything
+    /// else. Defaults to 1, which reduces WSPT to SPT.
+    pub weight: f64,
     /// Latest completion time (ms). `None` = no deadline.
     pub deadline: Option<i64>,
     /// Earliest start time (ms). `None` = available immediately.
@@ -47,6 +54,7 @@ impl Task {
             name: String::new(),
             category: String::new(),
             priority: 0,
+            weight: 1.0,
             deadline: None,
             release_time: None,
             activities: Vec::new(),
@@ -69,6 +77,12 @@ impl Task {
     /// Sets the scheduling priority.
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Sets the weight read by WSPT and ATC (finite, `> 0`).
+    pub fn with_weight(mut self, weight: f64) -> Self {
+        self.weight = weight;
         self
     }
 
@@ -123,6 +137,7 @@ mod tests {
             .with_name("Job 1")
             .with_category("TypeA")
             .with_priority(10)
+            .with_weight(2.5)
             .with_deadline(100_000)
             .with_release_time(0)
             .with_attribute("customer", "ACME");
@@ -131,6 +146,7 @@ mod tests {
         assert_eq!(task.name, "Job 1");
         assert_eq!(task.category, "TypeA");
         assert_eq!(task.priority, 10);
+        assert_eq!(task.weight, 2.5);
         assert_eq!(task.deadline, Some(100_000));
         assert_eq!(task.release_time, Some(0));
         assert_eq!(task.attributes.get("customer"), Some(&"ACME".to_string()));

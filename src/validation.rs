@@ -7,6 +7,7 @@
 //! - Missing resource references
 //! - Circular precedence dependencies (DAG validation)
 //! - Empty tasks
+//! - Weights that are not finite and positive
 //!
 //! # Reference
 //! Cormen et al. (2009), "Introduction to Algorithms", Ch. 22.4 (Topological Sort)
@@ -27,7 +28,7 @@ pub struct ValidationError {
 }
 
 /// What a validation error is about, with the ids that locate it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValidationErrorKind {
     /// Two entities of the same kind share an id.
     DuplicateId {
@@ -59,6 +60,16 @@ pub enum ValidationErrorKind {
         activity: String,
         /// The predecessor id that matches no activity.
         predecessor: String,
+    },
+    /// A task's [`weight`](crate::models::Task::weight) is not finite and
+    /// `> 0`. WSPT and ATC divide by processing time and multiply by the
+    /// weight, so zero, negative, or non-finite weights would rank the task
+    /// silently wrong rather than fail.
+    WeightOutOfRange {
+        /// The task.
+        task: String,
+        /// The weight it carries.
+        weight: f64,
     },
 }
 
@@ -94,6 +105,7 @@ impl ValidationErrorKind {
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
             ValidationErrorKind::EmptyTask { .. } => "empty_task",
             ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
+            ValidationErrorKind::WeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
 }
@@ -115,6 +127,9 @@ impl ValidationError {
                 activity,
                 predecessor,
             } => format!("Activity '{activity}' references unknown predecessor '{predecessor}'"),
+            ValidationErrorKind::WeightOutOfRange { task, weight } => format!(
+                "Task '{task}' has weight {weight}; a weight must be finite and greater than 0"
+            ),
         };
         Self { kind, message }
     }
@@ -138,6 +153,7 @@ impl std::error::Error for ValidationError {}
 /// 5. All resource references in activities point to existing resources
 /// 6. All predecessor references point to existing activities
 /// 7. No circular precedence dependencies
+/// 8. Every task's weight is finite and `> 0`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -165,6 +181,15 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                 entity: Entity::Task,
                 id: task.id.clone(),
             }));
+        }
+
+        if !(task.weight.is_finite() && task.weight > 0.0) {
+            errors.push(ValidationError::new(
+                ValidationErrorKind::WeightOutOfRange {
+                    task: task.id.clone(),
+                    weight: task.weight,
+                },
+            ));
         }
 
         if task.activities.is_empty() {
@@ -481,5 +506,26 @@ mod tests {
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
         assert!(errors.len() >= 2);
+    }
+
+    #[test]
+    fn a_weight_that_is_not_finite_and_positive_is_refused() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut tasks = sample_tasks();
+            tasks[0].weight = bad;
+            let errors = validate_input(&tasks, &sample_resources()).unwrap_err();
+            assert_eq!(errors.len(), 1, "weight {bad}");
+            assert_eq!(errors[0].kind.code(), "parameter_out_of_range");
+            match &errors[0].kind {
+                ValidationErrorKind::WeightOutOfRange { task, weight } => {
+                    assert_eq!(task, "J1");
+                    assert!(weight.to_bits() == bad.to_bits());
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let mut tasks = sample_tasks();
+        tasks[0].weight = 1e-6;
+        assert!(validate_input(&tasks, &sample_resources()).is_ok());
     }
 }

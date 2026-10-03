@@ -31,15 +31,19 @@ u-schedule provides domain models, constraints, validation, dispatching rules, a
 | LPT | Longest Processing Time |
 | EDD | Earliest Due Date |
 | FIFO | First In First Out |
-| SLACK | Minimum Slack Time |
+| MST | Minimum Slack Time |
 | CR | Critical Ratio |
-| ATC | Apparent Tardiness Cost |
-| WSPT | Weighted Shortest Processing Time |
+| S/RO | Slack per Remaining Operations |
+| ATC | Apparent Tardiness Cost (reads `Task::weight`) |
+| WSPT | Weighted Shortest Processing Time — `weight / processing time`, reads `Task::weight` |
 | MWKR | Most Work Remaining |
 | LWKR | Least Work Remaining |
-| MOPNR | Most Operations Remaining |
-| PRIORITY | Job Priority |
-| RANDOM | Random Selection |
+| WINQ | Work In Next Queue |
+| LPUL | Least Planned Utilization Level |
+| PRIORITY | Job Priority — reads `Task::priority`, higher first |
+
+`Task::weight` (default 1, finite and `> 0`) is the weight `w_j` of the
+weighted rules; `Task::priority` is a separate ordinal read only by `PRIORITY`.
 
 ## GA Encoding
 
@@ -159,7 +163,7 @@ Priority dispatching on a flat job list (single or parallel machines). Supports 
 ```json
 {
   "jobs": [
-    { "id": "A", "processing_time": 5.0, "due_date": 10.0, "release_time": 0.0, "weight": 1.0 }
+    { "id": "A", "processing_time": 5.0, "due_date": 10.0, "release_time": 0.0, "weight": 1.0, "priority": 0 }
   ],
   "config": { "rule": "SPT", "num_machines": 1, "atc_k": 2.0 }
 }
@@ -176,6 +180,9 @@ Priority dispatching on a flat job list (single or parallel machines). Supports 
 ```
 
 Times are in seconds. `machine_utilization` is present only when `num_machines > 1`.
+`weight` (default 1, `> 0`) is the WSPT/ATC weight — a heavier job goes earlier;
+`priority` (integer, default 0) is read only by `PRIORITY`, higher first.
+`processing_time` must be `>= 0` and `num_machines` at least 1.
 
 #### `solve_jobshop(input) -> JobShopOutput`
 
@@ -255,7 +262,7 @@ try {
 |---|---|---|
 | `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs) | Two jobs share an `id` (at positions `first` and `second`, from 0), or two tasks, activities or resources do |
 | `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
-| `parameter_out_of_range` | `parameter`, `min`, `max` (or `null`), `got` | A `ga_config` value outside the table above |
+| `parameter_out_of_range` | `parameter`, `min`, `max` (or `null`), `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, or a job's `processing_time` below 0 or `weight` not above 0 |
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_task` | `task` | A job with no operations |

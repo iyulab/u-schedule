@@ -142,6 +142,9 @@ impl From<Vec<ValidationError>> for WireError {
                 activity,
                 predecessor,
             } => json!({ "activity": activity, "predecessor": predecessor }),
+            ValidationErrorKind::WeightOutOfRange { task, weight } => json!({
+                "parameter": "weight", "task": task, "min": 0.0, "max": null, "got": weight
+            }),
         };
         WireError::new(first.kind.code(), message, fields)
     }
@@ -209,9 +212,14 @@ struct InputJob {
     #[tsify(optional)]
     #[tsify(type = "number | null")]
     release_time: Option<f64>,
+    /// WSPT/ATC weight `w_j` (> 0, default 1): a heavier job goes earlier.
     #[serde(default = "default_weight")]
     #[tsify(optional)]
     weight: f64,
+    /// Read by the `PRIORITY` rule only (higher goes first, default 0).
+    #[serde(default)]
+    #[tsify(optional)]
+    priority: i32,
 }
 
 fn default_weight() -> f64 {
@@ -228,6 +236,17 @@ fn default_num_machines() -> usize {
 
 fn default_atc_k() -> f64 {
     2.0
+}
+
+#[cfg(test)]
+impl ScheduleConfig {
+    fn default_for(rule: &str) -> Self {
+        Self {
+            rule: rule.to_string(),
+            num_machines: 1,
+            atc_k: 2.0,
+        }
+    }
 }
 
 #[derive(Deserialize, Default, tsify::Tsify)]
@@ -260,7 +279,7 @@ struct ScheduleInput {
 
 // ── output schema ────────────────────────────────────────────────────────────
 
-#[derive(Serialize, tsify::Tsify)]
+#[derive(Debug, Serialize, tsify::Tsify)]
 struct OutputJob {
     id: String,
     start: f64,
@@ -270,14 +289,14 @@ struct OutputJob {
     machine: usize,
 }
 
-#[derive(Serialize, tsify::Tsify)]
+#[derive(Debug, Serialize, tsify::Tsify)]
 struct MachineUtilization {
     machine: usize,
     busy_time: f64,
     utilization: f64,
 }
 
-#[derive(Serialize, tsify::Tsify)]
+#[derive(Debug, Serialize, tsify::Tsify)]
 struct ScheduleOutput {
     schedule: Vec<OutputJob>,
     makespan: f64,
@@ -304,16 +323,15 @@ fn ms_to_sec(ms: i64) -> f64 {
 /// - `processing_time` (seconds) -> `ActivityDuration::fixed` (ms)
 /// - `due_date` (seconds) -> `Task::deadline` (ms)
 /// - `release_time` (seconds) -> `Task::release_time` (ms)
-/// - `weight` is stored in `Task::priority` as `(weight * 1000.0) as i32`
+/// - `weight` -> `Task::weight`, `priority` -> `Task::priority`
 fn build_task(job: &InputJob) -> Task {
     let duration_ms = sec_to_ms(job.processing_time);
     let activity = Activity::new(format!("{}_O1", job.id), &job.id, 0)
         .with_duration(ActivityDuration::fixed(duration_ms));
 
-    let priority = (job.weight * 1_000.0).round() as i32;
-
     let mut task = Task::new(&job.id)
-        .with_priority(priority)
+        .with_priority(job.priority)
+        .with_weight(job.weight)
         .with_activity(activity);
 
     if let Some(dd) = job.due_date {
@@ -346,6 +364,36 @@ fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(),
                 json!({ "entity": "job", "id": id, "first": first, "second": position }),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Refuses a job value the schedule would otherwise use silently wrong: a
+/// negative or non-finite processing time, or a weight that is not finite and
+/// `> 0` (WSPT and ATC rank by `w / p`, so a zero or negative weight would
+/// put the job where no weight puts it). Fields name the job by `index` and
+/// `id`.
+fn refuse_job_values(jobs: &[InputJob]) -> Result<(), WireError> {
+    for (index, job) in jobs.iter().enumerate() {
+        let (parameter, got, rule) =
+            if !(job.processing_time.is_finite() && job.processing_time >= 0.0) {
+                ("processing_time", job.processing_time, "finite and >= 0")
+            } else if !(job.weight.is_finite() && job.weight > 0.0) {
+                ("weight", job.weight, "finite and > 0")
+            } else {
+                continue;
+            };
+        return Err(WireError::new(
+            "parameter_out_of_range",
+            format!(
+                "job {:?} (position {index} of jobs, counting from 0): {parameter} must be {rule}, got {got}",
+                job.id
+            ),
+            json!({
+                "parameter": parameter, "min": 0.0, "max": null, "got": got,
+                "index": index, "id": job.id,
+            }),
+        ));
     }
     Ok(())
 }
@@ -511,20 +559,33 @@ pub fn run_schedule(
     #[wasm_bindgen(unchecked_param_type = "ScheduleInput")] jobs: JsValue,
 ) -> Result<JsValue, JsValue> {
     let input: ScheduleInput = from_js(jobs, "jobs")?;
+    to_js(&schedule_jobs(&input).map_err(js_err)?)
+}
 
+/// The whole of `run_schedule` past the JS boundary: validate, then dispatch.
+/// Tests call this, so they walk the path a JS caller does.
+fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
+    let num_machines = input.config.num_machines;
+    if num_machines == 0 {
+        return Err(WireError::out_of_range(
+            "config.num_machines",
+            1.0,
+            None,
+            0.0,
+        ));
+    }
+    let engine = build_engine(&input.config.rule, &input.config)?;
     if input.jobs.is_empty() {
-        let output = ScheduleOutput {
+        return Ok(ScheduleOutput {
             schedule: vec![],
             makespan: 0.0,
             total_tardiness: 0.0,
             machine_utilization: vec![],
-        };
-        return to_js(&output);
+        });
     }
 
-    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str())).map_err(js_err)?;
-    let num_machines = input.config.num_machines.max(1);
-    let engine = build_engine(&input.config.rule, &input.config).map_err(js_err)?;
+    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str()))?;
+    refuse_job_values(&input.jobs)?;
     let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
 
     let schedule = if num_machines == 1 {
@@ -542,14 +603,12 @@ pub fn run_schedule(
         vec![]
     };
 
-    let output = ScheduleOutput {
+    Ok(ScheduleOutput {
         schedule,
         makespan,
         total_tardiness,
         machine_utilization,
-    };
-
-    to_js(&output)
+    })
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1019,22 +1078,113 @@ mod tests {
             due_date: due,
             release_time: release,
             weight,
+            priority: 0,
         }
     }
 
     fn run(jobs: Vec<InputJob>, rule: &str) -> (Vec<OutputJob>, f64, f64) {
-        let config = ScheduleConfig {
-            rule: rule.to_string(),
-            num_machines: 1,
-            atc_k: 2.0,
+        let input = ScheduleInput {
+            jobs,
+            config: ScheduleConfig::default_for(rule),
         };
-        let input = ScheduleInput { jobs, config };
-        let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
-        let engine = build_engine(&input.config.rule, &input.config).expect("valid rule");
-        let schedule = simulate_single(&tasks, &engine);
-        let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
-        let total_tardiness: f64 = schedule.iter().map(|j| j.tardiness).sum();
-        (schedule, makespan, total_tardiness)
+        let out = schedule_jobs(&input).expect("valid input");
+        (out.schedule, out.makespan, out.total_tardiness)
+    }
+
+    fn order(schedule: &[OutputJob]) -> Vec<&str> {
+        schedule.iter().map(|j| j.id.as_str()).collect()
+    }
+
+    /// Smith's rule orders by p/w ascending. Before the fix the
+    /// binding stored w as `priority = 1000w` and WSPT read `1000/(priority+1)`
+    /// (about 1/w) back, so every unequal pair came out reversed.
+    #[test]
+    fn wspt_and_atc_follow_smiths_rule() {
+        for rule in ["WSPT", "ATC"] {
+            let heavy_a = vec![
+                make_input_job("A", 4.0, None, Some(0.0), 10.0),
+                make_input_job("B", 2.0, None, Some(0.0), 1.0),
+            ];
+            assert_eq!(order(&run(heavy_a, rule).0), ["A", "B"], "{rule}");
+            let heavy_b = vec![
+                make_input_job("A", 4.0, None, Some(0.0), 1.0),
+                make_input_job("B", 2.0, None, Some(0.0), 10.0),
+            ];
+            assert_eq!(order(&run(heavy_b, rule).0), ["B", "A"], "{rule}");
+            let equal = vec![
+                make_input_job("A", 4.0, None, Some(0.0), 1.0),
+                make_input_job("B", 2.0, None, Some(0.0), 1.0),
+            ];
+            assert_eq!(order(&run(equal, rule).0), ["B", "A"], "{rule} = SPT");
+        }
+        // A weight below 1/1000 used to round to priority 0, the most
+        // important; it is now the least.
+        let tiny = vec![
+            make_input_job("A", 4.0, None, Some(0.0), 0.0001),
+            make_input_job("B", 4.0, None, Some(0.0), 1.0),
+        ];
+        assert_eq!(order(&run(tiny, "WSPT").0), ["B", "A"]);
+    }
+
+    #[test]
+    fn a_weight_that_is_not_positive_is_refused_with_its_job() {
+        for bad in [0.0, -1.0] {
+            let jobs = vec![
+                make_input_job("A", 4.0, None, None, 1.0),
+                make_input_job("B", 2.0, None, None, bad),
+            ];
+            let err = schedule_jobs(&ScheduleInput {
+                jobs,
+                config: ScheduleConfig::default_for("WSPT"),
+            })
+            .expect_err("weight must be > 0");
+            assert_eq!(
+                err.fields,
+                json!({
+                    "code": "parameter_out_of_range",
+                    "parameter": "weight", "min": 0.0, "max": null, "got": bad,
+                    "index": 1, "id": "B",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_processing_time_is_refused() {
+        let err = schedule_jobs(&ScheduleInput {
+            jobs: vec![make_input_job("A", -1.0, None, None, 1.0)],
+            config: ScheduleConfig::default_for("SPT"),
+        })
+        .expect_err("negative processing time");
+        assert_eq!(err.fields["parameter"], "processing_time");
+        assert_eq!(err.fields["index"], 0);
+    }
+
+    /// `num_machines: 0` used to become 1 without a word.
+    #[test]
+    fn zero_machines_is_refused_even_without_jobs() {
+        for jobs in [vec![], vec![make_input_job("A", 1.0, None, None, 1.0)]] {
+            let mut config = ScheduleConfig::default_for("SPT");
+            config.num_machines = 0;
+            let err = schedule_jobs(&ScheduleInput { jobs, config }).expect_err("0 machines");
+            assert_eq!(
+                err.fields,
+                json!({
+                    "code": "parameter_out_of_range",
+                    "parameter": "config.num_machines", "min": 1.0, "max": null, "got": 0.0,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_rule_is_refused_even_without_jobs() {
+        let err = schedule_jobs(&ScheduleInput {
+            jobs: vec![],
+            config: ScheduleConfig::default_for("FIFO"),
+        })
+        .expect_err("FIFO is spelled FCFS");
+        assert_eq!(err.code(), "unknown_option");
     }
 
     // ── existing tests (backward compatibility) ──
@@ -1186,14 +1336,12 @@ mod tests {
 
     #[test]
     fn test_priority_rule() {
-        // weight maps to priority via (weight * 1000) as i32
-        // PRIORITY rule: score = -(priority) → higher priority first
-        let jobs = vec![
-            make_input_job("A", 3.0, None, None, 1.0),  // priority=1000
-            make_input_job("B", 3.0, None, None, 10.0), // priority=10000
-        ];
-        let (schedule, _, _) = run(jobs, "PRIORITY");
-        // B has higher priority → scheduled first
+        // PRIORITY reads `priority` (higher first) and ignores `weight`.
+        let mut a = make_input_job("A", 3.0, None, None, 10.0);
+        let mut b = make_input_job("B", 3.0, None, None, 1.0);
+        a.priority = 1;
+        b.priority = 5;
+        let (schedule, _, _) = run(vec![a, b], "PRIORITY");
         assert_eq!(schedule[0].id, "B");
     }
 
@@ -1756,7 +1904,7 @@ mod dto_strictness_tests {
     #[test]
     fn schedule_nested_job_and_config_reject_unknown_keys() {
         assert_rejects_unknown::<super::ScheduleInput>(json!({
-            "jobs": [{ "id": "j1", "processing_time": 1.0, "priority": 2 }]
+            "jobs": [{ "id": "j1", "processing_time": 1.0, "importance": 2 }]
         }));
         assert_rejects_unknown::<super::ScheduleInput>(json!({
             "jobs": [{ "id": "j1", "processing_time": 1.0 }],
