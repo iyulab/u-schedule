@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking (Rust API):** `SchedulingGaProblem::with_tardiness_weight`
+  returns `Result` and refuses a weight that is not a number in `[0, 1]`
+  (`TardinessWeightOutOfRange`, code `parameter_out_of_range`). It used to
+  clamp, so 1.5 ran as pure tardiness and a NaN reached every fitness.
+- **Breaking (Rust API):** `Skill::new` and `Resource::with_skill` store the
+  level as given, and `validate_input` refuses a level that is not a number in
+  `[0, 1]` (`SkillLevelOutOfRange`). A level of 2 used to run as 1.
+
+### Documentation
+
+- The WebAssembly README states that times in seconds are rounded to the
+  nearest millisecond, the engine's unit.
+
 ## [0.12.0] - 2026-10-03
 
 ### Changed

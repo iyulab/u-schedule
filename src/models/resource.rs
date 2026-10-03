@@ -121,7 +121,7 @@ impl Resource {
     pub fn with_skill(mut self, name: impl Into<String>, level: f64) -> Self {
         self.skills.push(Skill {
             name: name.into(),
-            level: level.clamp(0.0, 1.0),
+            level,
         });
         self
     }
@@ -165,11 +165,12 @@ impl Resource {
 }
 
 impl Skill {
-    /// Creates a new skill.
+    /// Creates a new skill. The level is stored as given; `validate_input`
+    /// refuses one that is not a finite number in `[0, 1]`.
     pub fn new(name: impl Into<String>, level: f64) -> Self {
         Self {
             name: name.into(),
-            level: level.clamp(0.0, 1.0),
+            level,
         }
     }
 }
@@ -221,12 +222,21 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_clamping() {
+    fn a_skill_level_is_stored_as_given_and_refused_by_validation() {
         let r = Resource::primary("M1")
             .with_skill("over", 1.5)
-            .with_skill("under", -0.5);
+            .with_skill("ok", 0.4);
 
-        assert!((r.skill_level("over") - 1.0).abs() < 1e-10);
-        assert!((r.skill_level("under") - 0.0).abs() < 1e-10);
+        // Stored as given -- the builder no longer turns 1.5 into 1.
+        assert_eq!(r.skill_level("over"), 1.5);
+        let errors = crate::validation::validate_input(&[], &[r]).expect_err("1.5 is no level");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            &errors[0].kind,
+            crate::validation::ValidationErrorKind::SkillLevelOutOfRange { skill, level, .. }
+                if skill == "over" && *level == 1.5
+        ));
+        let nan = Resource::primary("M2").with_skill("x", f64::NAN);
+        assert!(crate::validation::validate_input(&[], &[nan]).is_err());
     }
 }

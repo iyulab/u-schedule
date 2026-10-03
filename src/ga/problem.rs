@@ -155,9 +155,22 @@ impl SchedulingGaProblem {
     }
 
     /// Sets tardiness weight (0.0 = pure makespan, 1.0 = pure tardiness).
-    pub fn with_tardiness_weight(mut self, weight: f64) -> Self {
-        self.tardiness_weight = weight.clamp(0.0, 1.0);
-        self
+    ///
+    /// # Errors
+    /// `TardinessWeightOutOfRange` when `weight` is not a number in `[0, 1]`.
+    /// (It used to be clamped, so 1.5 ran as pure tardiness and NaN slipped
+    /// through to every fitness.)
+    pub fn with_tardiness_weight(
+        mut self,
+        weight: f64,
+    ) -> Result<Self, crate::validation::ValidationError> {
+        if !(0.0..=1.0).contains(&weight) {
+            return Err(crate::validation::ValidationError::new(
+                crate::validation::ValidationErrorKind::TardinessWeightOutOfRange { weight },
+            ));
+        }
+        self.tardiness_weight = weight;
+        Ok(self)
     }
 
     /// Sets per-resource processing times for SPT initialization.
@@ -507,12 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn a_tardiness_weight_outside_0_1_is_refused_not_clamped() {
+        let (tasks, resources) = make_test_problem();
+        for weight in [1.5, -0.1, f64::NAN] {
+            let err = SchedulingGaProblem::new(&valid(&tasks, &resources))
+                .with_tardiness_weight(weight)
+                .err()
+                .expect("out of range");
+            assert_eq!(err.kind.code(), "parameter_out_of_range");
+        }
+    }
+
+    #[test]
     fn test_tardiness_weight() {
         let (tasks, resources) = make_test_problem();
-        let problem_makespan =
-            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_tardiness_weight(0.0);
-        let problem_tardy =
-            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_tardiness_weight(1.0);
+        let problem_makespan = SchedulingGaProblem::new(&valid(&tasks, &resources))
+            .with_tardiness_weight(0.0)
+            .expect("weight in [0, 1]");
+        let problem_tardy = SchedulingGaProblem::new(&valid(&tasks, &resources))
+            .with_tardiness_weight(1.0)
+            .expect("weight in [0, 1]");
 
         let mut rng = SmallRng::seed_from_u64(42);
         let ch = problem_makespan.create_individual(&mut rng);

@@ -87,6 +87,23 @@ pub enum ValidationErrorKind {
         /// The capacity it declares.
         capacity: i32,
     },
+    /// A skill's [`level`](crate::models::Skill::level) is not a finite number
+    /// in `[0, 1]`. It used to be clamped into range, so a level of 2 ran as 1
+    /// and a NaN reached the ranking as NaN.
+    SkillLevelOutOfRange {
+        /// The resource holding the skill.
+        resource: String,
+        /// The skill's name.
+        skill: String,
+        /// The level it declares.
+        level: f64,
+    },
+    /// A GA tardiness weight outside `[0, 1]` (0 = pure makespan, 1 = pure
+    /// tardiness). It used to be clamped into range.
+    TardinessWeightOutOfRange {
+        /// The weight given.
+        weight: f64,
+    },
 }
 
 /// The kinds of entity a scheduling problem identifies by id.
@@ -123,13 +140,15 @@ impl ValidationErrorKind {
             ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
             ValidationErrorKind::WeightOutOfRange { .. }
             | ValidationErrorKind::NegativeDuration { .. }
-            | ValidationErrorKind::CapacityOutOfRange { .. } => "parameter_out_of_range",
+            | ValidationErrorKind::CapacityOutOfRange { .. }
+            | ValidationErrorKind::SkillLevelOutOfRange { .. }
+            | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
 }
 
 impl ValidationError {
-    fn new(kind: ValidationErrorKind) -> Self {
+    pub(crate) fn new(kind: ValidationErrorKind) -> Self {
         let message = match &kind {
             ValidationErrorKind::DuplicateId { entity, id } => {
                 format!("Duplicate {} ID: {id}", entity.name())
@@ -158,6 +177,16 @@ impl ValidationError {
             ValidationErrorKind::CapacityOutOfRange { resource, capacity } => format!(
                 "Resource '{resource}' has capacity {capacity}; a capacity must be at least 1"
             ),
+            ValidationErrorKind::SkillLevelOutOfRange {
+                resource,
+                skill,
+                level,
+            } => format!(
+                "Resource '{resource}' has skill '{skill}' at level {level};                  a skill level must be a number in [0, 1]"
+            ),
+            ValidationErrorKind::TardinessWeightOutOfRange { weight } => format!(
+                "tardiness weight {weight} must be a number in [0, 1]                  (0 = pure makespan, 1 = pure tardiness)"
+            ),
         };
         Self { kind, message }
     }
@@ -184,6 +213,7 @@ impl std::error::Error for ValidationError {}
 /// 8. Every task's weight is finite and `> 0`
 /// 9. Every activity's setup, process and teardown times are `>= 0`
 /// 10. Every resource's capacity is at least 1
+/// 11. Every skill level is a finite number in `[0, 1]`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -200,6 +230,17 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                     capacity: r.capacity,
                 },
             ));
+        }
+        for skill in &r.skills {
+            if !(0.0..=1.0).contains(&skill.level) {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::SkillLevelOutOfRange {
+                        resource: r.id.clone(),
+                        skill: skill.name.clone(),
+                        level: skill.level,
+                    },
+                ));
+            }
         }
         if !resource_ids.insert(r.id.as_str()) {
             errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {

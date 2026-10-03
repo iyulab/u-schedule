@@ -156,6 +156,17 @@ impl From<Vec<ValidationError>> for WireError {
                 "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
                 "got": capacity,
             }),
+            ValidationErrorKind::SkillLevelOutOfRange {
+                resource,
+                skill,
+                level,
+            } => json!({
+                "parameter": "skill_level", "resource": resource, "skill": skill,
+                "min": 0.0, "max": 1.0, "got": level,
+            }),
+            ValidationErrorKind::TardinessWeightOutOfRange { weight } => json!({
+                "parameter": "ga_config.tardiness_weight", "min": 0.0, "max": 1.0, "got": weight,
+            }),
         };
         WireError::new(first.kind.code(), message, fields)
     }
@@ -420,7 +431,8 @@ struct ScheduleOutput {
 
 // ── conversion helpers ──────────────────────────────────────────────────────
 
-/// Seconds -> milliseconds (i64).
+/// Seconds -> milliseconds (i64), rounded to the nearest millisecond -- the
+/// engine's time unit, so 0.0004 s is 0 ms and 0.0005 s is 1 ms (README).
 fn sec_to_ms(secs: f64) -> i64 {
     (secs * 1_000.0).round() as i64
 }
@@ -1106,6 +1118,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     // ── Build GA problem ──
     let ga_problem = SchedulingGaProblem::new(&problem)
         .with_tardiness_weight(input.ga_config.tardiness_weight)
+        .map_err(|e| WireError::from(vec![e]))?
         .with_operators(GeneticOperators {
             crossover_type,
             mutation_type,
@@ -1762,7 +1775,8 @@ mod tests {
 
         let checked = jobshop_problem(&input).expect("valid input");
         let problem = SchedulingGaProblem::new(&checked)
-            .with_tardiness_weight(input.ga_config.tardiness_weight);
+            .with_tardiness_weight(input.ga_config.tardiness_weight)
+            .expect("weight in [0, 1]");
 
         let config = GaConfig::default()
             .with_population_size(20)
