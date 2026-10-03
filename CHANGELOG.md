@@ -36,6 +36,15 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `jobs` is empty.
 - **Breaking (WASM):** the `PRIORITY` rule reads the new `priority` field
   instead of `weight`.
+- WASM: a NaN or ±Infinity anywhere in an argument is refused with
+  `value_not_finite`, with `parameter` the path to it and `index` its position
+  in that array. JSON has no such numbers, so it used to reach the wire schema
+  as `null` and be refused as `malformed_input` ("invalid type: null, expected
+  f64") — the wrong reason, and the library's own non-finite checks behind the
+  binding could not be reached.
+- WASM `run_schedule` with `config` left out was refused as an unknown rule
+  `""`: the omitted object took a derived default that skipped the field
+  defaults. It now means the same as `config: {}` — SPT on one machine.
 
 ### Documentation
 
