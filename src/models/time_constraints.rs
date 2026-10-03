@@ -413,21 +413,20 @@ impl PertEstimate {
         (o.min(p), o.max(p))
     }
 
-    /// Duration at specified confidence level.
+    /// Duration at specified confidence level, or `None` when `confidence`
+    /// is not in `[0, 1]` (NaN included).
     ///
     /// Textbook PERT normal approximation (`mean + z·σ`, with `z` from
     /// `u_numflow::special::inverse_normal_cdf`), clamped to `[O, P]` -- see
     /// the type-level documentation.
-    pub fn duration_at_confidence(&self, confidence: f64) -> i64 {
+    pub fn duration_at_confidence(&self, confidence: f64) -> Option<i64> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return None;
+        }
         let (lo, hi) = self.support();
         let z = u_numflow::special::inverse_normal_cdf(confidence);
         let d = self.mean_ms() + z * self.std_dev_ms();
-        if d.is_nan() {
-            // Only reachable for a NaN confidence level; the estimate's
-            // centre is the least surprising answer.
-            return (self.mean_ms() as i64).clamp(lo, hi);
-        }
-        (d as i64).clamp(lo, hi)
+        Some((d as i64).clamp(lo, hi))
     }
 
     /// Probability of completing within given duration.
@@ -455,11 +454,13 @@ impl PertEstimate {
     /// 85th percentile duration.
     pub fn p85(&self) -> i64 {
         self.duration_at_confidence(0.85)
+            .expect("0.85 is a confidence level")
     }
 
     /// 95th percentile duration.
     pub fn p95(&self) -> i64 {
         self.duration_at_confidence(0.95)
+            .expect("0.95 is a confidence level")
     }
 }
 
@@ -502,11 +503,16 @@ impl DurationDistribution {
         }
     }
 
-    /// Duration at confidence level.
-    pub fn duration_at_confidence(&self, confidence: f64) -> i64 {
-        match self {
+    /// Duration at confidence level, or `None` when `confidence` is not in
+    /// `[0, 1]` (NaN included) -- or is 1 for a log-normal, whose upper tail
+    /// has no end.
+    pub fn duration_at_confidence(&self, confidence: f64) -> Option<i64> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return None;
+        }
+        Some(match self {
             Self::Fixed(d) => *d,
-            Self::Pert(p) => p.duration_at_confidence(confidence),
+            Self::Pert(p) => return p.duration_at_confidence(confidence),
             Self::Uniform { min_ms, max_ms } => {
                 let range = max_ms - min_ms;
                 min_ms + (range as f64 * confidence) as i64
@@ -530,10 +536,13 @@ impl DurationDistribution {
                 }
             }
             Self::LogNormal { mu, sigma } => {
+                if confidence >= 1.0 {
+                    return None;
+                }
                 let z = u_numflow::special::inverse_normal_cdf(confidence);
                 (mu + z * sigma).exp() as i64
             }
-        }
+        })
     }
 
     /// Creates from PERT estimates.
@@ -623,11 +632,13 @@ mod tests {
             "precondition: normal tail leaves [O, P]"
         );
 
-        assert_eq!(pert.duration_at_confidence(0.001), 7_000);
-        assert_eq!(pert.duration_at_confidence(0.999), 13_000);
-        assert_eq!(pert.duration_at_confidence(0.0), 7_000);
-        assert_eq!(pert.duration_at_confidence(1.0), 13_000);
-        assert_eq!(pert.duration_at_confidence(f64::NAN), 10_000);
+        assert_eq!(pert.duration_at_confidence(0.001), Some(7_000));
+        assert_eq!(pert.duration_at_confidence(0.999), Some(13_000));
+        assert_eq!(pert.duration_at_confidence(0.0), Some(7_000));
+        assert_eq!(pert.duration_at_confidence(1.0), Some(13_000));
+        assert_eq!(pert.duration_at_confidence(f64::NAN), None);
+        assert_eq!(pert.duration_at_confidence(1.5), None);
+        assert_eq!(pert.duration_at_confidence(-0.1), None);
 
         // Inside the support the textbook value is unchanged.
         let expected = (pert.mean_ms()
@@ -636,7 +647,7 @@ mod tests {
         assert_eq!(pert.p85(), expected);
 
         let dist = DurationDistribution::Pert(pert);
-        assert_eq!(dist.duration_at_confidence(0.001), 7_000);
+        assert_eq!(dist.duration_at_confidence(0.001), Some(7_000));
     }
 
     #[test]
@@ -655,7 +666,7 @@ mod tests {
         let fixed = PertEstimate::new(5_000, 5_000, 5_000);
         assert_eq!(fixed.probability_of_completion(4_999), 0.0);
         assert_eq!(fixed.probability_of_completion(5_000), 1.0);
-        assert_eq!(fixed.duration_at_confidence(0.95), 5_000);
+        assert_eq!(fixed.duration_at_confidence(0.95), Some(5_000));
     }
 
     #[test]
@@ -697,5 +708,34 @@ mod tests {
         assert!(ViolationSeverity::Critical > ViolationSeverity::Major);
         assert!(ViolationSeverity::Major > ViolationSeverity::Minor);
         assert!(ViolationSeverity::Minor > ViolationSeverity::Info);
+    }
+
+    #[test]
+    fn a_confidence_outside_0_1_is_refused_by_every_distribution() {
+        let dists = [
+            DurationDistribution::Fixed(5_000),
+            DurationDistribution::Uniform {
+                min_ms: 1_000,
+                max_ms: 3_000,
+            },
+            DurationDistribution::Triangular {
+                min_ms: 1_000,
+                mode_ms: 2_000,
+                max_ms: 4_000,
+            },
+            DurationDistribution::LogNormal {
+                mu: 7.0,
+                sigma: 0.5,
+            },
+        ];
+        for d in &dists {
+            for bad in [f64::NAN, -0.01, 1.01] {
+                assert_eq!(d.duration_at_confidence(bad), None, "{d:?} at {bad}");
+            }
+            assert!(d.duration_at_confidence(0.5).is_some(), "{d:?}");
+        }
+        // A log-normal has no 100th percentile.
+        assert_eq!(dists[3].duration_at_confidence(1.0), None);
+        assert_eq!(dists[1].duration_at_confidence(1.0), Some(3_000));
     }
 }

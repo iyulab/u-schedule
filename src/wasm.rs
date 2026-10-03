@@ -145,6 +145,17 @@ impl From<Vec<ValidationError>> for WireError {
             ValidationErrorKind::WeightOutOfRange { task, weight } => json!({
                 "parameter": "weight", "task": task, "min": 0.0, "max": null, "got": weight
             }),
+            ValidationErrorKind::NegativeDuration {
+                activity,
+                duration_ms,
+            } => json!({
+                "parameter": "processing_time", "activity": activity, "min": 0.0, "max": null,
+                "got": ms_to_sec(*duration_ms),
+            }),
+            ValidationErrorKind::CapacityOutOfRange { resource, capacity } => json!({
+                "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
+                "got": capacity,
+            }),
         };
         WireError::new(first.kind.code(), message, fields)
     }
@@ -845,7 +856,7 @@ struct JobShopInput {
 
 // ── output schema ───────────────────────────────────────────────────────────
 
-#[derive(Serialize, tsify::Tsify)]
+#[derive(Debug, Serialize, tsify::Tsify)]
 struct JobShopAssignment {
     job_id: String,
     /// Which step of its job this is, counting from 1 in the order the job's
@@ -856,7 +867,7 @@ struct JobShopAssignment {
     end: f64,
 }
 
-#[derive(Serialize, tsify::Tsify)]
+#[derive(Debug, Serialize, tsify::Tsify)]
 struct JobShopOutput {
     schedule: Vec<JobShopAssignment>,
     makespan: f64,
@@ -954,10 +965,26 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
     }
     machine_ids.sort();
 
-    // Pad machine IDs to match num_machines if needed.
+    // `num_machines` adds idle machines beyond the ones the operations name;
+    // it cannot remove any of those.
     if let Some(n) = input.num_machines {
+        let named = machine_ids.len();
+        if n < named.max(1) {
+            return Err(WireError::new(
+                "parameter_out_of_range",
+                format!(
+                    "num_machines must be at least the {named} machine(s) the operations name, got {n}"
+                ),
+                json!({ "parameter": "num_machines", "min": named.max(1), "max": null, "got": n }),
+            ));
+        }
+        let mut next = 1;
         while machine_ids.len() < n {
-            machine_ids.push(format!("M{}", machine_ids.len() + 1));
+            let id = format!("M{next}");
+            next += 1;
+            if !machine_ids.contains(&id) {
+                machine_ids.push(id);
+            }
         }
     }
 
@@ -1052,6 +1079,16 @@ pub fn solve_jobshop(
     #[wasm_bindgen(unchecked_param_type = "JobShopInput")] problem: JsValue,
 ) -> Result<JsValue, JsValue> {
     let input: JobShopInput = from_js(problem, "problem")?;
+    to_js(&jobshop(&input).map_err(js_err)?)
+}
+
+/// The whole of `solve_jobshop` past the JS boundary. Tests call this, so
+/// they walk the path a JS caller does.
+fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
+    // The settings are refused or accepted whether or not there are jobs.
+    validate_ga_config(&input.ga_config)?;
+    let crossover_type = parse_crossover(&input.ga_config.crossover)?;
+    let mutation_type = parse_mutation(&input.ga_config.mutation)?;
 
     if input.jobs.is_empty() {
         let output = JobShopOutput {
@@ -1061,14 +1098,10 @@ pub fn solve_jobshop(
             generations: 0,
             fitness_history: vec![],
         };
-        return to_js(&output);
+        return Ok(output);
     }
 
-    let problem = jobshop_problem(&input).map_err(js_err)?;
-
-    // ── Configure operators ──
-    let crossover_type = parse_crossover(&input.ga_config.crossover).map_err(js_err)?;
-    let mutation_type = parse_mutation(&input.ga_config.mutation).map_err(js_err)?;
+    let problem = jobshop_problem(input)?;
 
     // ── Build GA problem ──
     let ga_problem = SchedulingGaProblem::new(&problem)
@@ -1078,9 +1111,7 @@ pub fn solve_jobshop(
             mutation_type,
         });
 
-    // ── Validate & configure GA ──
-    validate_ga_config(&input.ga_config).map_err(js_err)?;
-
+    // ── Configure GA ──
     // Compute a safe elite_ratio: ensure at least 1 elite for any population_size.
     // Default 0.1 gives elite_count=0 when population_size < 10.
     let elite_ratio = {
@@ -1103,11 +1134,11 @@ pub fn solve_jobshop(
 
     // Defence-in-depth: call GaConfig's own validation as well.
     let settings_refused = |e: &dyn std::fmt::Display| {
-        js_err(WireError::new(
+        WireError::new(
             "invalid_option",
             format!("ga_config refused: {e}"),
             json!({ "parameter": "ga_config" }),
-        ))
+        )
     };
     config.validate().map_err(|e| settings_refused(&e))?;
 
@@ -1126,14 +1157,14 @@ pub fn solve_jobshop(
             // of 1 -- so when the decoder stopped putting an activity id there,
             // every row silently read "operation 1".
             let operation = a.sequence.ok_or_else(|| {
-                js_err(WireError::new(
+                WireError::new(
                     "internal",
                     format!(
                         "internal: assignment for job '{}' on '{}' carries no operation number",
                         a.task_id, a.resource_id
                     ),
                     json!({}),
-                ))
+                )
             })? as usize;
 
             Ok(JobShopAssignment {
@@ -1144,7 +1175,7 @@ pub fn solve_jobshop(
                 end: ms_to_sec(a.end_ms),
             })
         })
-        .collect::<Result<_, JsValue>>()?;
+        .collect::<Result<_, WireError>>()?;
 
     let makespan = ms_to_sec(best_schedule.makespan_ms());
 
@@ -1156,7 +1187,7 @@ pub fn solve_jobshop(
         fitness_history: result.fitness_history,
     };
 
-    to_js(&output)
+    Ok(output)
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
@@ -1599,6 +1630,50 @@ mod tests {
         ]))
         .expect_err("a job with no operations");
         assert_eq!(empty.fields, json!({ "code": "empty_task", "task": "J2" }));
+
+        // `num_machines` can add idle machines, never remove named ones.
+        let mut few = input(vec![job("J1", vec![op(Some("M1")), op(Some("M2"))])]);
+        few.num_machines = Some(1);
+        let few = jobshop_problem(&few).expect_err("fewer machines than named");
+        assert_eq!(
+            few.fields,
+            json!({ "code": "parameter_out_of_range", "parameter": "num_machines",
+                    "min": 2, "max": null, "got": 1 })
+        );
+        // Padding never repeats a name the operations already use.
+        let mut padded = input(vec![job("J1", vec![op(Some("M2"))])]);
+        padded.num_machines = Some(3);
+        let problem = jobshop_problem(&padded).expect("padded");
+        let mut ids: Vec<&str> = problem.resources().iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["M1", "M2", "M3"]);
+
+        // Settings are refused with or without jobs.
+        let mut no_jobs = input(vec![]);
+        no_jobs.ga_config.crossover = "OX".to_string();
+        let bad = jobshop(&no_jobs).expect_err("unknown crossover, no jobs");
+        assert_eq!(bad.fields["parameter"], "ga_config.crossover");
+        let mut no_jobs = input(vec![]);
+        no_jobs.ga_config.population_size = 0;
+        assert_eq!(
+            jobshop(&no_jobs).expect_err("population 0, no jobs").code(),
+            "parameter_out_of_range"
+        );
+        assert!(jobshop(&input(vec![]))
+            .expect("defaults, no jobs")
+            .schedule
+            .is_empty());
+
+        // A negative processing time is refused, not scheduled.
+        let negative = JobShopOperation {
+            processing_time: -1.0,
+            ..op(Some("M1"))
+        };
+        let negative = jobshop_problem(&input(vec![job("J1", vec![negative])]))
+            .expect_err("negative processing time");
+        assert_eq!(negative.fields["code"], "parameter_out_of_range");
+        assert_eq!(negative.fields["parameter"], "processing_time");
+        assert_eq!(negative.fields["activity"], "J1_1");
 
         let rule = build_engine(
             "FIFO",

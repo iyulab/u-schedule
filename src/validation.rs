@@ -8,6 +8,7 @@
 //! - Circular precedence dependencies (DAG validation)
 //! - Empty tasks
 //! - Weights that are not finite and positive
+//! - Activity durations below 0 and resource capacities below 1
 //!
 //! # Reference
 //! Cormen et al. (2009), "Introduction to Algorithms", Ch. 22.4 (Topological Sort)
@@ -71,6 +72,21 @@ pub enum ValidationErrorKind {
         /// The weight it carries.
         weight: f64,
     },
+    /// An activity's setup, process or teardown time is below 0. A negative
+    /// part would end the activity before it starts.
+    NegativeDuration {
+        /// The activity.
+        activity: String,
+        /// Its total duration (ms).
+        duration_ms: i64,
+    },
+    /// A resource's capacity is below 1: it could never hold an activity.
+    CapacityOutOfRange {
+        /// The resource.
+        resource: String,
+        /// The capacity it declares.
+        capacity: i32,
+    },
 }
 
 /// The kinds of entity a scheduling problem identifies by id.
@@ -105,7 +121,9 @@ impl ValidationErrorKind {
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
             ValidationErrorKind::EmptyTask { .. } => "empty_task",
             ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
-            ValidationErrorKind::WeightOutOfRange { .. } => "parameter_out_of_range",
+            ValidationErrorKind::WeightOutOfRange { .. }
+            | ValidationErrorKind::NegativeDuration { .. }
+            | ValidationErrorKind::CapacityOutOfRange { .. } => "parameter_out_of_range",
         }
     }
 }
@@ -129,6 +147,16 @@ impl ValidationError {
             } => format!("Activity '{activity}' references unknown predecessor '{predecessor}'"),
             ValidationErrorKind::WeightOutOfRange { task, weight } => format!(
                 "Task '{task}' has weight {weight}; a weight must be finite and greater than 0"
+            ),
+            ValidationErrorKind::NegativeDuration {
+                activity,
+                duration_ms,
+            } => format!(
+                "Activity '{activity}' has a negative duration part (total {duration_ms} ms); \
+                 setup, process and teardown must each be >= 0"
+            ),
+            ValidationErrorKind::CapacityOutOfRange { resource, capacity } => format!(
+                "Resource '{resource}' has capacity {capacity}; a capacity must be at least 1"
             ),
         };
         Self { kind, message }
@@ -154,6 +182,8 @@ impl std::error::Error for ValidationError {}
 /// 6. All predecessor references point to existing activities
 /// 7. No circular precedence dependencies
 /// 8. Every task's weight is finite and `> 0`
+/// 9. Every activity's setup, process and teardown times are `>= 0`
+/// 10. Every resource's capacity is at least 1
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -163,6 +193,14 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
     // Collect resource IDs
     let mut resource_ids = HashSet::new();
     for r in resources {
+        if r.capacity < 1 {
+            errors.push(ValidationError::new(
+                ValidationErrorKind::CapacityOutOfRange {
+                    resource: r.id.clone(),
+                    capacity: r.capacity,
+                },
+            ));
+        }
         if !resource_ids.insert(r.id.as_str()) {
             errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {
                 entity: Entity::Resource,
@@ -199,6 +237,15 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
         }
 
         for act in &task.activities {
+            let d = &act.duration;
+            if d.setup_ms < 0 || d.process_ms < 0 || d.teardown_ms < 0 {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::NegativeDuration {
+                        activity: act.id.clone(),
+                        duration_ms: d.total_ms(),
+                    },
+                ));
+            }
             if !activity_ids.insert(act.id.as_str()) {
                 errors.push(ValidationError::new(ValidationErrorKind::DuplicateId {
                     entity: Entity::Activity,
@@ -527,5 +574,26 @@ mod tests {
         let mut tasks = sample_tasks();
         tasks[0].weight = 1e-6;
         assert!(validate_input(&tasks, &sample_resources()).is_ok());
+    }
+
+    #[test]
+    fn a_negative_duration_and_a_capacity_below_one_are_refused() {
+        let mut tasks = sample_tasks();
+        tasks[0].activities[0].duration = ActivityDuration::fixed(-5);
+        let mut resources = sample_resources();
+        resources[0].capacity = 0;
+        let errors = validate_input(&tasks, &resources).unwrap_err();
+        let kinds: Vec<_> = errors.iter().map(|e| e.kind.clone()).collect();
+        assert!(kinds.contains(&ValidationErrorKind::CapacityOutOfRange {
+            resource: "M1".into(),
+            capacity: 0,
+        }));
+        assert!(kinds.contains(&ValidationErrorKind::NegativeDuration {
+            activity: "O1".into(),
+            duration_ms: -5,
+        }));
+        assert!(errors
+            .iter()
+            .all(|e| e.kind.code() == "parameter_out_of_range"));
     }
 }

@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `PertEstimate::duration_at_confidence` and
+  `DurationDistribution::duration_at_confidence` return `Option<i64>`, `None`
+  for a confidence level outside [0, 1] (NaN included), or 1 for a log-normal.
+  They used to extrapolate past the range (uniform), return an end of it
+  (triangular), or the centre (PERT, NaN).
+
+### Fixed
+
+- `validate_input` (and so `Problem::new`) refuses an activity with a negative
+  setup, process or teardown time and a resource with capacity below 1
+  (`parameter_out_of_range`). Capacity was floored to 1 without a word.
+- WASM `solve_jobshop`:
+  - a `num_machines` smaller than the number of machines the operations name
+    is refused; it used to be ignored. Padding to `num_machines` no longer
+    repeats a machine id the operations already use.
+  - `ga_config` is checked even when `jobs` is empty; an unknown crossover or
+    a population of 0 used to return an empty schedule.
+  - a negative `processing_time` is refused (`parameter_out_of_range`, with the
+    `activity`).
+
 ## [0.11.0] - 2026-10-03
 
 ### Added
