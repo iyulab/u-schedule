@@ -116,9 +116,11 @@ impl std::fmt::Display for WireError {
     }
 }
 
-/// The checked problem's first finding, with every finding's text in the
-/// message. The code and fields are the first one's: they name one thing to
-/// fix, which is what a program branching on them can act on.
+/// The checked problem's findings. The code and fields are the first one's:
+/// they name one thing to fix, which is what a program branching on them can
+/// act on. `errors` lists every finding the same way -- `code`, `message` and
+/// its fields -- so a caller can point at all of them at once instead of
+/// fixing one and re-running; the message joins their texts.
 impl From<Vec<ValidationError>> for WireError {
     fn from(errors: Vec<ValidationError>) -> Self {
         let message = errors
@@ -129,57 +131,78 @@ impl From<Vec<ValidationError>> for WireError {
         let Some(first) = errors.first() else {
             return WireError::new("invalid_input", message, json!({}));
         };
-        let fields = match &first.kind {
-            ValidationErrorKind::DuplicateId { entity, id } => {
-                json!({ "entity": entity.name(), "id": id })
-            }
-            ValidationErrorKind::InvalidResourceReference { activity, resource } => {
-                json!({ "activity": activity, "resource": resource })
-            }
-            ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
-            ValidationErrorKind::EmptyTask { task } => json!({ "task": task }),
-            ValidationErrorKind::InvalidPredecessor {
-                activity,
-                predecessor,
-            } => json!({ "activity": activity, "predecessor": predecessor }),
-            ValidationErrorKind::WeightOutOfRange { task, weight } => json!({
-                "parameter": "weight", "task": task, "min": 0.0, "max": null, "got": weight
-            }),
-            ValidationErrorKind::NegativeDuration {
-                activity,
-                duration_ms,
-            } => json!({
-                "parameter": "processing_time", "activity": activity, "min": 0.0, "max": null,
-                "got": ms_to_sec(*duration_ms),
-            }),
-            ValidationErrorKind::CapacityOutOfRange { resource, capacity } => json!({
-                "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
-                "got": capacity,
-            }),
-            ValidationErrorKind::SkillLevelOutOfRange {
-                resource,
-                skill,
-                level,
-            } => json!({
-                "parameter": "skill_level", "resource": resource, "skill": skill,
-                "min": 0.0, "max": 1.0, "got": level,
-            }),
-            ValidationErrorKind::TardinessWeightOutOfRange { weight } => json!({
-                "parameter": "ga_config.tardiness_weight", "min": 0.0, "max": 1.0, "got": weight,
-            }),
-            // The wire input carries no calendars today; mapped so a future one reports it.
-            ValidationErrorKind::ReversedCalendarPeriod {
-                resource,
-                period,
-                index,
-                start_ms,
-                end_ms,
-            } => json!({
-                "parameter": format!("calendar.{}", period.name()), "resource": resource,
-                "index": index, "start": ms_to_sec(*start_ms), "end": ms_to_sec(*end_ms),
-            }),
-        };
+        let findings: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                let mut finding = json!({ "code": e.kind.code(), "message": e.message });
+                if let (Some(into), serde_json::Value::Object(from)) =
+                    (finding.as_object_mut(), finding_fields(&e.kind))
+                {
+                    into.extend(from);
+                }
+                finding
+            })
+            .collect();
+        let mut fields = finding_fields(&first.kind);
+        if let Some(object) = fields.as_object_mut() {
+            object.insert("errors".into(), serde_json::Value::Array(findings));
+        }
         WireError::new(first.kind.code(), message, fields)
+    }
+}
+
+/// The values behind one finding: which entity, which setting, and the
+/// numbers a range check compared.
+fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
+    match kind {
+        ValidationErrorKind::DuplicateId { entity, id } => {
+            json!({ "entity": entity.name(), "id": id })
+        }
+        ValidationErrorKind::InvalidResourceReference { activity, resource } => {
+            json!({ "activity": activity, "resource": resource })
+        }
+        ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
+        ValidationErrorKind::EmptyTask { task } => json!({ "task": task }),
+        ValidationErrorKind::InvalidPredecessor {
+            activity,
+            predecessor,
+        } => json!({ "activity": activity, "predecessor": predecessor }),
+        ValidationErrorKind::WeightOutOfRange { task, weight } => json!({
+            "parameter": "weight", "task": task, "min": 0.0, "max": null, "got": weight
+        }),
+        ValidationErrorKind::NegativeDuration {
+            activity,
+            duration_ms,
+        } => json!({
+            "parameter": "processing_time", "activity": activity, "min": 0.0, "max": null,
+            "got": ms_to_sec(*duration_ms),
+        }),
+        ValidationErrorKind::CapacityOutOfRange { resource, capacity } => json!({
+            "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
+            "got": capacity,
+        }),
+        ValidationErrorKind::SkillLevelOutOfRange {
+            resource,
+            skill,
+            level,
+        } => json!({
+            "parameter": "skill_level", "resource": resource, "skill": skill,
+            "min": 0.0, "max": 1.0, "got": level,
+        }),
+        ValidationErrorKind::TardinessWeightOutOfRange { weight } => json!({
+            "parameter": "ga_config.tardiness_weight", "min": 0.0, "max": 1.0, "got": weight,
+        }),
+        // The wire input carries no calendars today; mapped so a future one reports it.
+        ValidationErrorKind::ReversedCalendarPeriod {
+            resource,
+            period,
+            index,
+            start_ms,
+            end_ms,
+        } => json!({
+            "parameter": format!("calendar.{}", period.name()), "resource": resource,
+            "index": index, "start": ms_to_sec(*start_ms), "end": ms_to_sec(*end_ms),
+        }),
     }
 }
 
@@ -1710,7 +1733,36 @@ mod tests {
             job("J2", vec![]),
         ]))
         .expect_err("a job with no operations");
-        assert_eq!(empty.fields, json!({ "code": "empty_task", "task": "J2" }));
+        assert_eq!(
+            empty.fields,
+            json!({ "code": "empty_task", "task": "J2", "errors": [
+                { "code": "empty_task", "message": empty.message, "task": "J2" }
+            ] })
+        );
+
+        // Every finding is listed with its own code and values, not only the
+        // first: a caller can point at all of them in one pass.
+        let both = jobshop_problem(&input(vec![
+            job("J1", vec![op(Some("M1"))]),
+            job("J2", vec![]),
+            job("J3", vec![]),
+        ]))
+        .expect_err("two jobs with no operations");
+        assert_eq!(both.code(), "empty_task");
+        assert_eq!(both.fields["task"], "J2");
+        let tasks: Vec<_> = both.fields["errors"]
+            .as_array()
+            .expect("errors is a list")
+            .iter()
+            .map(|e| (e["code"].clone(), e["task"].clone()))
+            .collect();
+        assert_eq!(
+            tasks,
+            vec![
+                (json!("empty_task"), json!("J2")),
+                (json!("empty_task"), json!("J3"))
+            ]
+        );
 
         // `num_machines` can add idle machines, never remove named ones.
         let mut few = input(vec![job("J1", vec![op(Some("M1")), op(Some("M2"))])]);

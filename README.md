@@ -270,6 +270,11 @@ try {
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), or a JSON string |
 
+When the problem check finds several things wrong (two jobs without operations, a
+duplicate id and a cycle, …), `code` and its fields are the first finding's, and
+`err.errors` lists every finding the same way — `code`, `message` and its fields —
+so all of them can be shown at once.
+
 ## npm (WebAssembly)
 
 ```bash
