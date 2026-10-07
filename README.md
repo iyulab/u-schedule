@@ -266,7 +266,7 @@ try {
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_task` | `task` | A job with no operations |
-| `invalid_option` | `parameter` | GA settings the runner itself refuses |
+| `invalid_option` | `parameter` | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population); a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), or a JSON string |
 

@@ -42,6 +42,7 @@ use crate::models::{
 use crate::validation::{ValidationError, ValidationErrorKind};
 use crate::Problem;
 use u_metaheur::ga::{GaConfig, GaRunner};
+use u_metaheur::ConfigError;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +108,22 @@ impl WireError {
         self.fields["code"]
             .as_str()
             .expect("every refusal carries a code")
+    }
+}
+
+/// GA settings the runner refused, named by the `ga_config` field it checked:
+/// a number outside its range is `parameter_out_of_range` with the bounds, a
+/// setting wrong only beside the others is `invalid_option`.
+fn ga_settings_refused(e: ConfigError) -> WireError {
+    let parameter = format!("ga_config.{}", e.parameter());
+    let message = format!("ga_config.{e}");
+    match e {
+        ConfigError::OutOfRange { min, max, got, .. } => WireError::new(
+            "parameter_out_of_range",
+            message,
+            json!({ "parameter": parameter, "min": min, "max": max, "got": got }),
+        ),
+        _ => WireError::new("invalid_option", message, json!({ "parameter": parameter })),
     }
 }
 
@@ -1237,17 +1254,10 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     }
 
     // Defence-in-depth: call GaConfig's own validation as well.
-    let settings_refused = |e: &dyn std::fmt::Display| {
-        WireError::new(
-            "invalid_option",
-            format!("ga_config refused: {e}"),
-            json!({ "parameter": "ga_config" }),
-        )
-    };
-    config.validate().map_err(|e| settings_refused(&e))?;
+    config.validate().map_err(ga_settings_refused)?;
 
     // ── Run GA ──
-    let result = GaRunner::run(&ga_problem, &config).map_err(|e| settings_refused(&e))?;
+    let result = GaRunner::run(&ga_problem, &config).map_err(ga_settings_refused)?;
 
     // ── Decode best solution ──
     let best_schedule = ga_problem.decode(&result.best);
@@ -1699,6 +1709,33 @@ mod tests {
     /// Every refusal on the job-shop path names its reason as a `code` and
     /// carries the values behind it -- through the function `solve_jobshop`
     /// itself calls, not a copy of it.
+    /// The GA runner's own check names the `ga_config` field it refused, with
+    /// the bounds when it is a range.
+    #[test]
+    fn ga_settings_the_runner_refuses_name_their_field() {
+        let range = GaConfig::default()
+            .with_population_size(1)
+            .validate()
+            .expect_err("a population of one");
+        let err = ga_settings_refused(range);
+        assert_eq!(
+            err.fields,
+            json!({ "code": "parameter_out_of_range", "parameter": "ga_config.population_size",
+                    "min": 2.0, "max": null, "got": 1.0 })
+        );
+
+        let together = GaConfig::default()
+            .with_population_size(2)
+            .with_elite_ratio(0.1)
+            .validate()
+            .expect_err("no elite in a population of two");
+        let err = ga_settings_refused(together);
+        assert_eq!(
+            err.fields,
+            json!({ "code": "invalid_option", "parameter": "ga_config.elite_ratio" })
+        );
+    }
+
     #[test]
     fn jobshop_refusals_carry_their_code_and_values() {
         let op = |machine: Option<&str>| JobShopOperation {

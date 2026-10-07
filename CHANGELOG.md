@@ -15,6 +15,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   top-level fields stay the first finding's; only the message named the others
   before.
 
+### Changed
+
+- GA settings the runner refuses name their field: a value outside its range is
+  `parameter_out_of_range` with `parameter` (`ga_config.population_size`), `min`,
+  `max` and `got`; a setting wrong only beside the others is `invalid_option` on that
+  field. Both were `invalid_option` on `ga_config` with the reason in the message.
+
 ## [0.14.1] - 2026-10-07
 
 ### Fixed
