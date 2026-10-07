@@ -13,6 +13,7 @@
 //! - It does NOT fall within any `blocked_periods` entry.
 
 use serde::{Deserialize, Serialize};
+use u_numflow::collections::IntervalSet;
 
 /// A time interval [start, end).
 ///
@@ -132,100 +133,57 @@ impl Calendar {
 
     /// Finds the next available time at or after `from_ms`.
     ///
-    /// Returns `from_ms` if already available, or the start of the
-    /// next availability window that isn't blocked.
+    /// Returns `from_ms` if already available, otherwise the first instant
+    /// after it that lies in an availability window (or anywhere, with no
+    /// windows) and outside every blocked period — overlapping or adjacent
+    /// blocked periods are crossed together.
     ///
     /// Returns `None` if no future availability exists.
     pub fn next_available_time(&self, from_ms: i64) -> Option<i64> {
-        if self.is_working_time(from_ms) {
-            return Some(from_ms);
-        }
-
-        // If no windows, we must be in a blocked period
-        if self.time_windows.is_empty() {
-            // Find end of current blocked period
-            for bp in &self.blocked_periods {
-                if bp.contains(from_ms) {
-                    let candidate = bp.end_ms;
-                    if self.is_working_time(candidate) {
-                        return Some(candidate);
-                    }
-                }
-            }
-            return None;
-        }
-
-        // Search windows sorted by start time
-        let mut candidates: Vec<i64> = self
-            .time_windows
+        self.available_set(from_ms, i64::MAX)
             .iter()
-            .filter(|w| w.end_ms > from_ms)
-            .map(|w| w.start_ms.max(from_ms))
-            .collect();
-        candidates.sort();
-
-        for candidate in candidates {
-            if self.is_working_time(candidate) {
-                return Some(candidate);
-            }
-            // If candidate is blocked, try end of the blocking period
-            for bp in &self.blocked_periods {
-                if bp.contains(candidate) && bp.end_ms < i64::MAX && self.is_working_time(bp.end_ms)
-                {
-                    return Some(bp.end_ms);
-                }
-            }
-        }
-
-        None
+            .next()
+            .map(|(start, _)| start)
     }
 
     /// Computes total available time within a range [start, end).
+    ///
+    /// Each instant counts once: overlapping windows are merged, overlapping
+    /// blocked periods are merged, and blocked time outside every window is
+    /// not subtracted (it was never available). Saturates at `i64::MAX`, which
+    /// only a range longer than `i64::MAX` ms can reach.
     pub fn available_time_in_range(&self, start_ms: i64, end_ms: i64) -> i64 {
+        i64::try_from(self.available_set(start_ms, end_ms).measure()).unwrap_or(i64::MAX)
+    }
+
+    /// The available instants in `[start_ms, end_ms)`:
+    /// `(∪ windows, or everything) ∩ [start_ms, end_ms) − ∪ blocked`.
+    ///
+    /// A window or blocked period with `start_ms > end_ms` contains no instant
+    /// (as [`TimeWindow::contains`] already says) and is skipped here;
+    /// [`Problem::new`](crate::Problem::new) refuses such calendars.
+    fn available_set(&self, start_ms: i64, end_ms: i64) -> IntervalSet<i64> {
         if end_ms <= start_ms {
-            return 0;
+            return IntervalSet::new();
         }
-
-        let range = TimeWindow::new(start_ms, end_ms);
-
-        // If no windows, total = range - blocked
-        if self.time_windows.is_empty() {
-            let blocked: i64 = self
-                .blocked_periods
-                .iter()
-                .filter_map(|bp| overlap_duration(&range, bp))
-                .sum();
-            return range.duration_ms() - blocked;
-        }
-
-        // Sum window intersections with range, minus blocked intersections
-        let mut available: i64 = 0;
-        for w in &self.time_windows {
-            if let Some(dur) = overlap_duration(&range, w) {
-                available += dur;
-            }
-        }
-
-        // Subtract blocked intersections
-        let blocked: i64 = self
-            .blocked_periods
-            .iter()
-            .filter_map(|bp| overlap_duration(&range, bp))
-            .sum();
-
-        (available - blocked).max(0)
+        let range = (start_ms, end_ms);
+        let base = if self.time_windows.is_empty() {
+            interval_set(std::iter::once(range))
+        } else {
+            interval_set(self.time_windows.iter().map(|w| (w.start_ms, w.end_ms)))
+                .clip(start_ms, end_ms)
+                .expect("range is ordered: checked above")
+        };
+        base.difference(&interval_set(
+            self.blocked_periods.iter().map(|b| (b.start_ms, b.end_ms)),
+        ))
     }
 }
 
-/// Computes overlap duration between two time windows.
-fn overlap_duration(a: &TimeWindow, b: &TimeWindow) -> Option<i64> {
-    let start = a.start_ms.max(b.start_ms);
-    let end = a.end_ms.min(b.end_ms);
-    if end > start {
-        Some(end - start)
-    } else {
-        None
-    }
+/// The union of the well-ordered `(start, end)` pairs; reversed pairs are empty.
+fn interval_set(pairs: impl Iterator<Item = (i64, i64)>) -> IntervalSet<i64> {
+    IntervalSet::from_intervals(pairs.filter(|(s, e)| s <= e))
+        .expect("integer bounds are admissible and reversed pairs were filtered out")
 }
 
 #[cfg(test)]
@@ -336,5 +294,80 @@ mod tests {
 
         let avail = cal.available_time_in_range(0, 50_000);
         assert_eq!(avail, 40_000); // 50k - 10k blocked
+    }
+
+    /// Overlapping blocked periods (planned + unplanned stop sharing 14 h)
+    /// used to be subtracted twice.
+    #[test]
+    fn overlapping_blocked_periods_count_once() {
+        let h = 3_600_000;
+        let cal = Calendar::always_available("asset")
+            .with_blocked(0, 24 * h)
+            .with_blocked(10 * h, 30 * h);
+        assert_eq!(cal.available_time_in_range(0, 168 * h), 138 * h);
+    }
+
+    #[test]
+    fn overlapping_windows_count_once() {
+        let cal = Calendar::new("cal")
+            .with_window(0, 100)
+            .with_window(50, 150);
+        assert_eq!(cal.available_time_in_range(0, 200), 150);
+    }
+
+    /// Blocked time outside every window was never available, so it must not
+    /// be subtracted from the window time.
+    #[test]
+    fn blocked_time_outside_windows_is_not_subtracted() {
+        let cal = Calendar::new("shift")
+            .with_window(0, 8_000)
+            .with_blocked(10_000, 12_000);
+        assert_eq!(cal.available_time_in_range(0, 20_000), 8_000);
+    }
+
+    /// The end of the first blocked period lies inside the second; the next
+    /// available instant is the end of the second (it used to be `None`).
+    #[test]
+    fn next_available_crosses_overlapping_blocked_periods() {
+        let free = Calendar::always_available("cal")
+            .with_blocked(10, 20)
+            .with_blocked(15, 30);
+        assert_eq!(free.next_available_time(12), Some(30));
+
+        let shift = Calendar::new("shift")
+            .with_window(0, 100)
+            .with_blocked(10, 20)
+            .with_blocked(15, 30);
+        assert_eq!(shift.next_available_time(12), Some(30));
+        assert_eq!(shift.next_available_time(100), None);
+    }
+
+    #[test]
+    fn a_reversed_period_contains_no_time() {
+        let cal = Calendar::new("cal").with_window(0, 10).with_window(50, 40);
+        assert_eq!(cal.available_time_in_range(0, 100), 10);
+        assert!(!cal.is_working_time(45));
+    }
+
+    proptest::proptest! {
+        /// Available time equals the number of working milliseconds, counted
+        /// one by one with `is_working_time`; the next available instant is the
+        /// first such millisecond.
+        #[test]
+        fn availability_agrees_with_pointwise_model(
+            windows in proptest::collection::vec((0i64..60, 0i64..20), 0..4),
+            blocked in proptest::collection::vec((0i64..60, 0i64..20), 0..4),
+            from in 0i64..80,
+        ) {
+            let mut cal = Calendar::new("p");
+            for (s, l) in windows { cal = cal.with_window(s, s + l); }
+            for (s, l) in blocked { cal = cal.with_blocked(s, s + l); }
+            let working: Vec<i64> = (0..100).filter(|&t| cal.is_working_time(t)).collect();
+            proptest::prop_assert_eq!(cal.available_time_in_range(0, 100), working.len() as i64);
+            // Every period ends before 80 and `from` < 80, so the model's range
+            // [0, 100) holds the answer even when the calendar is unbounded above.
+            let expect = working.iter().copied().find(|&t| t >= from);
+            proptest::prop_assert_eq!(cal.next_available_time(from), expect);
+        }
     }
 }

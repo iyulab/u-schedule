@@ -9,6 +9,7 @@
 //! - Empty tasks
 //! - Weights that are not finite and positive
 //! - Activity durations below 0 and resource capacities below 1
+//! - Calendar windows and blocked periods whose start is after their end
 //!
 //! # Reference
 //! Cormen et al. (2009), "Introduction to Algorithms", Ch. 22.4 (Topological Sort)
@@ -98,12 +99,48 @@ pub enum ValidationErrorKind {
         /// The level it declares.
         level: f64,
     },
+    /// A resource calendar's availability window or blocked period starts
+    /// after it ends. Such a period contains no instant, so it used to be
+    /// skipped without a word: a reversed window made the resource silently
+    /// unavailable for that shift, a reversed blocked period silently did not
+    /// block.
+    ReversedCalendarPeriod {
+        /// The resource whose calendar holds the period.
+        resource: String,
+        /// Which list the period is in.
+        period: CalendarPeriod,
+        /// Its position in that list.
+        index: usize,
+        /// Its start (ms).
+        start_ms: i64,
+        /// Its end (ms).
+        end_ms: i64,
+    },
     /// A GA tardiness weight outside `[0, 1]` (0 = pure makespan, 1 = pure
     /// tardiness). It used to be clamped into range.
     TardinessWeightOutOfRange {
         /// The weight given.
         weight: f64,
     },
+}
+
+/// The two lists of a [`Calendar`](crate::models::Calendar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarPeriod {
+    /// [`Calendar::time_windows`](crate::models::Calendar::time_windows).
+    TimeWindow,
+    /// [`Calendar::blocked_periods`](crate::models::Calendar::blocked_periods).
+    BlockedPeriod,
+}
+
+impl CalendarPeriod {
+    /// The list's field name, as messages spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            CalendarPeriod::TimeWindow => "time_windows",
+            CalendarPeriod::BlockedPeriod => "blocked_periods",
+        }
+    }
 }
 
 /// The kinds of entity a scheduling problem identifies by id.
@@ -138,6 +175,7 @@ impl ValidationErrorKind {
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
             ValidationErrorKind::EmptyTask { .. } => "empty_task",
             ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
+            ValidationErrorKind::ReversedCalendarPeriod { .. } => "invalid_calendar_period",
             ValidationErrorKind::WeightOutOfRange { .. }
             | ValidationErrorKind::NegativeDuration { .. }
             | ValidationErrorKind::CapacityOutOfRange { .. }
@@ -182,10 +220,20 @@ impl ValidationError {
                 skill,
                 level,
             } => format!(
-                "Resource '{resource}' has skill '{skill}' at level {level};                  a skill level must be a number in [0, 1]"
+                "Resource '{resource}' has skill '{skill}' at level {level}; a skill level must be a number in [0, 1]"
+            ),
+            ValidationErrorKind::ReversedCalendarPeriod {
+                resource,
+                period,
+                index,
+                start_ms,
+                end_ms,
+            } => format!(
+                "Resource '{resource}' calendar {}[{index}] starts at {start_ms} ms, after its end at {end_ms} ms",
+                period.name()
             ),
             ValidationErrorKind::TardinessWeightOutOfRange { weight } => format!(
-                "tardiness weight {weight} must be a number in [0, 1]                  (0 = pure makespan, 1 = pure tardiness)"
+                "tardiness weight {weight} must be a number in [0, 1] (0 = pure makespan, 1 = pure tardiness)"
             ),
         };
         Self { kind, message }
@@ -214,6 +262,7 @@ impl std::error::Error for ValidationError {}
 /// 9. Every activity's setup, process and teardown times are `>= 0`
 /// 10. Every resource's capacity is at least 1
 /// 11. Every skill level is a finite number in `[0, 1]`
+/// 12. Every calendar window and blocked period has `start_ms <= end_ms`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -240,6 +289,26 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                         level: skill.level,
                     },
                 ));
+            }
+        }
+        if let Some(cal) = &r.calendar {
+            for (period, list) in [
+                (CalendarPeriod::TimeWindow, &cal.time_windows),
+                (CalendarPeriod::BlockedPeriod, &cal.blocked_periods),
+            ] {
+                for (index, w) in list.iter().enumerate() {
+                    if w.start_ms > w.end_ms {
+                        errors.push(ValidationError::new(
+                            ValidationErrorKind::ReversedCalendarPeriod {
+                                resource: r.id.clone(),
+                                period,
+                                index,
+                                start_ms: w.start_ms,
+                                end_ms: w.end_ms,
+                            },
+                        ));
+                    }
+                }
             }
         }
         if !resource_ids.insert(r.id.as_str()) {
@@ -615,6 +684,47 @@ mod tests {
         let mut tasks = sample_tasks();
         tasks[0].weight = 1e-6;
         assert!(validate_input(&tasks, &sample_resources()).is_ok());
+    }
+
+    #[test]
+    fn a_reversed_calendar_period_is_refused_with_its_place() {
+        use crate::models::Calendar;
+        let mut resources = sample_resources();
+        resources[0].calendar = Some(
+            Calendar::new("c")
+                .with_window(0, 10)
+                .with_window(50, 40)
+                .with_blocked(7, 3),
+        );
+        let errors = validate_input(&sample_tasks(), &resources).unwrap_err();
+        let kinds: Vec<_> = errors.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ValidationErrorKind::ReversedCalendarPeriod {
+                    resource: "M1".into(),
+                    period: CalendarPeriod::TimeWindow,
+                    index: 1,
+                    start_ms: 50,
+                    end_ms: 40,
+                },
+                ValidationErrorKind::ReversedCalendarPeriod {
+                    resource: "M1".into(),
+                    period: CalendarPeriod::BlockedPeriod,
+                    index: 0,
+                    start_ms: 7,
+                    end_ms: 3,
+                },
+            ]
+        );
+        assert_eq!(errors[0].kind.code(), "invalid_calendar_period");
+        assert_eq!(
+            errors[0].message,
+            "Resource 'M1' calendar time_windows[1] starts at 50 ms, after its end at 40 ms"
+        );
+        // An empty period (start == end) is not reversed.
+        resources[0].calendar = Some(Calendar::new("c").with_window(5, 5));
+        assert!(validate_input(&sample_tasks(), &resources).is_ok());
     }
 
     #[test]

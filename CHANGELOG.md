@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+Depends on u-numflow 0.9 (`IntervalSet`).
+
+### Changed
+
+- **Breaking:** `validate_input` (and so `Problem::new`) refuses a resource
+  calendar whose time window or blocked period starts after it ends:
+  `ReversedCalendarPeriod` (code `invalid_calendar_period`) with the resource,
+  the list (`CalendarPeriod::TimeWindow` / `BlockedPeriod`), the index and both
+  bounds. Such a period contains no instant, so it used to be skipped without a
+  word — a reversed window made the resource unavailable for that shift, a
+  reversed blocked period did not block.
+
+### Fixed
+
+- `Calendar::available_time_in_range` counted overlapping blocked periods (and
+  overlapping windows) once per period, and subtracted blocked time lying
+  outside every window from the window time. A planned and an unplanned stop
+  sharing 14 h in a 168 h week gave 124 h available instead of 138 h. It now
+  computes `(∪ windows ∩ range) − ∪ blocked` on an interval set, so each
+  instant counts once.
+- `Calendar::next_available_time` returned `None` when the end of one blocked
+  period fell inside another (blocked `[10, 20)` and `[15, 30)`, asked from 12),
+  although the calendar is free again at 30. It now returns the first free
+  instant after every overlapping or adjacent blocked period.
+- The validation messages for an out-of-range skill level and tardiness weight
+  had a run of 18 spaces in the middle of the sentence.
+
 ## [0.13.0] - 2026-10-04
 
 Depends on u-numflow 0.8 and u-metaheur 0.6.1.

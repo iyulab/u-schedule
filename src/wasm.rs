@@ -167,6 +167,17 @@ impl From<Vec<ValidationError>> for WireError {
             ValidationErrorKind::TardinessWeightOutOfRange { weight } => json!({
                 "parameter": "ga_config.tardiness_weight", "min": 0.0, "max": 1.0, "got": weight,
             }),
+            // The wire input carries no calendars today; mapped so a future one reports it.
+            ValidationErrorKind::ReversedCalendarPeriod {
+                resource,
+                period,
+                index,
+                start_ms,
+                end_ms,
+            } => json!({
+                "parameter": format!("calendar.{}", period.name()), "resource": resource,
+                "index": index, "start": ms_to_sec(*start_ms), "end": ms_to_sec(*end_ms),
+            }),
         };
         WireError::new(first.kind.code(), message, fields)
     }
