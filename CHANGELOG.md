@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Fixed
+
+- WebAssembly: a value of the wrong type inside an argument -- a `null` or a
+  string where a number belongs (`jobs[1].processing_time`), or a missing field -- is refused as
+  `malformed_input` with `parameter` naming the field and `index` its position in
+  its array. It named only the argument ("invalid type: null, expected f64"),
+  so a caller could not say which row was wrong.
+
 ## [0.14.0] - 2026-10-07
 
 Depends on u-numflow 0.9 (`IntervalSet`) and u-metaheur 0.6.

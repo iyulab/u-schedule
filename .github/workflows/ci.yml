@@ -154,20 +154,28 @@ jobs:
           fail_ci_if_error: false
 
   wasm:
-    name: WASM Check
+    name: WASM Binding
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: stable
+          components: clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `src/wasm.rs` is behind the `wasm` feature, so the test and clippy jobs
+      # compile the crate without it: the binding's own tests -- the input and
+      # refusal contract -- ran nowhere until this step.
+      - name: Binding tests (host target)
+        run: cargo test --features wasm --lib
+      - run: cargo clippy --features wasm --all-targets -- -D warnings
       # Without `--features wasm` this job compiles the crate for wasm32 with
       # `src/wasm.rs` cfg'd out -- it passed while never building the binding.
-      - run: cargo check --features wasm --target wasm32-unknown-unknown
+      - name: Compile the binding for its real target
+        run: cargo check --features wasm --target wasm32-unknown-unknown
 
   semver:
     name: SemVer (cargo-semver-checks)
