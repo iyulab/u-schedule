@@ -56,7 +56,7 @@ The GA module uses dual-vector encoding for job-shop scheduling:
 
 ```toml
 [dependencies]
-u-schedule = "0.14"
+u-schedule = "0.15"
 ```
 
 ```rust
