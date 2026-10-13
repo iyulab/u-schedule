@@ -262,7 +262,7 @@ try {
 |---|---|---|
 | `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs) | Two jobs share an `id` (at positions `first` and `second`, from 0), or two tasks, activities or resources do |
 | `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
-| `parameter_out_of_range` | `parameter`, `min`, `max` (or `null`), `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, or a job's `processing_time` below 0 or `weight` not above 0 |
+| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, or a job's `processing_time` below 0 or `weight` not above 0. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_task` | `task` | A job with no operations |

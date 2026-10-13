@@ -28,6 +28,8 @@
 //! JSON uses seconds (f64). Internally, the scheduling model uses
 //! milliseconds (i64), converted by multiplying/dividing by 1000.
 
+use std::ops::{Bound, RangeBounds};
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -89,16 +91,16 @@ impl WireError {
         )
     }
 
-    /// A numeric option outside the range the solver accepts.
-    fn out_of_range(parameter: &str, min: f64, max: Option<f64>, got: f64) -> Self {
-        let range = match max {
-            Some(max) => format!("in {min}..={max}"),
-            None => format!(">= {min}"),
-        };
+    /// A numeric option outside the range the solver accepts, each end open or
+    /// closed as it is (`1.0..`, `0.0..=1.0`, `(Excluded(0.0), Unbounded)`).
+    fn out_of_range(parameter: &str, accepted: impl RangeBounds<f64>, got: f64) -> Self {
+        let bounds = Bounds::of(accepted);
+        let mut fields = json!({ "parameter": parameter, "got": got });
+        bounds.insert_into(&mut fields);
         Self::new(
             "parameter_out_of_range",
-            format!("{parameter} must be {range}, got {got}"),
-            json!({ "parameter": parameter, "min": min, "max": max, "got": got }),
+            format!("{parameter} must be {}, got {got}", bounds.describe()),
+            fields,
         )
     }
 
@@ -111,18 +113,99 @@ impl WireError {
     }
 }
 
+/// The bounds a `parameter_out_of_range` refusal reports. A closed (included)
+/// end is `min` / `max`, an open (excluded) end `exclusive_min` /
+/// `exclusive_max`; a side holds at most one of its two.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bounds {
+    min: Option<f64>,
+    max: Option<f64>,
+    exclusive_min: Option<f64>,
+    exclusive_max: Option<f64>,
+}
+
+impl Bounds {
+    /// Reads a range's ends: `1.0..` is ">= 1", `(Excluded(0.0), Unbounded)`
+    /// is "> 0".
+    fn of(range: impl RangeBounds<f64>) -> Self {
+        let split = |bound: Bound<&f64>| match bound {
+            Bound::Included(&v) => (Some(v), None),
+            Bound::Excluded(&v) => (None, Some(v)),
+            Bound::Unbounded => (None, None),
+        };
+        let (min, exclusive_min) = split(range.start_bound());
+        let (max, exclusive_max) = split(range.end_bound());
+        Self {
+            min,
+            max,
+            exclusive_min,
+            exclusive_max,
+        }
+    }
+
+    /// Writes the bounds into a refusal's fields: `min` and `max` always
+    /// (`null` on a side that is open or unbounded), `exclusive_min` and
+    /// `exclusive_max` only when that end is open.
+    fn insert_into(self, fields: &mut serde_json::Value) {
+        fields["min"] = json!(self.min);
+        fields["max"] = json!(self.max);
+        for (key, open) in [
+            ("exclusive_min", self.exclusive_min),
+            ("exclusive_max", self.exclusive_max),
+        ] {
+            if let Some(value) = open {
+                fields[key] = json!(value);
+            }
+        }
+    }
+
+    /// The range in words, for the message: `in 0..=1`, `>= 1`, `> 0`.
+    fn describe(self) -> String {
+        let lower = match (self.min, self.exclusive_min) {
+            (Some(v), _) => Some(format!(">= {v}")),
+            (None, Some(v)) => Some(format!("> {v}")),
+            (None, None) => None,
+        };
+        let upper = match (self.max, self.exclusive_max) {
+            (Some(v), _) => Some(format!("<= {v}")),
+            (None, Some(v)) => Some(format!("< {v}")),
+            (None, None) => None,
+        };
+        match (self.min, self.max, lower, upper) {
+            (Some(min), Some(max), _, _) => format!("in {min}..={max}"),
+            (_, _, Some(lower), Some(upper)) => format!("{lower} and {upper}"),
+            (_, _, Some(side), None) | (_, _, None, Some(side)) => side,
+            (_, _, None, None) => "a number".to_string(),
+        }
+    }
+}
+
 /// GA settings the runner refused, named by the `ga_config` field it checked:
-/// a number outside its range is `parameter_out_of_range` with the bounds, a
-/// setting wrong only beside the others is `invalid_option`.
+/// a number outside its range is `parameter_out_of_range` with the bounds as
+/// the runner reported them (open ends as `exclusive_min` / `exclusive_max`),
+/// a setting wrong only beside the others is `invalid_option`.
 fn ga_settings_refused(e: ConfigError) -> WireError {
     let parameter = format!("ga_config.{}", e.parameter());
     let message = format!("ga_config.{e}");
     match e {
-        ConfigError::OutOfRange { min, max, got, .. } => WireError::new(
-            "parameter_out_of_range",
-            message,
-            json!({ "parameter": parameter, "min": min, "max": max, "got": got }),
-        ),
+        ConfigError::OutOfRange {
+            min,
+            max,
+            exclusive_min,
+            exclusive_max,
+            got,
+            ..
+        } => {
+            let mut fields = json!({ "parameter": parameter, "got": got });
+            Bounds {
+                min,
+                max,
+                exclusive_min,
+                exclusive_max,
+            }
+            .insert_into(&mut fields);
+            WireError::new("parameter_out_of_range", message, fields)
+        }
         _ => WireError::new("invalid_option", message, json!({ "parameter": parameter })),
     }
 }
@@ -184,8 +267,10 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             activity,
             predecessor,
         } => json!({ "activity": activity, "predecessor": predecessor }),
+        // A weight must be > 0: zero itself is refused, so the bound is open.
         ValidationErrorKind::WeightOutOfRange { task, weight } => json!({
-            "parameter": "weight", "task": task, "min": 0.0, "max": null, "got": weight
+            "parameter": "weight", "task": task, "min": null, "max": null,
+            "exclusive_min": 0.0, "got": weight
         }),
         ValidationErrorKind::NegativeDuration {
             activity,
@@ -607,24 +692,37 @@ fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(),
 /// `id`.
 fn refuse_job_values(jobs: &[InputJob]) -> Result<(), WireError> {
     for (index, job) in jobs.iter().enumerate() {
-        let (parameter, got, rule) =
+        // A processing time of 0 is accepted (closed bound), a weight of 0 is
+        // not (open bound).
+        let (parameter, got, rule, bounds) =
             if !(job.processing_time.is_finite() && job.processing_time >= 0.0) {
-                ("processing_time", job.processing_time, "finite and >= 0")
+                (
+                    "processing_time",
+                    job.processing_time,
+                    "finite and >= 0",
+                    Bounds::of(0.0..),
+                )
             } else if !(job.weight.is_finite() && job.weight > 0.0) {
-                ("weight", job.weight, "finite and > 0")
+                (
+                    "weight",
+                    job.weight,
+                    "finite and > 0",
+                    Bounds::of((Bound::Excluded(0.0), Bound::Unbounded)),
+                )
             } else {
                 continue;
             };
+        let mut fields = json!({
+            "parameter": parameter, "got": got, "index": index, "id": job.id,
+        });
+        bounds.insert_into(&mut fields);
         return Err(WireError::new(
             "parameter_out_of_range",
             format!(
                 "job {:?} (position {index} of jobs, counting from 0): {parameter} must be {rule}, got {got}",
                 job.id
             ),
-            json!({
-                "parameter": parameter, "min": 0.0, "max": null, "got": got,
-                "index": index, "id": job.id,
-            }),
+            fields,
         ));
     }
     Ok(())
@@ -799,12 +897,7 @@ pub fn run_schedule(
 fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
     let num_machines = input.config.num_machines;
     if num_machines == 0 {
-        return Err(WireError::out_of_range(
-            "config.num_machines",
-            1.0,
-            None,
-            0.0,
-        ));
+        return Err(WireError::out_of_range("config.num_machines", 1.0.., 0.0));
     }
     let engine = build_engine(&input.config.rule, &input.config)?;
     if input.jobs.is_empty() {
@@ -1034,32 +1127,28 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), WireError> {
     if cfg.population_size < 2 {
         return Err(WireError::out_of_range(
             "ga_config.population_size",
-            2.0,
-            None,
+            2.0..,
             cfg.population_size as f64,
         ));
     }
     if cfg.max_generations < 1 {
         return Err(WireError::out_of_range(
             "ga_config.max_generations",
-            1.0,
-            None,
+            1.0..,
             cfg.max_generations as f64,
         ));
     }
     if !(0.0..=1.0).contains(&cfg.mutation_rate) {
         return Err(WireError::out_of_range(
             "ga_config.mutation_rate",
-            0.0,
-            Some(1.0),
+            0.0..=1.0,
             cfg.mutation_rate,
         ));
     }
     if !(0.0..=1.0).contains(&cfg.tardiness_weight) {
         return Err(WireError::out_of_range(
             "ga_config.tardiness_weight",
-            0.0,
-            Some(1.0),
+            0.0..=1.0,
             cfg.tardiness_weight,
         ));
     }
@@ -1388,13 +1477,32 @@ mod tests {
                 err.fields,
                 json!({
                     "code": "parameter_out_of_range",
-                    "parameter": "weight", "min": 0.0, "max": null, "got": bad,
-                    "index": 1, "id": "B",
+                    "parameter": "weight", "min": null, "max": null, "exclusive_min": 0.0,
+                    "got": bad, "index": 1, "id": "B",
                 })
             );
         }
     }
 
+    /// The model's own check reports a task weight the same way: `> 0` is an
+    /// open bound.
+    #[test]
+    fn a_task_weight_finding_reports_its_bound_as_open() {
+        let fields = finding_fields(&ValidationErrorKind::WeightOutOfRange {
+            task: "T".to_string(),
+            weight: 0.0,
+        });
+        assert_eq!(
+            fields,
+            json!({
+                "parameter": "weight", "task": "T", "min": null, "max": null,
+                "exclusive_min": 0.0, "got": 0.0,
+            })
+        );
+    }
+
+    /// A processing time of 0 is accepted, so its bound is closed: `min: 0`
+    /// and no `exclusive_min`, unlike the weight beside it.
     #[test]
     fn a_negative_processing_time_is_refused() {
         let err = schedule_jobs(&ScheduleInput {
@@ -1402,8 +1510,14 @@ mod tests {
             config: ScheduleConfig::default_for("SPT"),
         })
         .expect_err("negative processing time");
-        assert_eq!(err.fields["parameter"], "processing_time");
-        assert_eq!(err.fields["index"], 0);
+        assert_eq!(
+            err.fields,
+            json!({
+                "code": "parameter_out_of_range",
+                "parameter": "processing_time", "min": 0.0, "max": null, "got": -1.0,
+                "index": 0, "id": "A",
+            })
+        );
     }
 
     /// `num_machines: 0` used to become 1 without a word.
@@ -1722,6 +1836,19 @@ mod tests {
             err.fields,
             json!({ "code": "parameter_out_of_range", "parameter": "ga_config.population_size",
                     "min": 2.0, "max": null, "got": 1.0 })
+        );
+
+        // An open end the runner reports stays open on the wire: (0, 1] is
+        // `exclusive_min` beside `max`, never `min: 0`.
+        let open = u_metaheur::alns::AlnsConfig::default()
+            .with_reaction_factor(0.0)
+            .validate()
+            .expect_err("a reaction factor of zero");
+        let err = ga_settings_refused(open);
+        assert_eq!(
+            err.fields,
+            json!({ "code": "parameter_out_of_range", "parameter": "ga_config.reaction_factor",
+                    "min": null, "max": 1.0, "exclusive_min": 0.0, "got": 0.0 })
         );
 
         let together = GaConfig::default()

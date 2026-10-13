@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Maintained from 0.2.3 onward; earlier entries list release dates only (see git history).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** WebAssembly: a `parameter_out_of_range` refusal carries an open
+  (excluded) bound as `exclusive_min` / `exclusive_max` instead of `min` / `max`.
+  A job or task `weight` that is not above 0 is refused with
+  `{ min: null, max: null, exclusive_min: 0 }` — it used to say `min: 0`, as if
+  0 were accepted. `min` and `max` are still always present and now hold closed
+  bounds only; the `exclusive_*` fields appear only on an open end, so refusals
+  with closed bounds (`processing_time` below 0, `config.num_machines` below 1,
+  `ga_config.mutation_rate` outside [0, 1]) keep their shape.
+- A GA setting the runner refuses forwards the runner's `exclusive_min` /
+  `exclusive_max` beside `min` / `max`.
+
 ## [0.15.0] - 2026-10-07
 
 Depends on u-numflow 0.10 and u-metaheur 0.7.
