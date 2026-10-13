@@ -238,7 +238,7 @@ Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Inser
 | `max_generations` | >= 1 | 200 |
 | `mutation_rate` | 0.0 -- 1.0 | 0.1 |
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
-| `seed` | optional u64 | random |
+| `seed` | optional, a whole number from 0 to 2^64 − 1 | random |
 
 **Errors:** both functions are synchronous and throw an `Error` whose `message` is
 readable text and which carries a `code` naming the reason, next to the values
@@ -262,13 +262,13 @@ try {
 |---|---|---|
 | `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs) | Two jobs share an `id` (at positions `first` and `second`, from 0), or two tasks, activities or resources do |
 | `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
-| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, or a job's `processing_time` below 0 or `weight` not above 0. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
+| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, a job-shop `num_machines` below the number of machines the operations name, or a job's `processing_time` below 0 or `weight` not above 0. A count or seed is checked as the whole number it is, so a negative one is refused like a too-small one: `config.num_machines: -1` is `{ min: 1, max: null, got: -1 }`, as `0` is. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_task` | `task` | A job with no operations |
 | `invalid_option` | `parameter` | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population); a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
-| `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), or a JSON string |
+| `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), a count or seed that is not a whole number (`config.num_machines: 2.5` — `parameter` is the field), or a JSON string |
 
 When the problem check finds several things wrong (two jobs without operations, a
 duplicate id and a cycle, …), `code` and its fields are the first finding's, and

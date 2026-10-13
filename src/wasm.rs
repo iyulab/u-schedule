@@ -210,6 +210,95 @@ fn ga_settings_refused(e: ConfigError) -> WireError {
     }
 }
 
+// ── whole numbers ───────────────────────────────────────────────────────────
+
+/// A whole number exactly as the caller wrote it: any integer, or a number
+/// with no fractional part.
+///
+/// Counts and seeds are read through this rather than straight into an
+/// unsigned type. As a `usize`, `num_machines: -1` failed as a type mismatch
+/// ("invalid value: integer `-1`, expected usize", `malformed_input`) while
+/// `0` was refused by the range check -- two answers to one mistake. Read
+/// signed and wide, every whole number reaches the range check, which names
+/// the accepted range ([`whole_in`]). A fractional part is refused here:
+/// whether a count is whole is a matter of its type, so `2.5` is
+/// `malformed_input`.
+struct Whole(i128);
+
+impl<'de> Deserialize<'de> for Whole {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct WholeVisitor;
+
+        impl serde::de::Visitor<'_> for WholeVisitor {
+            type Value = Whole;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a whole number")
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Whole, E> {
+                Ok(Whole(v.into()))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Whole, E> {
+                Ok(Whole(v.into()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Whole, E> {
+                if v.fract() == 0.0 {
+                    // `as` saturates only past ±1.7e38, far outside every
+                    // range a setting accepts.
+                    Ok(Whole(v as i128))
+                } else {
+                    Err(E::custom(format_args!("must be a whole number, got {v}")))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(WholeVisitor)
+    }
+}
+
+/// Reads a whole-number field (`#[serde(deserialize_with = "whole")]`); see
+/// [`Whole`].
+fn whole<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i128, D::Error> {
+    Whole::deserialize(deserializer).map(|w| w.0)
+}
+
+/// Reads an optional whole-number field: `null` is no value.
+fn optional_whole<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i128>, D::Error> {
+    Option::<Whole>::deserialize(deserializer).map(|w| w.map(|w| w.0))
+}
+
+/// A whole number from the request as the `T` the engine takes.
+///
+/// Below `min` -- a negative count as much as a too-small one -- it is
+/// refused as `parameter_out_of_range` with `min` and no upper bound; above
+/// the largest `T` (`max`, the type's own limit) with both bounds.
+fn whole_in<T: TryFrom<i128>>(
+    parameter: &str,
+    value: i128,
+    min: i128,
+    max: i128,
+) -> Result<T, WireError> {
+    if value < min {
+        return Err(WireError::out_of_range(
+            parameter,
+            min as f64..,
+            value as f64,
+        ));
+    }
+    T::try_from(value)
+        .map_err(|_| WireError::out_of_range(parameter, min as f64..=max as f64, value as f64))
+}
+
+/// A count of at least `min`, as a `usize`; see [`whole_in`].
+fn count(parameter: &str, value: i128, min: i128) -> Result<usize, WireError> {
+    whole_in(parameter, value, min, usize::MAX as i128)
+}
+
 impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
@@ -534,7 +623,7 @@ fn default_rule() -> String {
     "SPT".to_string()
 }
 
-fn default_num_machines() -> usize {
+fn default_num_machines() -> i128 {
     1
 }
 
@@ -574,10 +663,11 @@ struct ScheduleConfig {
         type = "\"SPT\" | \"LPT\" | \"EDD\" | \"FCFS\" | \"CR\" | \"WSPT\" | \"MST\" | \"S/RO\" | \"SRO\" | \"ATC\" | \"LWKR\" | \"MWKR\" | \"PRIORITY\""
     )]
     rule: String,
-    /// Number of identical parallel machines (default: 1 = single machine).
-    #[serde(default = "default_num_machines")]
-    #[tsify(optional)]
-    num_machines: usize,
+    /// Number of identical parallel machines, at least 1 (default: 1 = single
+    /// machine). Read signed so a negative count is a range refusal: [`Whole`].
+    #[serde(default = "default_num_machines", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    num_machines: i128,
     /// Lookahead parameter for ATC rule (default: 2.0).
     #[serde(default = "default_atc_k")]
     #[tsify(optional)]
@@ -895,10 +985,7 @@ pub fn run_schedule(
 /// The whole of `run_schedule` past the JS boundary: validate, then dispatch.
 /// Tests call this, so they walk the path a JS caller does.
 fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
-    let num_machines = input.config.num_machines;
-    if num_machines == 0 {
-        return Err(WireError::out_of_range("config.num_machines", 1.0.., 0.0));
-    }
+    let num_machines = count("config.num_machines", input.config.num_machines, 1)?;
     let engine = build_engine(&input.config.rule, &input.config)?;
     if input.jobs.is_empty() {
         return Ok(ScheduleOutput {
@@ -986,11 +1073,11 @@ struct JobShopJob {
     release_time: Option<f64>,
 }
 
-fn default_population_size() -> usize {
+fn default_population_size() -> i128 {
     100
 }
 
-fn default_max_generations() -> usize {
+fn default_max_generations() -> i128 {
     200
 }
 
@@ -1013,19 +1100,23 @@ fn default_mutation_type() -> String {
 #[derive(Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct JobShopGaConfig {
-    #[serde(default = "default_population_size")]
-    #[tsify(optional)]
-    population_size: usize,
-    #[serde(default = "default_max_generations")]
-    #[tsify(optional)]
-    max_generations: usize,
+    /// At least 2. Counts and the seed are read signed so a negative one is a
+    /// range refusal: [`Whole`].
+    #[serde(default = "default_population_size", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    population_size: i128,
+    /// At least 1.
+    #[serde(default = "default_max_generations", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    max_generations: i128,
     #[serde(default = "default_mutation_rate")]
     #[tsify(optional)]
     mutation_rate: f64,
-    #[serde(default)]
+    /// From 0 to 2^64 - 1.
+    #[serde(default, deserialize_with = "optional_whole")]
     #[tsify(optional)]
     #[tsify(type = "number | null")]
-    seed: Option<u64>,
+    seed: Option<i128>,
     #[serde(default = "default_tardiness_weight")]
     #[tsify(optional)]
     tardiness_weight: f64,
@@ -1058,10 +1149,10 @@ impl Default for JobShopGaConfig {
 struct JobShopInput {
     jobs: Vec<JobShopJob>,
     /// Number of machines. If omitted, inferred from operation machine IDs.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_whole")]
     #[tsify(optional)]
     #[tsify(type = "number | null")]
-    num_machines: Option<usize>,
+    num_machines: Option<i128>,
     #[serde(default)]
     #[tsify(optional)]
     ga_config: JobShopGaConfig,
@@ -1119,25 +1210,28 @@ fn parse_mutation(s: &str) -> Result<MutationType, WireError> {
 
 // ── GA config validation ────────────────────────────────────────────────────
 
+/// The whole-number GA settings, once [`validate_ga_config`] has accepted
+/// them, as the types `GaConfig` takes.
+#[derive(Debug, PartialEq)]
+struct GaCounts {
+    population_size: usize,
+    max_generations: usize,
+    seed: Option<u64>,
+}
+
 /// Validates `JobShopGaConfig` fields before they are passed to `GaConfig`.
 ///
 /// This catches invalid values at the WASM boundary with clear error messages,
 /// preventing panics deeper in the GA runner.
-fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), WireError> {
-    if cfg.population_size < 2 {
-        return Err(WireError::out_of_range(
-            "ga_config.population_size",
-            2.0..,
-            cfg.population_size as f64,
-        ));
-    }
-    if cfg.max_generations < 1 {
-        return Err(WireError::out_of_range(
-            "ga_config.max_generations",
-            1.0..,
-            cfg.max_generations as f64,
-        ));
-    }
+fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<GaCounts, WireError> {
+    let counts = GaCounts {
+        population_size: count("ga_config.population_size", cfg.population_size, 2)?,
+        max_generations: count("ga_config.max_generations", cfg.max_generations, 1)?,
+        seed: cfg
+            .seed
+            .map(|seed| whole_in("ga_config.seed", seed, 0, u64::MAX.into()))
+            .transpose()?,
+    };
     if !(0.0..=1.0).contains(&cfg.mutation_rate) {
         return Err(WireError::out_of_range(
             "ga_config.mutation_rate",
@@ -1152,7 +1246,7 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<(), WireError> {
             cfg.tardiness_weight,
         ));
     }
-    Ok(())
+    Ok(counts)
 }
 
 /// The checked scheduling problem a job-shop request describes: one task per
@@ -1177,16 +1271,18 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
     // `num_machines` adds idle machines beyond the ones the operations name;
     // it cannot remove any of those.
     if let Some(n) = input.num_machines {
-        let named = machine_ids.len();
-        if n < named.max(1) {
+        let named = machine_ids.len().max(1);
+        // A negative count is below the minimum like any other: one check.
+        if n < named as i128 {
             return Err(WireError::new(
                 "parameter_out_of_range",
                 format!(
                     "num_machines must be at least the {named} machine(s) the operations name, got {n}"
                 ),
-                json!({ "parameter": "num_machines", "min": named.max(1), "max": null, "got": n }),
+                json!({ "parameter": "num_machines", "min": named as f64, "max": null, "got": n as f64 }),
             ));
         }
+        let n = count("num_machines", n, named as i128)?;
         let mut next = 1;
         while machine_ids.len() < n {
             let id = format!("M{next}");
@@ -1295,7 +1391,7 @@ pub fn solve_jobshop(
 /// they walk the path a JS caller does.
 fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     // The settings are refused or accepted whether or not there are jobs.
-    validate_ga_config(&input.ga_config)?;
+    let counts = validate_ga_config(&input.ga_config)?;
     let crossover_type = parse_crossover(&input.ga_config.crossover)?;
     let mutation_type = parse_mutation(&input.ga_config.mutation)?;
 
@@ -1325,20 +1421,20 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     // Compute a safe elite_ratio: ensure at least 1 elite for any population_size.
     // Default 0.1 gives elite_count=0 when population_size < 10.
     let elite_ratio = {
-        let pop = input.ga_config.population_size;
+        let pop = counts.population_size;
         let default_ratio = 0.1_f64;
         let min_ratio = 1.0 / pop as f64; // guarantees at least 1 elite
         default_ratio.max(min_ratio)
     };
 
     let mut config = GaConfig::default()
-        .with_population_size(input.ga_config.population_size)
-        .with_max_generations(input.ga_config.max_generations)
+        .with_population_size(counts.population_size)
+        .with_max_generations(counts.max_generations)
         .with_mutation_rate(input.ga_config.mutation_rate)
         .with_elite_ratio(elite_ratio)
         .with_parallel(false); // WASM is single-threaded
 
-    if let Some(seed) = input.ga_config.seed {
+    if let Some(seed) = counts.seed {
         config = config.with_seed(seed);
     }
 
@@ -1935,7 +2031,7 @@ mod tests {
         assert_eq!(
             few.fields,
             json!({ "code": "parameter_out_of_range", "parameter": "num_machines",
-                    "min": 2, "max": null, "got": 1 })
+                    "min": 2.0, "max": null, "got": 1.0 })
         );
         // Padding never repeats a name the operations already use.
         let mut padded = input(vec![job("J1", vec![op(Some("M2"))])]);
@@ -2441,5 +2537,176 @@ mod path_tests {
         assert_eq!(err.fields["code"], "malformed_input");
         assert_eq!(err.fields["parameter"], "jobs[1].processing_time");
         assert_eq!(err.fields["index"], 1);
+    }
+}
+
+#[cfg(test)]
+mod whole_number_tests {
+    //! Counts and the seed are whole numbers read signed: a negative one is
+    //! refused by the same range check as a too-small one, a fractional one
+    //! as malformed.
+    //!
+    //! `from_json` is the half of `from_js` after serde-wasm-bindgen has read
+    //! the JS value into JSON. That reader turns a JS number that is a safe
+    //! integer (`3`, `-1`, `3.0` -- the same number in JS) into a JSON integer
+    //! and any other number (`2.5`) into a JSON float, so these JSON values are
+    //! what a JS caller's arguments arrive as.
+
+    use super::*;
+
+    fn schedule(config: serde_json::Value) -> Result<ScheduleOutput, WireError> {
+        let input = json!({
+            "jobs": [{ "id": "a", "processing_time": 1.0 }, { "id": "b", "processing_time": 2.0 }],
+            "config": config,
+        });
+        schedule_jobs(&from_json::<ScheduleInput>(input, "jobs")?)
+    }
+
+    fn jobshop_with(extra: serde_json::Value) -> Result<JobShopOutput, WireError> {
+        let mut input = json!({
+            "jobs": [{ "id": "J1", "operations": [{ "machine": "M1", "processing_time": 1.0 }] }],
+            "ga_config": { "population_size": 4, "max_generations": 2, "seed": 1 },
+        });
+        for (key, value) in extra.as_object().expect("an object") {
+            match (key.as_str(), value) {
+                ("ga_config", serde_json::Value::Object(settings)) => input["ga_config"]
+                    .as_object_mut()
+                    .expect("an object")
+                    .extend(settings.clone()),
+                _ => input[key] = value.clone(),
+            }
+        }
+        jobshop(&from_json::<JobShopInput>(input, "problem")?)
+    }
+
+    fn out_of_range(parameter: &str, min: f64, got: f64) -> serde_json::Value {
+        json!({ "code": "parameter_out_of_range", "parameter": parameter,
+                "min": min, "max": null, "got": got })
+    }
+
+    #[test]
+    fn a_negative_count_is_refused_like_a_too_small_one() {
+        for got in [-1, 0] {
+            let err = schedule(json!({ "num_machines": got })).expect_err("below 1");
+            assert_eq!(
+                err.fields,
+                out_of_range("config.num_machines", 1.0, got as f64)
+            );
+        }
+        let err = schedule(json!({ "num_machines": -1 })).expect_err("negative");
+        assert_eq!(err.message, "config.num_machines must be >= 1, got -1");
+
+        for got in [-1, 1] {
+            let err = jobshop_with(json!({ "ga_config": { "population_size": got } }))
+                .expect_err("below 2");
+            assert_eq!(
+                err.fields,
+                out_of_range("ga_config.population_size", 2.0, got as f64)
+            );
+        }
+        for got in [-1, 0] {
+            let err = jobshop_with(json!({ "ga_config": { "max_generations": got } }))
+                .expect_err("below 1");
+            assert_eq!(
+                err.fields,
+                out_of_range("ga_config.max_generations", 1.0, got as f64)
+            );
+        }
+        // The operations name one machine, so at least 1: -1 and 0 alike.
+        for got in [-1, 0] {
+            let err = jobshop_with(json!({ "num_machines": got })).expect_err("below 1");
+            assert_eq!(err.fields, out_of_range("num_machines", 1.0, got as f64));
+        }
+    }
+
+    #[test]
+    fn a_negative_seed_is_out_of_range() {
+        let err = jobshop_with(json!({ "ga_config": { "seed": -1 } })).expect_err("negative");
+        assert_eq!(err.fields, out_of_range("ga_config.seed", 0.0, -1.0));
+        // The whole 64-bit range is a seed; past it is refused with its top.
+        assert!(jobshop_with(json!({ "ga_config": { "seed": u64::MAX } })).is_ok());
+        let err = whole_in::<u64>(
+            "ga_config.seed",
+            i128::from(u64::MAX) + 1,
+            0,
+            u64::MAX.into(),
+        )
+        .expect_err("past u64");
+        assert_eq!(err.fields["max"], json!(u64::MAX as f64));
+        assert_eq!(err.fields["min"], json!(0.0));
+    }
+
+    #[test]
+    fn a_fractional_count_is_malformed_at_its_field() {
+        let err = schedule(json!({ "num_machines": 2.5 })).expect_err("not whole");
+        assert_eq!(
+            err.fields,
+            json!({ "code": "malformed_input", "parameter": "config.num_machines" })
+        );
+        assert!(
+            err.message.contains("must be a whole number, got 2.5"),
+            "{}",
+            err.message
+        );
+        for (extra, parameter) in [
+            (
+                json!({ "ga_config": { "population_size": 2.5 } }),
+                "ga_config.population_size",
+            ),
+            (
+                json!({ "ga_config": { "max_generations": 0.5 } }),
+                "ga_config.max_generations",
+            ),
+            (json!({ "ga_config": { "seed": 1.5 } }), "ga_config.seed"),
+            (json!({ "num_machines": 1.5 }), "num_machines"),
+        ] {
+            let err = jobshop_with(extra).expect_err("not whole");
+            assert_eq!(err.fields["code"], "malformed_input", "{parameter}");
+            assert_eq!(err.fields["parameter"], parameter);
+        }
+    }
+
+    #[test]
+    fn a_whole_count_reads_as_itself() {
+        let out = schedule(json!({ "num_machines": 2 })).expect("two machines");
+        assert_eq!(out.machine_utilization.len(), 2);
+        // `2.0` is the number 2 in JS.
+        let out = schedule(json!({ "num_machines": 2.0 })).expect("two machines");
+        assert_eq!(out.machine_utilization.len(), 2);
+        // Omitted: one machine.
+        let out = schedule(json!({})).expect("default");
+        assert!(out.machine_utilization.is_empty());
+
+        let config: JobShopGaConfig = from_json(
+            json!({ "population_size": 3, "max_generations": 1, "seed": 42 }),
+            "ga_config",
+        )
+        .expect("whole numbers");
+        assert_eq!(
+            validate_ga_config(&config).expect("accepted"),
+            GaCounts {
+                population_size: 3,
+                max_generations: 1,
+                seed: Some(42),
+            }
+        );
+        assert_eq!(
+            validate_ga_config(&JobShopGaConfig::default()).expect("defaults"),
+            GaCounts {
+                population_size: 100,
+                max_generations: 200,
+                seed: None,
+            }
+        );
+        assert!(jobshop_with(json!({ "num_machines": 3, "ga_config": { "seed": null } })).is_ok());
+    }
+
+    #[test]
+    fn a_count_that_is_not_a_number_stays_malformed() {
+        for bad in [json!(null), json!("2"), json!(true)] {
+            let err = schedule(json!({ "num_machines": bad })).expect_err("not a number");
+            assert_eq!(err.fields["code"], "malformed_input", "{bad}");
+            assert_eq!(err.fields["parameter"], "config.num_machines", "{bad}");
+        }
     }
 }

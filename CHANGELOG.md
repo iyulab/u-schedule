@@ -20,6 +20,15 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `ga_config.mutation_rate` outside [0, 1]) keep their shape.
 - A GA setting the runner refuses forwards the runner's `exclusive_min` /
   `exclusive_max` beside `min` / `max`.
+- **Breaking:** WebAssembly: `config.num_machines`, the job-shop `num_machines`,
+  `ga_config.population_size`, `ga_config.max_generations` and `ga_config.seed`
+  are read as whole numbers rather than unsigned integers, so a negative value is
+  refused by the range check like a too-small one — `config.num_machines: -1` is
+  `parameter_out_of_range` `{ parameter: "config.num_machines", min: 1, max: null,
+  got: -1 }`, as `0` is, and a negative seed `{ min: 0 }` — instead of
+  `malformed_input` ("invalid value: integer `-1`, expected usize"). A value with
+  a fractional part (`2.5`) stays `malformed_input`, naming the field and saying
+  it must be a whole number.
 
 ## [0.15.0] - 2026-10-07
 
