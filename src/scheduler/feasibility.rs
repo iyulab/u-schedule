@@ -8,18 +8,22 @@
 //! Requirement attribution is greedy (requirements claim unclaimed
 //! assigned resources in declaration order) — an approximation that is
 //! exact when requirement candidate sets are disjoint, the common case.
+//! A requirement claims only resources in its pool
+//! ([`ResourceRequirement::is_candidate`](crate::models::ResourceRequirement::is_candidate): listed in `candidates`, or of its
+//! `resource_type` when none are listed), so a resource of another type
+//! leaves the requirement unfilled. A claimed resource that lacks a required
+//! skill is reported as a skill mismatch -- together the two checks apply
+//! [`ResourceRequirement::accepts`](crate::models::ResourceRequirement::accepts), the rule the schedulers place by.
 //!
-//! Not checked (documented gaps): `Constraint::TransitionCost` (needs
-//! sequence semantics), `Resource::efficiency`, activity splitting.
+//! Not checked (documented gap): `Constraint::TransitionCost` (needs
+//! sequence semantics).
 //!
 //! # Reference
 //! Brucker (2007), "Scheduling Algorithms", Ch. 2 — constraint taxonomy.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{
-    Activity, Constraint, Resource, ResourceRequirement, Schedule, Task, Violation,
-};
+use crate::models::{Activity, Constraint, Resource, Schedule, Task, Violation};
 
 /// Model context a schedule is validated against.
 pub struct FeasibilityInput<'a> {
@@ -81,7 +85,12 @@ fn check_requirements(
             // greedy 귀속: 요구별로 미귀속 자원 claim
             let mut unclaimed: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
             for req in &activity.resource_requirements {
-                let candidates = candidate_id_set(req, input.resources);
+                let candidates: HashSet<&str> = input
+                    .resources
+                    .iter()
+                    .filter(|r| req.is_candidate(r))
+                    .map(|r| r.id.as_str())
+                    .collect();
                 let mut claimed = 0;
                 let mut i = 0;
                 while i < unclaimed.len() && claimed < req.quantity {
@@ -116,20 +125,6 @@ fn check_requirements(
                 }
             }
         }
-    }
-}
-
-/// Candidate resource IDs for a requirement: explicit candidates if any,
-/// otherwise every resource. Skill checking is reported separately so
-/// attribution and diagnosis stay distinct.
-fn candidate_id_set<'a>(
-    req: &'a ResourceRequirement,
-    resources: &'a [Resource],
-) -> HashSet<&'a str> {
-    if req.candidates.is_empty() {
-        resources.iter().map(|r| r.id.as_str()).collect()
-    } else {
-        req.candidates.iter().map(String::as_str).collect()
     }
 }
 
@@ -361,7 +356,7 @@ mod tests {
                 ResourceRequirement::new("Mold").with_candidates(vec!["T1".into()]),
             ),
         );
-        let resources = vec![Resource::primary("M1"), Resource::secondary("T1")];
+        let resources = vec![Resource::new("M1", "Machine"), Resource::new("T1", "Mold")];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         let v = check_schedule(
@@ -381,7 +376,7 @@ mod tests {
     fn test_detects_capacity_exceeded() {
         let t1 = Task::new("J1").with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
         let t2 = Task::new("J2").with_activity(machine_activity("O2", "J2", vec!["M1".into()]));
-        let resources = vec![Resource::primary("M1")]; // capacity 1
+        let resources = vec![Resource::new("M1", "Machine")]; // capacity 1
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         s.add_assignment(Assignment::new("O2", "J2", "M1", 500, 1500)); // 겹침
@@ -402,7 +397,7 @@ mod tests {
     fn test_capacity_two_allows_overlap() {
         let t1 = Task::new("J1").with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
         let t2 = Task::new("J2").with_activity(machine_activity("O2", "J2", vec!["M1".into()]));
-        let resources = vec![Resource::primary("M1").with_capacity(2)];
+        let resources = vec![Resource::new("M1", "Machine").with_capacity(2)];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         s.add_assignment(Assignment::new("O2", "J2", "M1", 500, 1500));
@@ -425,7 +420,7 @@ mod tests {
             .with_window(0, 5000)
             .with_window(10_000, 20_000);
         let task = Task::new("J1").with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
-        let resources = vec![Resource::primary("M1").with_calendar(cal)];
+        let resources = vec![Resource::new("M1", "Machine").with_calendar(cal)];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 3000, 6000)); // 창 침범
         let v = check_schedule(
@@ -442,6 +437,62 @@ mod tests {
     }
 
     #[test]
+    fn without_candidates_a_resource_of_another_type_does_not_fill_the_requirement() {
+        let task = Task::new("J1").with_activity(
+            Activity::new("O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(ResourceRequirement::new("Machine").with_skill("milling")),
+        );
+        let resources = vec![
+            Resource::new("W1", "Operator").with_skill("milling"),
+            Resource::new("M1", "Machine").with_skill("milling"),
+        ];
+        let input = FeasibilityInput {
+            tasks: std::slice::from_ref(&task),
+            resources: &resources,
+            constraints: &[],
+        };
+
+        // The operator has the skill but not the type.
+        let mut wrong = Schedule::new();
+        wrong.add_assignment(Assignment::new("O1", "J1", "W1", 0, 1000));
+        let v = check_schedule(&wrong, &input);
+        assert!(
+            v.iter()
+                .any(|x| x.violation_type == ViolationType::RequirementUnfilled),
+            "{v:?}"
+        );
+
+        // The machine is accepted.
+        let mut right = Schedule::new();
+        right.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
+        assert!(check_schedule(&right, &input).is_empty());
+    }
+
+    #[test]
+    fn without_candidates_a_resource_of_the_type_without_the_skill_is_a_skill_mismatch() {
+        let task = Task::new("J1").with_activity(
+            Activity::new("O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(ResourceRequirement::new("Machine").with_skill("milling")),
+        );
+        let resources = vec![Resource::new("M1", "Machine")];
+        let mut s = Schedule::new();
+        s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
+        let v = check_schedule(
+            &s,
+            &FeasibilityInput {
+                tasks: &[task],
+                resources: &resources,
+                constraints: &[],
+            },
+        );
+        assert!(v
+            .iter()
+            .any(|x| x.violation_type == ViolationType::SkillMismatch));
+    }
+
+    #[test]
     fn test_detects_skill_mismatch() {
         let task = Task::new("J1").with_activity(
             Activity::new("O1", "J1", 0)
@@ -452,7 +503,7 @@ mod tests {
                         .with_skill("welding"),
                 ),
         );
-        let resources = vec![Resource::primary("M1")]; // welding 없음
+        let resources = vec![Resource::new("M1", "Machine")]; // welding 없음
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         let v = check_schedule(
@@ -471,7 +522,7 @@ mod tests {
     #[test]
     fn test_clean_schedule_no_violations() {
         let task = Task::new("J1").with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
-        let resources = vec![Resource::primary("M1")];
+        let resources = vec![Resource::new("M1", "Machine")];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         let v = check_schedule(
@@ -494,7 +545,10 @@ mod tests {
                 a.sequence = 1;
                 a
             });
-        let resources = vec![Resource::primary("M1"), Resource::primary("M2")];
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 500, 1500));
         s.add_assignment(Assignment::new("O2", "J1", "M2", 0, 1000)); // 선행보다 먼저
@@ -516,7 +570,7 @@ mod tests {
         let task = Task::new("J1")
             .with_deadline(500)
             .with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
-        let resources = vec![Resource::primary("M1")];
+        let resources = vec![Resource::new("M1", "Machine")];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         let v = check_schedule(
@@ -536,7 +590,10 @@ mod tests {
     fn test_detects_time_window_and_synchronize() {
         let t1 = Task::new("J1").with_activity(machine_activity("O1", "J1", vec!["M1".into()]));
         let t2 = Task::new("J2").with_activity(machine_activity("O2", "J2", vec!["M2".into()]));
-        let resources = vec![Resource::primary("M1"), Resource::primary("M2")];
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
         let mut s = Schedule::new();
         s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
         s.add_assignment(Assignment::new("O2", "J2", "M2", 500, 1500));

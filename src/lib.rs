@@ -28,7 +28,8 @@
 //! | Feature | `SimpleScheduler` | GA decode | CP builder |
 //! |---|---|---|---|
 //! | Fixed-assignment seeding (pin) [^pin-setup] | ✅ | ❌ | ❌ |
-//! | Multi-requirement simultaneous hold | ✅ | ❌ (single resource per activity) | ❌ (first candidate) |
+//! | Resource eligibility (listed candidates, else requirement type; required skills) | ✅ | ✅ | ✅ |
+//! | Multi-requirement simultaneous hold | ✅ | ❌ (single resource per activity) | ❌ (first eligible resource) |
 //! | Resource calendar | ✅ | ❌ | ❌ |
 //! | Capacity > 1 | ✅ | ❌ | ❌ |
 //! | Setup/teardown duration components | ✅ | ❌ | ❌ |

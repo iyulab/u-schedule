@@ -1,14 +1,11 @@
-//! Time constraints and duration estimation for scheduling.
+//! Constraint violation records and duration estimation for scheduling.
 //!
-//! Provides constraint-oriented time boundaries (hard/soft deadlines,
-//! release times), violation tracking, PERT three-point estimation,
-//! and probabilistic duration distributions.
+//! Provides violation records, PERT three-point estimation, and
+//! probabilistic duration distributions.
 //!
 //! # Concepts
 //!
-//! - [`ActivityTimeConstraint`]: Scheduling-level time boundary (different
-//!   from calendar [`TimeWindow`](super::TimeWindow) which models availability)
-//! - [`TimeWindowViolation`]: Result of checking an activity against its constraint
+//! - [`ConstraintViolation`]: A violation record with severity and penalty
 //! - [`PertEstimate`]: PERT three-point duration estimation (O, M, P)
 //! - [`DurationDistribution`]: Probabilistic duration model
 //!
@@ -18,177 +15,6 @@
 //! - Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems"
 
 use serde::{Deserialize, Serialize};
-
-// ================================
-// Time Constraint (Hard/Soft)
-// ================================
-
-/// Time constraint type.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ConstraintType {
-    /// Must be satisfied (schedule invalid if violated).
-    Hard,
-    /// Should be satisfied (penalty if violated).
-    #[default]
-    Soft,
-}
-
-/// Time constraint for an activity.
-///
-/// Unlike calendar [`TimeWindow`](super::TimeWindow) (which models resource
-/// availability), this struct represents scheduling-level boundaries:
-/// earliest/latest start and end times, optionally with penalties.
-///
-/// # Examples
-///
-/// ```
-/// use u_schedule::models::time_constraints::{ActivityTimeConstraint, ConstraintType};
-///
-/// // Hard deadline: must finish by 5000 ms
-/// let c = ActivityTimeConstraint::deadline(5000);
-/// assert!(c.check_violation(0, 4000).is_none());
-/// assert!(c.check_violation(0, 6000).is_some());
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivityTimeConstraint {
-    /// Earliest allowed start time (ms).
-    pub earliest_start_ms: Option<i64>,
-    /// Latest allowed start time (ms).
-    pub latest_start_ms: Option<i64>,
-    /// Earliest allowed end time (ms).
-    pub earliest_end_ms: Option<i64>,
-    /// Latest allowed end time (ms) — due date.
-    pub latest_end_ms: Option<i64>,
-    /// Hard or soft constraint.
-    pub constraint_type: ConstraintType,
-    /// Penalty per millisecond of violation (for soft constraints).
-    pub penalty_per_ms: f64,
-}
-
-impl ActivityTimeConstraint {
-    /// Creates an empty (unconstrained) time constraint.
-    pub fn new() -> Self {
-        Self {
-            earliest_start_ms: None,
-            latest_start_ms: None,
-            earliest_end_ms: None,
-            latest_end_ms: None,
-            constraint_type: ConstraintType::Soft,
-            penalty_per_ms: 1.0,
-        }
-    }
-
-    /// Creates a constraint with start/end boundaries.
-    pub fn bounded(start_ms: i64, end_ms: i64) -> Self {
-        Self {
-            earliest_start_ms: Some(start_ms),
-            latest_end_ms: Some(end_ms),
-            ..Self::new()
-        }
-    }
-
-    /// Creates a hard deadline (must complete by).
-    pub fn deadline(deadline_ms: i64) -> Self {
-        Self {
-            latest_end_ms: Some(deadline_ms),
-            constraint_type: ConstraintType::Hard,
-            penalty_per_ms: 0.0,
-            ..Self::new()
-        }
-    }
-
-    /// Creates a release time (cannot start before).
-    pub fn release(release_ms: i64) -> Self {
-        Self {
-            earliest_start_ms: Some(release_ms),
-            constraint_type: ConstraintType::Hard,
-            penalty_per_ms: 0.0,
-            ..Self::new()
-        }
-    }
-
-    /// Sets as hard constraint.
-    pub fn hard(mut self) -> Self {
-        self.constraint_type = ConstraintType::Hard;
-        self.penalty_per_ms = 0.0;
-        self
-    }
-
-    /// Sets as soft constraint with penalty.
-    pub fn soft(mut self, penalty_per_ms: f64) -> Self {
-        self.constraint_type = ConstraintType::Soft;
-        self.penalty_per_ms = penalty_per_ms;
-        self
-    }
-
-    /// Sets earliest start.
-    pub fn with_earliest_start(mut self, ms: i64) -> Self {
-        self.earliest_start_ms = Some(ms);
-        self
-    }
-
-    /// Sets latest start.
-    pub fn with_latest_start(mut self, ms: i64) -> Self {
-        self.latest_start_ms = Some(ms);
-        self
-    }
-
-    /// Sets latest end (due date).
-    pub fn with_due_date(mut self, ms: i64) -> Self {
-        self.latest_end_ms = Some(ms);
-        self
-    }
-
-    /// Checks if a scheduled time violates the constraint.
-    ///
-    /// Returns `None` if no violation, or a [`TimeWindowViolation`] with details.
-    pub fn check_violation(&self, start_ms: i64, end_ms: i64) -> Option<TimeWindowViolation> {
-        let mut total_early_ms = 0i64;
-        let mut total_late_ms = 0i64;
-
-        if let Some(earliest) = self.earliest_start_ms {
-            if start_ms < earliest {
-                total_early_ms += earliest - start_ms;
-            }
-        }
-        if let Some(latest) = self.latest_start_ms {
-            if start_ms > latest {
-                total_late_ms += start_ms - latest;
-            }
-        }
-        if let Some(earliest) = self.earliest_end_ms {
-            if end_ms < earliest {
-                total_early_ms += earliest - end_ms;
-            }
-        }
-        if let Some(latest) = self.latest_end_ms {
-            if end_ms > latest {
-                total_late_ms += end_ms - latest;
-            }
-        }
-
-        if total_early_ms == 0 && total_late_ms == 0 {
-            return None;
-        }
-
-        Some(TimeWindowViolation {
-            early_ms: total_early_ms,
-            late_ms: total_late_ms,
-            severity: if self.constraint_type == ConstraintType::Hard {
-                ViolationSeverity::Critical
-            } else {
-                ViolationSeverity::Minor
-            },
-            penalty: (total_early_ms + total_late_ms) as f64 * self.penalty_per_ms,
-        })
-    }
-}
-
-impl Default for ActivityTimeConstraint {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ================================
 // Violation Model
@@ -205,36 +31,6 @@ pub enum ViolationSeverity {
     Major,
     /// Critical — schedule may be invalid.
     Critical,
-}
-
-/// Time constraint violation details.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimeWindowViolation {
-    /// Amount of time too early (ms).
-    pub early_ms: i64,
-    /// Amount of time too late (ms).
-    pub late_ms: i64,
-    /// Severity level.
-    pub severity: ViolationSeverity,
-    /// Calculated penalty value.
-    pub penalty: f64,
-}
-
-impl TimeWindowViolation {
-    /// Total violation time (absolute).
-    pub fn total_violation_ms(&self) -> i64 {
-        self.early_ms.abs() + self.late_ms.abs()
-    }
-
-    /// Whether this is a tardiness (late) violation.
-    pub fn is_tardy(&self) -> bool {
-        self.late_ms > 0
-    }
-
-    /// Whether this is an early start violation.
-    pub fn is_early(&self) -> bool {
-        self.early_ms > 0
-    }
 }
 
 /// General constraint violation.
@@ -560,37 +356,6 @@ impl Default for DurationDistribution {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_time_constraint_basic() {
-        let c = ActivityTimeConstraint::bounded(1000, 5000);
-
-        // Within bounds — no violation
-        assert!(c.check_violation(1000, 4000).is_none());
-
-        // Starts too early
-        let v = c.check_violation(500, 4000).unwrap();
-        assert_eq!(v.early_ms, 500);
-        assert!(v.is_early());
-
-        // Ends too late
-        let v = c.check_violation(2000, 6000).unwrap();
-        assert_eq!(v.late_ms, 1000);
-        assert!(v.is_tardy());
-    }
-
-    #[test]
-    fn test_time_constraint_hard_vs_soft() {
-        let hard = ActivityTimeConstraint::deadline(5000).hard();
-        let soft = ActivityTimeConstraint::deadline(5000).soft(2.0);
-
-        let vh = hard.check_violation(0, 6000).unwrap();
-        let vs = soft.check_violation(0, 6000).unwrap();
-
-        assert_eq!(vh.severity, ViolationSeverity::Critical);
-        assert_eq!(vs.severity, ViolationSeverity::Minor);
-        assert!((vs.penalty - 2000.0).abs() < 0.01); // 1000ms * 2.0
-    }
 
     #[test]
     fn test_pert_calculation() {

@@ -29,7 +29,7 @@ use crate::validation::{validate_input, ValidationError};
 ///     Task::new("J1").with_activity(Activity::new("O1", "J1", 0).with_process_time(100)),
 ///     Task::new("J1").with_activity(Activity::new("O2", "J1", 0).with_process_time(100)),
 /// ];
-/// let errors = Problem::new(tasks, vec![Resource::primary("M1")]).unwrap_err();
+/// let errors = Problem::new(tasks, vec![Resource::new("M1", "Machine")]).unwrap_err();
 /// assert_eq!(errors[0].kind.code(), "duplicate_id");
 /// ```
 #[derive(Debug, Clone)]

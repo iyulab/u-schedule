@@ -16,6 +16,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::Resource;
+
 /// An activity (operation) to be scheduled.
 ///
 /// Represents a single processing step that requires one or more resources
@@ -35,10 +37,6 @@ pub struct Activity {
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
     pub predecessors: Vec<String>,
-    /// Whether this activity can be preempted and resumed later.
-    pub splittable: bool,
-    /// Minimum duration (ms) of each split segment.
-    pub min_split_ms: i64,
     /// Domain-specific metadata.
     pub attributes: HashMap<String, String>,
 }
@@ -53,8 +51,6 @@ impl Activity {
             duration: ActivityDuration::default(),
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
-            splittable: false,
-            min_split_ms: 0,
             attributes: HashMap::new(),
         }
     }
@@ -83,18 +79,14 @@ impl Activity {
         self
     }
 
-    /// Enables preemption with a minimum split size.
-    pub fn with_splitting(mut self, min_split_ms: i64) -> Self {
-        self.splittable = true;
-        self.min_split_ms = min_split_ms;
-        self
-    }
-
-    /// Returns all candidate resource IDs across all requirements.
-    pub fn candidate_resources(&self) -> Vec<&str> {
-        self.resource_requirements
+    /// IDs of the resources in `resources` that some requirement of this
+    /// activity [accepts](ResourceRequirement::accepts), in `resources`
+    /// order, each once.
+    pub fn eligible_resources<'a>(&self, resources: &'a [Resource]) -> Vec<&'a str> {
+        resources
             .iter()
-            .flat_map(|r| r.candidates.iter().map(|s| s.as_str()))
+            .filter(|r| self.resource_requirements.iter().any(|req| req.accepts(r)))
+            .map(|r| r.id.as_str())
             .collect()
     }
 }
@@ -147,16 +139,24 @@ impl Default for ActivityDuration {
 ///
 /// Specifies what type and quantity of resources are needed,
 /// with optional candidate filtering and skill requirements.
+/// [`accepts`](Self::accepts) is the one rule every solver and the
+/// feasibility checker use to decide which resources may fill it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceRequirement {
-    /// Required resource type (e.g., "Machine", "Operator").
+    /// Required resource type (e.g., "Machine", "Operator"), compared exactly
+    /// with [`Resource::resource_type`] when `candidates` is empty.
     pub resource_type: String,
     /// Number of resource units needed simultaneously.
     pub quantity: i32,
     /// Specific resource IDs that can fulfill this requirement.
-    /// Empty = any resource of the correct type.
+    ///
+    /// Empty = any resource whose `resource_type` equals this requirement's.
+    /// Non-empty = exactly the listed resources: the explicit list wins, and
+    /// a listed resource is accepted whatever its type.
     pub candidates: Vec<String>,
-    /// Required skills (matched against `Resource.skills`).
+    /// Required skills: a resource fills the requirement only if
+    /// [`Resource::skills`] contains every one (exact name match), whether
+    /// it is listed in `candidates` or matched by type.
     pub required_skills: Vec<String>,
 }
 
@@ -188,6 +188,29 @@ impl ResourceRequirement {
         self.required_skills.push(skill.into());
         self
     }
+
+    /// Whether `resource` is in this requirement's pool, skills aside: listed
+    /// in `candidates`, or -- when `candidates` is empty -- of this
+    /// requirement's `resource_type`.
+    pub fn is_candidate(&self, resource: &Resource) -> bool {
+        if self.candidates.is_empty() {
+            resource.resource_type == self.resource_type
+        } else {
+            self.candidates.contains(&resource.id)
+        }
+    }
+
+    /// Whether `resource` may fill this requirement: it
+    /// [is a candidate](Self::is_candidate) and has every required skill.
+    pub fn accepts(&self, resource: &Resource) -> bool {
+        self.is_candidate(resource) && self.required_skills.iter().all(|s| resource.has_skill(s))
+    }
+
+    /// The resources in `resources` this requirement
+    /// [accepts](Self::accepts), in `resources` order.
+    pub fn eligible<'a>(&'a self, resources: &'a [Resource]) -> impl Iterator<Item = &'a Resource> {
+        resources.iter().filter(move |r| self.accepts(r))
+    }
 }
 
 #[cfg(test)]
@@ -199,8 +222,7 @@ mod tests {
         let act = Activity::new("O1", "J1", 0)
             .with_duration(ActivityDuration::new(100, 500, 50))
             .with_requirement(ResourceRequirement::new("Machine").with_quantity(1))
-            .with_predecessor("O0")
-            .with_splitting(200);
+            .with_predecessor("O0");
 
         assert_eq!(act.id, "O1");
         assert_eq!(act.task_id, "J1");
@@ -208,8 +230,6 @@ mod tests {
         assert_eq!(act.duration.total_ms(), 650);
         assert_eq!(act.resource_requirements.len(), 1);
         assert_eq!(act.predecessors, vec!["O0"]);
-        assert!(act.splittable);
-        assert_eq!(act.min_split_ms, 200);
     }
 
     #[test]
@@ -241,18 +261,61 @@ mod tests {
     }
 
     #[test]
-    fn test_candidate_resources() {
+    fn test_eligible_resources() {
+        let resources = [
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+            Resource::new("W1", "Operator"),
+            Resource::new("W2", "Operator"),
+        ];
         let act = Activity::new("O1", "J1", 0)
             .with_requirement(
-                ResourceRequirement::new("Machine").with_candidates(vec!["M1".into(), "M2".into()]),
+                ResourceRequirement::new("Machine").with_candidates(vec!["M2".into(), "M1".into()]),
             )
             .with_requirement(
                 ResourceRequirement::new("Operator").with_candidates(vec!["W1".into()]),
             );
 
-        let candidates = act.candidate_resources();
-        assert_eq!(candidates.len(), 3);
-        assert!(candidates.contains(&"M1"));
-        assert!(candidates.contains(&"W1"));
+        assert_eq!(act.eligible_resources(&resources), vec!["M1", "M2", "W1"]);
+    }
+
+    #[test]
+    fn without_candidates_only_resources_of_the_requirement_type_with_the_skills_qualify() {
+        let resources = [
+            Resource::new("M1", "Machine").with_skill("milling"),
+            Resource::new("M2", "Machine"),
+            // Right skill, wrong type.
+            Resource::new("W1", "Operator").with_skill("milling"),
+        ];
+        let req = ResourceRequirement::new("Machine").with_skill("milling");
+        let ids: Vec<&str> = req.eligible(&resources).map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["M1"]);
+
+        assert!(req.is_candidate(&resources[1]), "type matches");
+        assert!(!req.accepts(&resources[1]), "but the skill is missing");
+        assert!(!req.is_candidate(&resources[2]), "another type");
+
+        // Without a skill requirement every resource of the type qualifies.
+        let any_machine = ResourceRequirement::new("Machine");
+        let ids: Vec<&str> = any_machine
+            .eligible(&resources)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["M1", "M2"]);
+    }
+
+    #[test]
+    fn a_listed_candidate_is_accepted_whatever_its_type_if_it_has_the_skills() {
+        let resources = [
+            Resource::new("M1", "Machine"),
+            Resource::new("W1", "Operator").with_skill("milling"),
+            Resource::new("W2", "Operator"),
+        ];
+        let req = ResourceRequirement::new("Machine")
+            .with_candidates(vec!["W1".into(), "W2".into()])
+            .with_skill("milling");
+        let ids: Vec<&str> = req.eligible(&resources).map(|r| r.id.as_str()).collect();
+        // M1 has the type but is not listed; W2 is listed but lacks the skill.
+        assert_eq!(ids, vec!["W1"]);
     }
 }

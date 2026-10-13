@@ -65,7 +65,8 @@ impl<'a> ScheduleCpBuilder<'a> {
     ///
     /// Creates:
     /// - An `IntervalVar` per activity
-    /// - `NoOverlap` constraints per resource (from candidate assignments)
+    /// - `NoOverlap` constraints per resource (over the activities it is
+    ///   eligible for)
     /// - `Precedence` constraints for intra-task activity ordering
     /// - User-defined constraints
     /// - `MinimizeMaxEnd` objective (makespan minimization)
@@ -169,9 +170,9 @@ impl<'a> ScheduleCpBuilder<'a> {
             for (step, activity) in task.activities.iter().enumerate() {
                 if let Some(interval_sol) = solution.intervals.get(&activity.id) {
                     if interval_sol.is_present {
-                        // Determine resource (from candidates, pick first for now)
+                        // Determine resource (first eligible one for now)
                         let resource_id = activity
-                            .candidate_resources()
+                            .eligible_resources(self.problem.resources())
                             .first()
                             .map(|s| s.to_string())
                             .unwrap_or_default();
@@ -194,13 +195,14 @@ impl<'a> ScheduleCpBuilder<'a> {
         schedule
     }
 
-    /// Collects activity IDs per resource (from candidate lists).
+    /// Collects activity IDs per resource (from each activity's eligible
+    /// resources).
     fn collect_resource_activities(&self) -> HashMap<String, Vec<String>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
         for task in self.problem.tasks() {
             for activity in &task.activities {
-                for candidate in activity.candidate_resources() {
+                for candidate in activity.eligible_resources(self.problem.resources()) {
                     map.entry(candidate.to_string())
                         .or_default()
                         .push(activity.id.clone());
@@ -215,9 +217,7 @@ impl<'a> ScheduleCpBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
-        Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task,
-    };
+    use crate::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
     use u_metaheur::cp::SimpleCpSolver;
 
     fn make_test_data() -> Problem {
@@ -246,7 +246,7 @@ mod tests {
             ),
         ];
 
-        let resources = vec![Resource::new("M1", ResourceType::Primary)];
+        let resources = vec![Resource::new("M1", "Machine")];
         Problem::new(tasks, resources).expect("a valid problem")
     }
 

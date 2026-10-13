@@ -14,6 +14,38 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   shared reason for an input with nothing in it — with `parameter`
   `"operations"` beside the job's `task` id (was `empty_task`).
   `ValidationErrorKind::EmptyTask` is unchanged; its `code()` is `empty_input`.
+- **Breaking:** a requirement that lists no `candidates` is filled only by
+  resources whose `resource_type` equals its own (and that hold its
+  `required_skills`). It used to accept any resource with the skills, whatever
+  its type, although the field documentation promised "any resource of the
+  correct type". A requirement that lists candidates still takes exactly those,
+  whatever their type. `SimpleScheduler`, the GA, the CP builder and the
+  feasibility checker apply the same rule, `ResourceRequirement::accepts`; the
+  GA and the CP builder used to see no resource at all for a requirement
+  without candidates.
+- **Breaking:** `Resource::resource_type` is a `String` from the same vocabulary
+  as `ResourceRequirement::resource_type`; the `ResourceType` enum is removed,
+  and so are `Resource::primary`, `Resource::secondary` and `Resource::human`.
+  Migration: `Resource::primary("M1")` → `Resource::new("M1", "Machine")` — use
+  the type name your requirements ask for.
+- **Breaking:** skills are names. `Resource::skills` is a `Vec<String>`,
+  `Resource::with_skill(name)` takes no level, and the `Skill` type,
+  `Resource::skill_level` and the `SkillLevelOutOfRange` validation finding are
+  removed — no solver read the level. Migration: drop the level argument.
+- **Breaking:** removed fields no solver or check read: `Resource::efficiency`
+  (`with_efficiency`), `Resource::cost_per_hour` (`with_cost`),
+  `Activity::splittable` and `Activity::min_split_ms` (`with_splitting`).
+- **Breaking:** removed `ActivityTimeConstraint` with the `ConstraintType` and
+  `TimeWindowViolation` types only it produced. No scheduler or check read it;
+  use `Task::deadline` / `Task::release_time` or `Constraint::TimeWindow`.
+- **Breaking:** `Activity::candidate_resources()` is replaced by
+  `Activity::eligible_resources(&resources)`, which applies the rule above, and
+  `ga::ActivityInfo::from_tasks(&tasks)` by `ActivityInfo::from_problem(&problem)`.
+- **Breaking:** WebAssembly: `run_schedule` refuses `config.atc_k` given with a
+  rule other than `ATC` as `invalid_option` (`parameter: "config.atc_k"`,
+  `rule`); it used to be ignored. Under `ATC`, an `atc_k` that is not above 0 is
+  `parameter_out_of_range` (`exclusive_min: 0`). Leaving it out keeps the
+  default 2.
 
 ## [0.16.1] - 2026-10-13
 

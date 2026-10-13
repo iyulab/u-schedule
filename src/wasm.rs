@@ -38,9 +38,7 @@ use crate::dispatching::rules;
 use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::ga::operators::{CrossoverType, GeneticOperators, MutationType};
 use crate::ga::SchedulingGaProblem;
-use crate::models::{
-    Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, Task,
-};
+use crate::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
 use crate::validation::{ValidationError, ValidationErrorKind};
 use crate::Problem;
 use u_metaheur::ga::{GaConfig, GaRunner};
@@ -374,14 +372,6 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
             "got": capacity,
         }),
-        ValidationErrorKind::SkillLevelOutOfRange {
-            resource,
-            skill,
-            level,
-        } => json!({
-            "parameter": "skill_level", "resource": resource, "skill": skill,
-            "min": 0.0, "max": 1.0, "got": level,
-        }),
         ValidationErrorKind::TardinessWeightOutOfRange { weight } => json!({
             "parameter": "ga_config.tardiness_weight", "min": 0.0, "max": 1.0, "got": weight,
         }),
@@ -629,10 +619,6 @@ fn default_num_machines() -> i128 {
     1
 }
 
-fn default_atc_k() -> f64 {
-    2.0
-}
-
 /// What an omitted `config` means: the same values an empty `config: {}`
 /// gets field by field. A derived `Default` would ignore the serde defaults
 /// and give `rule: ""` and `num_machines: 0`.
@@ -641,7 +627,7 @@ impl Default for ScheduleConfig {
         Self {
             rule: default_rule(),
             num_machines: default_num_machines(),
-            atc_k: default_atc_k(),
+            atc_k: None,
         }
     }
 }
@@ -670,10 +656,13 @@ struct ScheduleConfig {
     #[serde(default = "default_num_machines", deserialize_with = "whole")]
     #[tsify(optional, type = "number")]
     num_machines: i128,
-    /// Lookahead parameter for ATC rule (default: 2.0).
-    #[serde(default = "default_atc_k")]
+    /// Lookahead parameter `k` of the ATC rule (> 0; default 2). Read by
+    /// `ATC` only: given with any other rule it is refused (`invalid_option`)
+    /// rather than ignored.
+    #[serde(default)]
     #[tsify(optional)]
-    atc_k: f64,
+    #[tsify(type = "number | null")]
+    atc_k: Option<f64>,
 }
 
 #[derive(Deserialize, tsify::Tsify)]
@@ -828,22 +817,50 @@ const RULES: [&str; 13] = [
     "PRIORITY",
 ];
 
+/// Builds the rule engine `rule` names. A setting only some rules read
+/// (`atc_k`) is refused when the chosen rule does not read it -- it used to
+/// be ignored, so a caller tuning `k` under another rule saw no effect and
+/// no error.
 fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, WireError> {
-    match rule {
-        "SPT" => Ok(RuleEngine::new().with_rule(rules::Spt)),
-        "LPT" => Ok(RuleEngine::new().with_rule(rules::Lpt)),
-        "EDD" => Ok(RuleEngine::new().with_rule(rules::Edd)),
-        "FCFS" => Ok(RuleEngine::new().with_rule(rules::Fifo)),
-        "CR" => Ok(RuleEngine::new().with_rule(rules::Cr)),
-        "WSPT" => Ok(RuleEngine::new().with_rule(rules::Wspt)),
-        // ── newly exposed rules ──
-        "MST" => Ok(RuleEngine::new().with_rule(rules::Mst)),
-        "S/RO" | "SRO" => Ok(RuleEngine::new().with_rule(rules::Sro)),
-        "ATC" => Ok(RuleEngine::new().with_rule(rules::Atc::with_k(config.atc_k))),
-        "LWKR" => Ok(RuleEngine::new().with_rule(rules::Lwkr)),
-        "MWKR" => Ok(RuleEngine::new().with_rule(rules::Mwkr)),
-        "PRIORITY" => Ok(RuleEngine::new().with_rule(rules::Priority)),
-        other => Err(WireError::unknown_option("rule", other, &RULES)),
+    let engine = RuleEngine::new();
+    let engine = match rule {
+        "SPT" => engine.with_rule(rules::Spt),
+        "LPT" => engine.with_rule(rules::Lpt),
+        "EDD" => engine.with_rule(rules::Edd),
+        "FCFS" => engine.with_rule(rules::Fifo),
+        "CR" => engine.with_rule(rules::Cr),
+        "WSPT" => engine.with_rule(rules::Wspt),
+        "MST" => engine.with_rule(rules::Mst),
+        "S/RO" | "SRO" => engine.with_rule(rules::Sro),
+        "ATC" => engine.with_rule(atc_rule(config.atc_k)?),
+        "LWKR" => engine.with_rule(rules::Lwkr),
+        "MWKR" => engine.with_rule(rules::Mwkr),
+        "PRIORITY" => engine.with_rule(rules::Priority),
+        other => return Err(WireError::unknown_option("rule", other, &RULES)),
+    };
+    if config.atc_k.is_some() && rule != "ATC" {
+        return Err(WireError::new(
+            "invalid_option",
+            format!(
+                "config.atc_k is read by ATC -- rule \"{rule}\" does not read it; leave it out"
+            ),
+            json!({ "parameter": "config.atc_k", "rule": rule }),
+        ));
+    }
+    Ok(engine)
+}
+
+/// The ATC rule with the given lookahead `k`, or the rule's default when it
+/// is left out. `k` divides the slack, so it must be finite and `> 0`.
+fn atc_rule(atc_k: Option<f64>) -> Result<rules::Atc, WireError> {
+    match atc_k {
+        None => Ok(rules::Atc::default()),
+        Some(k) if k.is_finite() && k > 0.0 => Ok(rules::Atc::with_k(k)),
+        Some(k) => Err(WireError::out_of_range(
+            "config.atc_k",
+            (Bound::Excluded(0.0), Bound::Unbounded),
+            k,
+        )),
     }
 }
 
@@ -1338,7 +1355,7 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
     // ── Build Resources ──
     let resources: Vec<Resource> = machine_ids
         .iter()
-        .map(|id| Resource::new(id, ResourceType::Primary))
+        .map(|id| Resource::new(id, "Machine"))
         .collect();
 
     Ok(Problem::new(tasks, resources)?)
@@ -1635,6 +1652,84 @@ mod tests {
         }
     }
 
+    /// `atc_k` is read by ATC only. Under any other rule it used to be
+    /// ignored without a word; now it is refused, naming the rule.
+    #[test]
+    fn atc_k_is_refused_by_a_rule_that_does_not_read_it() {
+        let jobs = || vec![make_input_job("A", 2.0, Some(10.0), None, 1.0)];
+        for rule in ["SPT", "EDD", "WSPT", "PRIORITY"] {
+            let mut config = ScheduleConfig::default_for(rule);
+            config.atc_k = Some(3.0);
+            let err = schedule_jobs(&ScheduleInput {
+                jobs: jobs(),
+                config,
+            })
+            .expect_err("atc_k under a rule that does not read it");
+            assert_eq!(
+                err.fields,
+                json!({ "code": "invalid_option", "parameter": "config.atc_k", "rule": rule }),
+                "{rule}"
+            );
+            assert_eq!(
+                err.message,
+                format!(
+                    "config.atc_k is read by ATC -- rule \"{rule}\" does not read it; leave it out"
+                )
+            );
+        }
+        // Refused even with no jobs: the setting is wrong whatever the input.
+        let mut config = ScheduleConfig::default_for("SPT");
+        config.atc_k = Some(3.0);
+        let err = schedule_jobs(&ScheduleInput {
+            jobs: vec![],
+            config,
+        })
+        .expect_err("atc_k under SPT, no jobs");
+        assert_eq!(err.code(), "invalid_option");
+    }
+
+    /// Under ATC the given `k` is used; left out, the default applies; a
+    /// `k` that is not `> 0` is a range refusal with an open lower bound.
+    #[test]
+    fn atc_reads_atc_k_and_refuses_one_that_is_not_positive() {
+        for atc_k in [None, Some(0.5), Some(4.0)] {
+            let mut config = ScheduleConfig::default_for("ATC");
+            config.atc_k = atc_k;
+            let out = schedule_jobs(&ScheduleInput {
+                jobs: vec![
+                    make_input_job("A", 2.0, Some(10.0), None, 1.0),
+                    make_input_job("B", 1.0, Some(3.0), None, 1.0),
+                ],
+                config,
+            })
+            .expect("ATC reads atc_k");
+            assert_eq!(out.schedule.len(), 2, "{atc_k:?}");
+        }
+        let input: ScheduleInput = serde_json::from_value(json!({
+            "jobs": [{ "id": "A", "processing_time": 1.0 }],
+            "config": { "rule": "ATC", "atc_k": 1.5 },
+        }))
+        .expect("atc_k is an optional number");
+        assert_eq!(input.config.atc_k, Some(1.5));
+
+        for bad in [0.0, -1.0] {
+            let mut config = ScheduleConfig::default_for("ATC");
+            config.atc_k = Some(bad);
+            let err = schedule_jobs(&ScheduleInput {
+                jobs: vec![make_input_job("A", 1.0, None, None, 1.0)],
+                config,
+            })
+            .expect_err("k must be > 0");
+            assert_eq!(
+                err.fields,
+                json!({
+                    "code": "parameter_out_of_range", "parameter": "config.atc_k",
+                    "min": null, "max": null, "exclusive_min": 0.0, "got": bad,
+                })
+            );
+        }
+    }
+
     /// An omitted `config` and an empty one mean the same: SPT on one machine.
     #[test]
     fn an_omitted_config_is_the_documented_defaults() {
@@ -1742,7 +1837,7 @@ mod tests {
         let config = ScheduleConfig {
             rule: "UNKNOWN".to_string(),
             num_machines: 1,
-            atc_k: 2.0,
+            atc_k: None,
         };
         assert!(build_engine("UNKNOWN", &config).is_err());
     }
@@ -1823,7 +1918,7 @@ mod tests {
         let config = ScheduleConfig {
             rule: "SRO".to_string(),
             num_machines: 1,
-            atc_k: 2.0,
+            atc_k: None,
         };
         assert!(build_engine("SRO", &config).is_ok());
     }
@@ -1840,7 +1935,7 @@ mod tests {
         let config = ScheduleConfig {
             rule: "SPT".to_string(),
             num_machines: 2,
-            atc_k: 2.0,
+            atc_k: None,
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
@@ -1863,7 +1958,7 @@ mod tests {
         let config = ScheduleConfig {
             rule: "LPT".to_string(),
             num_machines: 2,
-            atc_k: 2.0,
+            atc_k: None,
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
@@ -1885,7 +1980,7 @@ mod tests {
         let config = ScheduleConfig {
             rule: "SPT".to_string(),
             num_machines: 1,
-            atc_k: 2.0,
+            atc_k: None,
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
@@ -2075,7 +2170,7 @@ mod tests {
             &ScheduleConfig {
                 rule: "FIFO".to_string(),
                 num_machines: 1,
-                atc_k: 2.0,
+                atc_k: None,
             },
         )
         .expect_err("FIFO is spelled FCFS here");
@@ -2195,7 +2290,7 @@ mod tests {
         let tasks = build_jobshop_tasks(&input).expect("valid input");
         assert_eq!(tasks[0].activities.len(), 1);
         // Activity should have 2 candidate machines
-        let candidates = tasks[0].activities[0].candidate_resources();
+        let candidates = &tasks[0].activities[0].resource_requirements[0].candidates;
         assert_eq!(candidates.len(), 2);
     }
 

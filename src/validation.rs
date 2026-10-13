@@ -88,17 +88,6 @@ pub enum ValidationErrorKind {
         /// The capacity it declares.
         capacity: i32,
     },
-    /// A skill's [`level`](crate::models::Skill::level) is not a finite number
-    /// in `[0, 1]`. It used to be clamped into range, so a level of 2 ran as 1
-    /// and a NaN reached the ranking as NaN.
-    SkillLevelOutOfRange {
-        /// The resource holding the skill.
-        resource: String,
-        /// The skill's name.
-        skill: String,
-        /// The level it declares.
-        level: f64,
-    },
     /// A resource calendar's availability window or blocked period starts
     /// after it ends. Such a period contains no instant, so it used to be
     /// skipped without a word: a reversed window made the resource silently
@@ -180,7 +169,6 @@ impl ValidationErrorKind {
             ValidationErrorKind::WeightOutOfRange { .. }
             | ValidationErrorKind::NegativeDuration { .. }
             | ValidationErrorKind::CapacityOutOfRange { .. }
-            | ValidationErrorKind::SkillLevelOutOfRange { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
@@ -215,13 +203,6 @@ impl ValidationError {
             ),
             ValidationErrorKind::CapacityOutOfRange { resource, capacity } => format!(
                 "Resource '{resource}' has capacity {capacity}; a capacity must be at least 1"
-            ),
-            ValidationErrorKind::SkillLevelOutOfRange {
-                resource,
-                skill,
-                level,
-            } => format!(
-                "Resource '{resource}' has skill '{skill}' at level {level}; a skill level must be a number in [0, 1]"
             ),
             ValidationErrorKind::ReversedCalendarPeriod {
                 resource,
@@ -262,8 +243,7 @@ impl std::error::Error for ValidationError {}
 /// 8. Every task's weight is finite and `> 0`
 /// 9. Every activity's setup, process and teardown times are `>= 0`
 /// 10. Every resource's capacity is at least 1
-/// 11. Every skill level is a finite number in `[0, 1]`
-/// 12. Every calendar window and blocked period has `start_ms <= end_ms`
+/// 11. Every calendar window and blocked period has `start_ms <= end_ms`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -280,17 +260,6 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                     capacity: r.capacity,
                 },
             ));
-        }
-        for skill in &r.skills {
-            if !(0.0..=1.0).contains(&skill.level) {
-                errors.push(ValidationError::new(
-                    ValidationErrorKind::SkillLevelOutOfRange {
-                        resource: r.id.clone(),
-                        skill: skill.name.clone(),
-                        level: skill.level,
-                    },
-                ));
-            }
         }
         if let Some(cal) = &r.calendar {
             for (period, list) in [
@@ -482,9 +451,9 @@ mod tests {
 
     fn sample_resources() -> Vec<Resource> {
         vec![
-            Resource::primary("M1").with_name("Machine 1"),
-            Resource::primary("M2").with_name("Machine 2"),
-            Resource::human("W1").with_name("Worker 1"),
+            Resource::new("M1", "Machine").with_name("Machine 1"),
+            Resource::new("M2", "Machine").with_name("Machine 2"),
+            Resource::new("W1", "Operator").with_name("Worker 1"),
         ]
     }
 
@@ -542,7 +511,10 @@ mod tests {
     #[test]
     fn test_duplicate_resource_id() {
         let tasks = sample_tasks();
-        let resources = vec![Resource::primary("M1"), Resource::primary("M1")];
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M1", "Machine"),
+        ];
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
         assert!(errors.iter().any(|e| e.kind

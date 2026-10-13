@@ -13,7 +13,7 @@ use u_metaheur::ga::GaProblem;
 
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
-use crate::models::{Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
+use crate::models::{Assignment, Resource, Schedule, TransitionMatrixCollection};
 use crate::Problem;
 
 /// Compact activity descriptor for GA encoding.
@@ -33,15 +33,19 @@ pub struct ActivityInfo {
     pub sequence: i32,
     /// Processing time (ms).
     pub process_ms: i64,
-    /// Candidate resource IDs.
+    /// IDs of the resources the activity may run on: those some requirement
+    /// [accepts](crate::models::ResourceRequirement::accepts) (listed
+    /// candidates, or resources of the requirement's type when none are
+    /// listed, holding the required skills), in resource order.
     pub candidates: Vec<String>,
 }
 
 impl ActivityInfo {
-    /// Extracts activity info from domain tasks.
-    pub fn from_tasks(tasks: &[Task]) -> Vec<Self> {
+    /// Extracts activity info from a checked problem, resolving each
+    /// activity's eligible resources against the problem's resources.
+    pub fn from_problem(problem: &Problem) -> Vec<Self> {
         let mut infos = Vec::new();
-        for task in tasks {
+        for task in problem.tasks() {
             for (i, activity) in task.activities.iter().enumerate() {
                 infos.push(ActivityInfo {
                     id: activity.id.clone(),
@@ -49,9 +53,9 @@ impl ActivityInfo {
                     sequence: (i + 1) as i32,
                     process_ms: activity.duration.process_ms,
                     candidates: activity
-                        .candidate_resources()
+                        .eligible_resources(problem.resources())
                         .into_iter()
-                        .map(|s| s.to_string())
+                        .map(str::to_string)
                         .collect(),
                 });
             }
@@ -67,7 +71,7 @@ impl ActivityInfo {
 /// # Example
 /// ```no_run
 /// use u_schedule::ga::{SchedulingGaProblem, ActivityInfo};
-/// use u_schedule::models::{Task, Resource, ResourceType};
+/// use u_schedule::models::{Task, Resource};
 /// use u_schedule::Problem;
 /// use u_metaheur::ga::{GaConfig, GaRunner};
 ///
@@ -112,7 +116,7 @@ impl SchedulingGaProblem {
     /// Creates a GA problem from a checked scheduling problem.
     pub fn new(problem: &Problem) -> Self {
         let (tasks, resources) = (problem.tasks(), problem.resources());
-        let activities = ActivityInfo::from_tasks(tasks);
+        let activities = ActivityInfo::from_problem(problem);
         let mut task_categories = HashMap::new();
         let mut deadlines = HashMap::new();
         let mut release_times = HashMap::new();
@@ -340,7 +344,7 @@ unsafe impl Sync for SchedulingGaProblem {}
 mod tests {
     use super::*;
     use crate::ga::operators::{CrossoverType, MutationType};
-    use crate::models::{Activity, ActivityDuration, ResourceRequirement, ResourceType};
+    use crate::models::{Activity, ActivityDuration, ResourceRequirement, Task};
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
     use u_metaheur::ga::{GaConfig, GaRunner};
@@ -385,18 +389,18 @@ mod tests {
         ];
 
         let resources = vec![
-            Resource::new("M1", ResourceType::Primary),
-            Resource::new("M2", ResourceType::Primary),
-            Resource::new("M3", ResourceType::Primary),
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+            Resource::new("M3", "Machine"),
         ];
 
         (tasks, resources)
     }
 
     #[test]
-    fn test_activity_info_from_tasks() {
-        let (tasks, _) = make_test_problem();
-        let infos = ActivityInfo::from_tasks(&tasks);
+    fn test_activity_info_from_problem() {
+        let (tasks, resources) = make_test_problem();
+        let infos = ActivityInfo::from_problem(&valid(&tasks, &resources));
         assert_eq!(infos.len(), 3);
         assert_eq!(infos[0].id, "T1_O1");
         assert_eq!(infos[0].task_id, "T1");
@@ -405,6 +409,24 @@ mod tests {
         assert_eq!(infos[1].id, "T1_O2");
         assert_eq!(infos[2].id, "T2_O1");
         assert_eq!(infos[2].task_id, "T2");
+        assert_eq!(infos[0].candidates, vec!["M1", "M2"]);
+        assert_eq!(infos[2].candidates, vec!["M1", "M3"]);
+    }
+
+    #[test]
+    fn without_candidates_the_ga_draws_only_resources_of_the_requirement_type() {
+        let tasks = vec![Task::new("T1").with_activity(
+            Activity::new("T1_O1", "T1", 0)
+                .with_duration(ActivityDuration::fixed(1000))
+                .with_requirement(ResourceRequirement::new("Machine").with_skill("milling")),
+        )];
+        let resources = vec![
+            Resource::new("W1", "Operator").with_skill("milling"),
+            Resource::new("M1", "Machine").with_skill("milling"),
+            Resource::new("M2", "Machine"),
+        ];
+        let infos = ActivityInfo::from_problem(&valid(&tasks, &resources));
+        assert_eq!(infos[0].candidates, vec!["M1"]);
     }
 
     /// An assignment names the activity it scheduled, and says which step of

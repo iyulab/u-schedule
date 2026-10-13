@@ -4,7 +4,9 @@
 //!
 //! 1. Sort tasks by dispatching rule (or priority if no rule engine).
 //! 2. For each task, process activities sequentially.
-//! 3. For each activity, select the earliest-available candidate resource.
+//! 3. For each activity, select the earliest-available eligible resource
+//!    ([`ResourceRequirement::accepts`](crate::models::ResourceRequirement::accepts):
+//!    a listed candidate, or one of the requirement's type, with the skills).
 //! 4. Apply sequence-dependent setup times from transition matrices.
 //!
 //! # Complexity
@@ -17,9 +19,7 @@ use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
 use crate::dispatching::{RuleEngine, SchedulingContext};
-use crate::models::{
-    Activity, Assignment, Resource, ResourceRequirement, Schedule, Task, TransitionMatrixCollection,
-};
+use crate::models::{Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
 use crate::Problem;
 
 /// Safety bound for the serial-SGS fixed-point search.
@@ -80,7 +80,7 @@ impl ScheduleRequest {
 ///
 /// ```
 /// use u_schedule::scheduler::{SimpleScheduler, ScheduleRequest};
-/// use u_schedule::models::{Task, Resource, ResourceType, Activity, ActivityDuration, ResourceRequirement};
+/// use u_schedule::models::{Task, Resource, Activity, ActivityDuration, ResourceRequirement};
 /// use u_schedule::Problem;
 ///
 /// let tasks = vec![
@@ -93,7 +93,7 @@ impl ScheduleRequest {
 ///             )
 ///     ),
 /// ];
-/// let resources = vec![Resource::new("M1", ResourceType::Primary)];
+/// let resources = vec![Resource::new("M1", "Machine")];
 /// let problem = Problem::new(tasks, resources).expect("valid input");
 /// let request = ScheduleRequest::new(problem);
 ///
@@ -198,8 +198,10 @@ impl SimpleScheduler {
     ///    resource's setup comes from its transition matrix if one is
     ///    defined, else from `ActivityDuration::setup_ms`.
     ///
-    /// Activities whose requirements cannot be met (unknown candidates,
-    /// calendar that can never contain the duration) are left unassigned;
+    /// Activities whose requirements cannot be met (too few eligible
+    /// resources -- listed, or of the requirement's type when none are
+    /// listed, and holding the required skills -- or a calendar that can
+    /// never contain the duration) are left unassigned;
     /// the self-annotating feasibility check reports them as
     /// `RequirementUnfilled` rather than silently shrinking the schedule.
     ///
@@ -326,8 +328,9 @@ impl SimpleScheduler {
             selections.clear();
             let mut t_next = t;
             for req in &activity.resource_requirements {
-                let mut fits: Vec<(i64, &str, i64)> = resolve_candidates(req, resources)
-                    .into_iter()
+                let mut fits: Vec<(i64, &str, i64)> = req
+                    .eligible(resources)
+                    .map(|r| r.id.as_str())
                     .filter_map(|rid| {
                         let setup = setup_for(rid);
                         timelines
@@ -422,31 +425,12 @@ struct Placement {
     selections: Vec<(String, i64)>, // (resource_id, setup_ms)
 }
 
-/// Candidate resources for a requirement: explicit candidates (skill-filtered)
-/// if any, otherwise every skill-satisfying resource.
-fn resolve_candidates<'a>(req: &'a ResourceRequirement, resources: &'a [Resource]) -> Vec<&'a str> {
-    let skill_ok = |r: &Resource| req.required_skills.iter().all(|s| r.has_skill(s));
-    if req.candidates.is_empty() {
-        resources
-            .iter()
-            .filter(|r| skill_ok(r))
-            .map(|r| r.id.as_str())
-            .collect()
-    } else {
-        req.candidates
-            .iter()
-            .filter(|id| resources.iter().any(|r| &r.id == *id && skill_ok(r)))
-            .map(String::as_str)
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dispatching::rules;
     use crate::models::{
-        Activity, ActivityDuration, Resource, ResourceRequirement, ResourceType, TransitionMatrix,
+        Activity, ActivityDuration, Resource, ResourceRequirement, TransitionMatrix,
     };
 
     /// A checked problem, for tests whose input is valid by construction.
@@ -455,7 +439,7 @@ mod tests {
     }
 
     fn make_resource(id: &str) -> Resource {
-        Resource::new(id, ResourceType::Primary)
+        Resource::new(id, "Machine")
     }
 
     fn make_task_with_resource(
@@ -498,9 +482,9 @@ mod tests {
         };
         let tasks = vec![mk("J1", "M1"), mk("J2", "M2")];
         let resources = vec![
-            Resource::new("M1", ResourceType::Primary),
-            Resource::new("M2", ResourceType::Primary),
-            Resource::new("TOOL1", ResourceType::Secondary),
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+            Resource::new("TOOL1", "Mold"),
         ];
         let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
 
@@ -531,7 +515,7 @@ mod tests {
             make_task_with_resource("J1", 3000, "M1", 10),
             make_task_with_resource("J2", 3000, "M1", 5),
         ];
-        let resources = vec![Resource::new("M1", ResourceType::Primary).with_calendar(cal)];
+        let resources = vec![Resource::new("M1", "Machine").with_calendar(cal)];
         let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         let j2 = s.assignment_for_activity("J2_O1").unwrap();
         assert_eq!(j2.start_ms, 10_000);
@@ -545,7 +529,7 @@ mod tests {
             make_task_with_resource("J1", 1000, "M1", 10),
             make_task_with_resource("J2", 1000, "M1", 5),
         ];
-        let resources = vec![Resource::new("M1", ResourceType::Primary).with_capacity(2)];
+        let resources = vec![Resource::new("M1", "Machine").with_capacity(2)];
         let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         assert_eq!(s.assignment_for_activity("J1_O1").unwrap().start_ms, 0);
         assert_eq!(s.assignment_for_activity("J2_O1").unwrap().start_ms, 0);
@@ -564,10 +548,8 @@ mod tests {
                         ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                     ),
             );
-        let s = SimpleScheduler::new().schedule(
-            &valid(&[task], &[Resource::new("M1", ResourceType::Primary)]),
-            0,
-        );
+        let s =
+            SimpleScheduler::new().schedule(&valid(&[task], &[Resource::new("M1", "Machine")]), 0);
         let a = s.assignment_for_activity("J1_O1").unwrap();
         assert_eq!(a.end_ms - a.start_ms, 1800);
         assert_eq!(a.setup_ms, 500);
@@ -767,6 +749,53 @@ mod tests {
         let schedule = scheduler.schedule(&valid(&[], &[]), 0);
         assert_eq!(schedule.assignment_count(), 0);
         assert_eq!(schedule.makespan_ms(), 0);
+    }
+
+    #[test]
+    fn without_candidates_only_a_resource_of_the_requirement_type_is_picked() {
+        // The operator is free at 0 and has the skill, but is not a machine;
+        // the machine is busy until 1000 with a pinned job.
+        let task = Task::new("J1").with_priority(1).with_activity(
+            Activity::new("O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(500))
+                .with_requirement(ResourceRequirement::new("Machine").with_skill("milling")),
+        );
+        let resources = vec![
+            Resource::new("W1", "Operator").with_skill("milling"),
+            Resource::new("M1", "Machine").with_skill("milling"),
+            Resource::new("M2", "Machine"), // right type, no skill
+        ];
+        let scheduler = SimpleScheduler::new()
+            .with_fixed_assignments(vec![Assignment::new("PIN", "PIN", "M1", 0, 1000)]);
+        let problem = valid(&[task], &resources);
+        let s = scheduler.schedule(&problem, 0);
+        let a = s.assignment_for_activity("O1").expect("placed");
+        assert_eq!(a.resource_id, "M1");
+        assert_eq!(a.start_ms, 1000);
+
+        let input = crate::scheduler::FeasibilityInput {
+            tasks: problem.tasks(),
+            resources: problem.resources(),
+            constraints: &[],
+        };
+        assert!(crate::scheduler::check_schedule(&s, &input).is_empty());
+    }
+
+    #[test]
+    fn without_candidates_and_no_resource_of_the_type_the_activity_is_unfilled() {
+        let task = Task::new("J1").with_priority(1).with_activity(
+            Activity::new("O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(500))
+                .with_requirement(ResourceRequirement::new("Machine")),
+        );
+        let resources = vec![Resource::new("W1", "Operator")];
+        let request = ScheduleRequest::new(valid(&[task], &resources));
+        let s = SimpleScheduler::new().schedule_request(&request);
+        assert_eq!(s.assignment_count(), 0);
+        assert!(s
+            .violations
+            .iter()
+            .any(|v| v.violation_type == crate::models::ViolationType::RequirementUnfilled));
     }
 
     #[test]

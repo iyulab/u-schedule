@@ -39,9 +39,9 @@ fn scheduler_output_is_feasible_end_to_end() {
     };
     let tasks = vec![mk("J1", "M1"), mk("J2", "M2"), mk("J3", "M1")];
     let resources = vec![
-        Resource::primary("M1").with_calendar(cal.clone()),
-        Resource::primary("M2"),
-        Resource::secondary("T1").with_capacity(1),
+        Resource::new("M1", "Machine").with_calendar(cal.clone()),
+        Resource::new("M2", "Machine"),
+        Resource::new("T1", "Mold").with_capacity(1),
     ];
     let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
     assert!(
@@ -76,7 +76,7 @@ fn two_job_single_machine() -> (Vec<Task>, Vec<Resource>) {
             )
     };
     let tasks = vec![mk("J1"), mk("J2")];
-    let resources = vec![Resource::primary("M1")];
+    let resources = vec![Resource::new("M1", "Machine")];
     (tasks, resources)
 }
 
@@ -156,7 +156,7 @@ fn multi_resource_pin_seeds_all_holds() {
                     ResourceRequirement::new("Mold").with_candidates(vec!["T1".into()]),
                 ),
         );
-    let resources = vec![Resource::primary("M1"), Resource::secondary("T1")];
+    let resources = vec![Resource::new("M1", "Machine"), Resource::new("T1", "Mold")];
     let pins = vec![
         Assignment::new("J1_O1", "J1", "M1", 2000, 3000),
         Assignment::new("J1_O1", "J1", "T1", 2000, 3000),
@@ -199,7 +199,7 @@ fn pinned_activity_pushes_successor_after_pin_end() {
                     ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                 ),
         );
-    let resources = vec![Resource::primary("M1")];
+    let resources = vec![Resource::new("M1", "Machine")];
     let pin = Assignment::new("J1_O1", "J1", "M1", 2000, 3000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
@@ -235,7 +235,7 @@ fn pinned_successor_precedes_conflicting_unpinned_predecessor_reports_violation(
                     ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
                 ),
         );
-    let resources = vec![Resource::primary("M1")];
+    let resources = vec![Resource::new("M1", "Machine")];
     let pin = Assignment::new("J1_O2", "J1", "M1", 500, 1500);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
@@ -286,7 +286,7 @@ fn pinned_activity_coexists_with_sgs_activity_under_capacity_two() {
             )
     };
     let tasks = vec![mk("J1"), mk("J2")];
-    let resources = vec![Resource::primary("M1").with_capacity(2)];
+    let resources = vec![Resource::new("M1", "Machine").with_capacity(2)];
     let pin = Assignment::new("J1_O1", "J1", "M1", 0, 1000);
     let s = SimpleScheduler::new()
         .with_fixed_assignments(vec![pin])
@@ -335,7 +335,8 @@ fn unfillable_requirement_reported_not_silent() {
                 ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
             ),
     );
-    let short = Resource::primary("M1").with_calendar(Calendar::new("short").with_window(0, 500));
+    let short =
+        Resource::new("M1", "Machine").with_calendar(Calendar::new("short").with_window(0, 500));
     let s = SimpleScheduler::new().schedule(&valid(&[task], &[short]), 0);
     assert!(!s.is_valid());
     assert!(s
@@ -355,7 +356,8 @@ fn a_candidate_that_names_no_resource_is_refused_before_scheduling() {
                 ResourceRequirement::new("Machine").with_candidates(vec!["NOPE".into()]),
             ),
     );
-    let errors = Problem::new(vec![task], vec![Resource::primary("M1")]).expect_err("unknown");
+    let errors =
+        Problem::new(vec![task], vec![Resource::new("M1", "Machine")]).expect_err("unknown");
     assert_eq!(errors[0].kind.code(), "invalid_resource_reference");
 }
 
@@ -371,8 +373,8 @@ fn two_tasks_sharing_an_id_are_refused_not_merged() {
                 ),
         )
     };
-    let errors =
-        Problem::new(vec![mk("A"), mk("B")], vec![Resource::primary("M1")]).expect_err("dup");
+    let errors = Problem::new(vec![mk("A"), mk("B")], vec![Resource::new("M1", "Machine")])
+        .expect_err("dup");
     assert!(errors.iter().any(|e| e.kind
         == u_schedule::validation::ValidationErrorKind::DuplicateId {
             entity: u_schedule::validation::Entity::Task,
@@ -387,15 +389,15 @@ fn arb_instance() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
             .enumerate()
             .map(|(i, cap)| {
                 if i == 0 {
-                    Resource::secondary("T0").with_capacity(cap)
+                    Resource::new("T0", "Tool").with_capacity(cap)
                 } else if i == 1 {
-                    Resource::primary(format!("M{i}")).with_calendar(
+                    Resource::new(format!("M{i}"), "Machine").with_calendar(
                         Calendar::new("c")
                             .with_window(0, 10_000)
                             .with_window(15_000, 60_000),
                     )
                 } else {
-                    Resource::primary(format!("M{i}"))
+                    Resource::new(format!("M{i}"), "Machine")
                 }
             })
             .collect::<Vec<_>>()
@@ -404,7 +406,7 @@ fn arb_instance() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
     (res, tasks).prop_map(|(resources, specs)| {
         let machine_ids: Vec<String> = resources
             .iter()
-            .filter(|r| r.resource_type == ResourceType::Primary)
+            .filter(|r| r.resource_type == "Machine")
             .map(|r| r.id.clone())
             .collect();
         let tasks = specs
@@ -459,7 +461,7 @@ proptest! {
             .with_window(160, 400)
             .with_blocked(60, 70);
         let mut tl = ResourceTimeline::new(
-            &Resource::primary("M1").with_capacity(cap).with_calendar(cal),
+            &Resource::new("M1", "Machine").with_capacity(cap).with_calendar(cal),
         );
         for (s, d) in &bookings {
             tl.book(*s, s + d);

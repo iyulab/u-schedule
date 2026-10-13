@@ -98,14 +98,14 @@ mod tests {
 
     #[test]
     fn test_earliest_fit_empty() {
-        let tl = ResourceTimeline::new(&Resource::primary("M1"));
+        let tl = ResourceTimeline::new(&Resource::new("M1", "Machine"));
         assert_eq!(tl.earliest_fit(0, 1000), Some(0));
         assert_eq!(tl.earliest_fit(500, 1000), Some(500));
     }
 
     #[test]
     fn test_earliest_fit_after_booking() {
-        let mut tl = ResourceTimeline::new(&Resource::primary("M1"));
+        let mut tl = ResourceTimeline::new(&Resource::new("M1", "Machine"));
         tl.book(0, 1000);
         assert_eq!(tl.earliest_fit(0, 500), Some(1000));
         tl.book(1500, 2000);
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_capacity_two_parallel() {
-        let mut tl = ResourceTimeline::new(&Resource::primary("M1").with_capacity(2));
+        let mut tl = ResourceTimeline::new(&Resource::new("M1", "Machine").with_capacity(2));
         tl.book(0, 1000);
         assert_eq!(tl.earliest_fit(0, 1000), Some(0)); // 두 번째 슬롯
         tl.book(0, 1000);
@@ -129,7 +129,7 @@ mod tests {
         let cal = Calendar::new("shift")
             .with_window(0, 5000)
             .with_window(10_000, 20_000);
-        let mut tl = ResourceTimeline::new(&Resource::primary("M1").with_calendar(cal));
+        let mut tl = ResourceTimeline::new(&Resource::new("M1", "Machine").with_calendar(cal));
         tl.book(0, 3000);
         // 3000ms 작업: [3000,6000)은 창 밖 → 다음 창 10000
         assert_eq!(tl.earliest_fit(0, 3000), Some(10_000));
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn test_calendar_never_fits() {
         let cal = Calendar::new("short").with_window(0, 1000);
-        let tl = ResourceTimeline::new(&Resource::primary("M1").with_calendar(cal));
+        let tl = ResourceTimeline::new(&Resource::new("M1", "Machine").with_calendar(cal));
         assert_eq!(tl.earliest_fit(0, 2000), None);
     }
 }
