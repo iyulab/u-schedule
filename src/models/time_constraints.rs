@@ -1,11 +1,10 @@
-//! Constraint violation records and duration estimation for scheduling.
+//! Duration estimation for scheduling.
 //!
-//! Provides violation records, PERT three-point estimation, and
-//! probabilistic duration distributions.
+//! Provides PERT three-point estimation and probabilistic duration
+//! distributions.
 //!
 //! # Concepts
 //!
-//! - [`ConstraintViolation`]: A violation record with severity and penalty
 //! - [`PertEstimate`]: PERT three-point duration estimation (O, M, P)
 //! - [`DurationDistribution`]: Probabilistic duration model
 //!
@@ -15,101 +14,6 @@
 //! - Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems"
 
 use serde::{Deserialize, Serialize};
-
-// ================================
-// Violation Model
-// ================================
-
-/// Severity of a constraint violation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ViolationSeverity {
-    /// Informational — no impact.
-    Info,
-    /// Minor — small penalty.
-    Minor,
-    /// Major — significant penalty.
-    Major,
-    /// Critical — schedule may be invalid.
-    Critical,
-}
-
-/// General constraint violation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConstraintViolation {
-    /// Type of violation.
-    pub violation_type: ConstraintViolationType,
-    /// Related entity IDs.
-    pub related_ids: Vec<String>,
-    /// Severity level.
-    pub severity: ViolationSeverity,
-    /// Violation message.
-    pub message: String,
-    /// Penalty value.
-    pub penalty: f64,
-}
-
-/// Types of constraint violations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ConstraintViolationType {
-    /// Time constraint violated.
-    TimeWindow,
-    /// Resource capacity exceeded.
-    CapacityExceeded,
-    /// Precedence constraint violated.
-    PrecedenceViolated,
-    /// Resource unavailable.
-    ResourceUnavailable,
-    /// Skill requirement not met.
-    SkillMismatch,
-    /// Other custom violation.
-    Custom(String),
-}
-
-impl ConstraintViolation {
-    /// Creates a time constraint violation.
-    pub fn time_window(
-        activity_id: &str,
-        tardiness_ms: i64,
-        severity: ViolationSeverity,
-        penalty: f64,
-    ) -> Self {
-        Self {
-            violation_type: ConstraintViolationType::TimeWindow,
-            related_ids: vec![activity_id.to_string()],
-            severity,
-            message: format!("Activity {} is {} ms late", activity_id, tardiness_ms),
-            penalty,
-        }
-    }
-
-    /// Creates a capacity violation.
-    pub fn capacity_exceeded(resource_id: &str, exceeded_by: i32) -> Self {
-        Self {
-            violation_type: ConstraintViolationType::CapacityExceeded,
-            related_ids: vec![resource_id.to_string()],
-            severity: ViolationSeverity::Critical,
-            message: format!(
-                "Resource {} capacity exceeded by {}",
-                resource_id, exceeded_by
-            ),
-            penalty: exceeded_by as f64 * 1000.0,
-        }
-    }
-
-    /// Creates a precedence violation.
-    pub fn precedence_violated(before_id: &str, after_id: &str, overlap_ms: i64) -> Self {
-        Self {
-            violation_type: ConstraintViolationType::PrecedenceViolated,
-            related_ids: vec![before_id.to_string(), after_id.to_string()],
-            severity: ViolationSeverity::Critical,
-            message: format!(
-                "Activity {} must complete before {} (overlap: {} ms)",
-                before_id, after_id, overlap_ms
-            ),
-            penalty: overlap_ms as f64 * 10.0,
-        }
-    }
-}
 
 // ================================
 // PERT 3-Point Estimation
@@ -451,28 +355,6 @@ mod tests {
             max_ms: 7000,
         };
         assert!((tri.expected_duration_ms() - 5000.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_constraint_violation_creation() {
-        let tw_v =
-            ConstraintViolation::time_window("OP-001", 5000, ViolationSeverity::Minor, 500.0);
-        assert_eq!(tw_v.violation_type, ConstraintViolationType::TimeWindow);
-        assert!(tw_v.message.contains("OP-001"));
-
-        let cap_v = ConstraintViolation::capacity_exceeded("M-001", 3);
-        assert_eq!(
-            cap_v.violation_type,
-            ConstraintViolationType::CapacityExceeded
-        );
-        assert_eq!(cap_v.severity, ViolationSeverity::Critical);
-    }
-
-    #[test]
-    fn test_violation_severity_ordering() {
-        assert!(ViolationSeverity::Critical > ViolationSeverity::Major);
-        assert!(ViolationSeverity::Major > ViolationSeverity::Minor);
-        assert!(ViolationSeverity::Minor > ViolationSeverity::Info);
     }
 
     #[test]

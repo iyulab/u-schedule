@@ -10,6 +10,9 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Changed
 
+- **Breaking:** removed `ConstraintViolation`, `ConstraintViolationType` and
+  `ViolationSeverity`. No scheduler or check produced them; a schedule's
+  findings are `schedule::Violation` / `ViolationType`.
 - **Breaking:** a job with no operations is refused as `empty_input` — the
   shared reason for an input with nothing in it — with `parameter`
   `"operations"` beside the job's `task` id (was `empty_task`).
