@@ -8,6 +8,16 @@ license = "MIT"
 repository = "https://github.com/iyulab/u-schedule"
 description = "Domain-agnostic scheduling framework: job-shop models, dispatching rules, GA encoding, constraint programming."
 readme = "README.md"
+# What a published crate is: its source, tests and documents -- not the
+# repository's CI, scripts or language bindings.
+include = [
+    "/src/**",
+    "/tests/**",
+    "/benches/**",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
 keywords = ["scheduling", "job-shop", "optimization", "manufacturing"]
 categories = ["algorithms"]
 
