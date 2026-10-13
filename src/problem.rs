@@ -87,6 +87,6 @@ mod tests {
         let errors = Problem::new(tasks, vec![]).expect_err("invalid");
         let codes: Vec<&str> = errors.iter().map(|e| e.kind.code()).collect();
         assert!(codes.contains(&"duplicate_id"), "{codes:?}");
-        assert!(codes.contains(&"empty_task"), "{codes:?}");
+        assert!(codes.contains(&"empty_input"), "{codes:?}");
     }
 }

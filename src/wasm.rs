@@ -351,7 +351,9 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             json!({ "activity": activity, "resource": resource })
         }
         ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
-        ValidationErrorKind::EmptyTask { task } => json!({ "task": task }),
+        ValidationErrorKind::EmptyTask { task } => {
+            json!({ "parameter": "operations", "task": task })
+        }
         ValidationErrorKind::InvalidPredecessor {
             activity,
             predecessor,
@@ -1995,8 +1997,8 @@ mod tests {
         .expect_err("a job with no operations");
         assert_eq!(
             empty.fields,
-            json!({ "code": "empty_task", "task": "J2", "errors": [
-                { "code": "empty_task", "message": empty.message, "task": "J2" }
+            json!({ "code": "empty_input", "parameter": "operations", "task": "J2", "errors": [
+                { "code": "empty_input", "message": empty.message, "parameter": "operations", "task": "J2" }
             ] })
         );
 
@@ -2008,7 +2010,7 @@ mod tests {
             job("J3", vec![]),
         ]))
         .expect_err("two jobs with no operations");
-        assert_eq!(both.code(), "empty_task");
+        assert_eq!(both.code(), "empty_input");
         assert_eq!(both.fields["task"], "J2");
         let tasks: Vec<_> = both.fields["errors"]
             .as_array()
@@ -2019,8 +2021,8 @@ mod tests {
         assert_eq!(
             tasks,
             vec![
-                (json!("empty_task"), json!("J2")),
-                (json!("empty_task"), json!("J3"))
+                (json!("empty_input"), json!("J2")),
+                (json!("empty_input"), json!("J3"))
             ]
         );
 

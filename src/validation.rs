@@ -173,7 +173,8 @@ impl ValidationErrorKind {
             ValidationErrorKind::DuplicateId { .. } => "duplicate_id",
             ValidationErrorKind::InvalidResourceReference { .. } => "invalid_resource_reference",
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
-            ValidationErrorKind::EmptyTask { .. } => "empty_task",
+            // The shared reason: a list with nothing in it -- `parameter` names it.
+            ValidationErrorKind::EmptyTask { .. } => "empty_input",
             ValidationErrorKind::InvalidPredecessor { .. } => "invalid_predecessor",
             ValidationErrorKind::ReversedCalendarPeriod { .. } => "invalid_calendar_period",
             ValidationErrorKind::WeightOutOfRange { .. }
