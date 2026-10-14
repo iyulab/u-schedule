@@ -13,7 +13,7 @@ use u_metaheur::ga::GaProblem;
 
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
-use crate::models::{Assignment, Resource, Schedule, TransitionMatrixCollection};
+use crate::models::{ActivityDuration, Assignment, Resource, Schedule, TransitionMatrixCollection};
 use crate::Problem;
 
 /// Compact activity descriptor for GA encoding.
@@ -31,8 +31,10 @@ pub struct ActivityInfo {
     pub task_id: String,
     /// Activity sequence within task (1-based).
     pub sequence: i32,
-    /// Processing time (ms).
-    pub process_ms: i64,
+    /// Setup, processing and teardown time (ms) -- the activity's own
+    /// duration. A resource with a transition matrix replaces the setup with
+    /// its changeover time, as [`SimpleScheduler`](crate::scheduler::SimpleScheduler) does.
+    pub duration: ActivityDuration,
     /// IDs of the resources the activity may run on: those some requirement
     /// [accepts](crate::models::ResourceRequirement::accepts) (listed
     /// candidates, or resources of the requirement's type when none are
@@ -51,7 +53,7 @@ impl ActivityInfo {
                     id: activity.id.clone(),
                     task_id: task.id.clone(),
                     sequence: (i + 1) as i32,
-                    process_ms: activity.duration.process_ms,
+                    duration: activity.duration.clone(),
                     candidates: activity
                         .eligible_resources(problem.resources())
                         .into_iter()
@@ -242,21 +244,32 @@ impl SchedulingGaProblem {
             let release = self.release_times.get(task_id).copied().unwrap_or(0);
             let earliest = resource_ready.max(task_ready).max(release);
 
-            // Setup time
-            let setup = if let Some(&prev_cat) = last_category.get(resource_id) {
-                let task_cat = self
-                    .task_categories
-                    .get(task_id)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                self.transition_matrices
-                    .get_transition_time(resource_id, prev_cat, task_cat)
+            // Setup: the changeover from the resource's previous category
+            // where it has a transition matrix (none before its first
+            // activity), the activity's own setup otherwise -- the rule
+            // `SimpleScheduler` places by. Teardown follows processing.
+            let setup = if self.transition_matrices.has_matrix(resource_id) {
+                match last_category.get(resource_id) {
+                    Some(&prev_cat) => {
+                        let task_cat = self
+                            .task_categories
+                            .get(task_id)
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        self.transition_matrices.get_transition_time(
+                            resource_id,
+                            prev_cat,
+                            task_cat,
+                        )
+                    }
+                    None => 0,
+                }
             } else {
-                0
+                act.duration.setup_ms
             };
 
             let start = earliest;
-            let end = start + setup + act.process_ms;
+            let end = start + setup + act.duration.process_ms + act.duration.teardown_ms;
 
             schedule.add_assignment(
                 Assignment::new(&act.id, task_id, resource_id, start, end)
@@ -405,7 +418,7 @@ mod tests {
         assert_eq!(infos[0].id, "T1_O1");
         assert_eq!(infos[0].task_id, "T1");
         assert_eq!(infos[0].sequence, 1);
-        assert_eq!(infos[0].process_ms, 1000);
+        assert_eq!(infos[0].duration.process_ms, 1000);
         assert_eq!(infos[1].id, "T1_O2");
         assert_eq!(infos[2].id, "T2_O1");
         assert_eq!(infos[2].task_id, "T2");

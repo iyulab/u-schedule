@@ -8,6 +8,27 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `check_schedule` judges each assignment against its activity: an assignment
+  under a model task must name one of that task's activities (`UnknownActivity`
+  — also when an activity is assigned more times than its requirements take
+  units), last at least its recorded setup + processing + teardown
+  (`DurationTooShort`), and start no earlier than its task's release time
+  (`EarlyStart`). An assignment under a task the model does not have — a pinned
+  booking — still counts against capacity and calendars only.
+
+### Fixed
+
+- The GA and CP schedulers dropped an activity's own setup and teardown: an
+  activity of setup 100, processing 1000 and teardown 50 ms was scheduled for
+  1000 ms (GA: plus a changeover only where one applied; CP: processing only).
+  Both now schedule the whole span — the GA takes the resource's changeover
+  where it has a transition matrix and the activity's setup otherwise, as
+  `SimpleScheduler` does, and CP records the activity's setup on the
+  assignment. **Breaking:** `ga::ActivityInfo::process_ms` is replaced by
+  `duration: ActivityDuration`.
+
 ## [0.17.0] - 2026-10-14
 
 ### Added

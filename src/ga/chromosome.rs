@@ -81,7 +81,7 @@ impl ScheduleChromosome {
                 .min_by_key(|c| resource_load.get(*c).copied().unwrap_or(0))
                 .expect("candidates checked non-empty above")
                 .clone();
-            *resource_load.entry(best.clone()).or_insert(0) += act.process_ms;
+            *resource_load.entry(best.clone()).or_insert(0) += act.duration.total_ms();
             mav.push(best);
         }
 
@@ -229,7 +229,7 @@ impl ScheduleChromosome {
                         process_times
                             .get(&(act.task_id.clone(), act.sequence, (*c).clone()))
                             .copied()
-                            .unwrap_or(act.process_ms)
+                            .unwrap_or(act.duration.process_ms)
                     })
                     .expect("candidates checked non-empty above")
                     .clone()
@@ -551,21 +551,21 @@ mod tests {
                 id: "T1_1".into(),
                 task_id: "T1".into(),
                 sequence: 1,
-                process_ms: 1000,
+                duration: crate::models::ActivityDuration::fixed(1000),
                 candidates: vec!["M1".into(), "M2".into()],
             },
             ActivityInfo {
                 id: "T1_2".into(),
                 task_id: "T1".into(),
                 sequence: 2,
-                process_ms: 2000,
+                duration: crate::models::ActivityDuration::fixed(2000),
                 candidates: vec!["M2".into()],
             },
             ActivityInfo {
                 id: "T2_1".into(),
                 task_id: "T2".into(),
                 sequence: 1,
-                process_ms: 1500,
+                duration: crate::models::ActivityDuration::fixed(1500),
                 candidates: vec!["M1".into(), "M3".into()],
             },
         ]

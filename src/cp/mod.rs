@@ -78,7 +78,8 @@ impl<'a> ScheduleCpBuilder<'a> {
             let release = task.release_time.unwrap_or(0);
 
             for activity in &task.activities {
-                let duration = activity.duration.process_ms;
+                // Setup, processing and teardown: the activity's whole span.
+                let duration = activity.duration.total_ms();
                 let interval = IntervalVar::new(
                     &activity.id,
                     release,               // start_min
@@ -185,7 +186,8 @@ impl<'a> ScheduleCpBuilder<'a> {
                                 interval_sol.start,
                                 interval_sol.end,
                             )
-                            .with_sequence(step as i32 + 1),
+                            .with_sequence(step as i32 + 1)
+                            .with_setup(activity.duration.setup_ms),
                         );
                     }
                 }

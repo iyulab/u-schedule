@@ -81,6 +81,13 @@ pub enum ViolationType {
     TimeWindowViolation,
     /// Synchronized activities do not share the same start time.
     SynchronizeViolation,
+    /// An assignment names an activity the model does not have, under
+    /// another task, or one more time than its requirements take units.
+    UnknownActivity,
+    /// An assignment is shorter than its setup, processing and teardown.
+    DurationTooShort,
+    /// An activity starts before its task's release time.
+    EarlyStart,
     /// Domain-specific violation.
     Custom(String),
 }
@@ -207,6 +214,36 @@ impl Violation {
             entity_id: activity_id.into(),
             message: message.into(),
             severity: 75,
+        }
+    }
+
+    /// Creates an unknown-activity violation.
+    pub fn unknown_activity(activity_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::UnknownActivity,
+            entity_id: activity_id.into(),
+            message: message.into(),
+            severity: 95,
+        }
+    }
+
+    /// Creates a too-short-assignment violation.
+    pub fn duration_too_short(activity_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::DurationTooShort,
+            entity_id: activity_id.into(),
+            message: message.into(),
+            severity: 90,
+        }
+    }
+
+    /// Creates an early-start (before release) violation.
+    pub fn early_start(activity_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type: ViolationType::EarlyStart,
+            entity_id: activity_id.into(),
+            message: message.into(),
+            severity: 90,
         }
     }
 
