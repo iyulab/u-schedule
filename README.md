@@ -288,6 +288,55 @@ not the order they run on the timeline.
 
 Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Insert"` | `"Invert"`.
 
+#### `check_jobshop({ problem, solution }) -> JobShopCheckOutput`
+
+Checks a job-shop schedule against the problem it answers — each step of each
+job placed once, on a machine it can run on, for its processing time, after the
+step ahead of it and the job's release, no two steps on one machine at once,
+and the reported `makespan` equal to the latest end. `problem` is the
+`solve_jobshop` input, read the same way (the same refusals); `solution` is
+`{ schedule, makespan? }`. A schedule that breaks the problem is a result, not
+an error.
+
+```js
+import { solve_jobshop, check_jobshop } from '@iyulab/u-schedule';
+
+const problem = {
+  jobs: [
+    { id: 'J1', operations: [{ machine: 'M1', processing_time: 3 }, { machine: 'M2', processing_time: 2 }] },
+    { id: 'J2', operations: [{ machine: 'M2', processing_time: 4 }, { machine: 'M1', processing_time: 1 }] },
+  ],
+  ga_config: { seed: 1 },
+};
+const answer = solve_jobshop(problem);
+const plan = { schedule: answer.schedule, makespan: answer.makespan };
+console.log(check_jobshop({ problem, solution: plan }).feasible); // true
+
+plan.schedule[0].end = plan.schedule[0].start + 1;
+console.log(check_jobshop({ problem, solution: plan }).violations.map((v) => v.code));
+// ["duration_too_short", ...]
+```
+
+```json
+{ "feasible": false, "violations": [{ "code": "duration_too_short", "entity": "J1_1", "message": "..." }] }
+```
+
+Each violation carries its `code`; every code but `makespan_mismatch` also
+carries `entity` (the step `"J1_2"` — job and step number —, job or machine)
+and a readable `message`; `makespan_mismatch` carries `reported` and `actual`.
+
+| `code` | The schedule breaks |
+|---|---|
+| `unknown_activity` | a job or step the problem does not have, or a step placed twice |
+| `requirement_unfilled` | a step left out, or put on a machine it cannot run on |
+| `capacity_exceeded` | two steps on one machine at once |
+| `precedence_violation` | a step that starts before the step ahead of it ends |
+| `duration_too_short` | a step shorter than its processing time |
+| `early_start` | a step that starts before its job's `release_time` |
+| `deadline_miss` | a job that ends after its `due_date` |
+| `makespan_mismatch` | a reported `makespan` other than the latest end |
+| `resource_unavailable` · `time_window_violation` | a step outside its machine's availability or its window (not produced by job-shop problems today) |
+
 **GA config constraints:**
 
 | Parameter | Constraint | Default |

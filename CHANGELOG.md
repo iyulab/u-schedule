@@ -10,6 +10,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Added
 
+- **A job-shop schedule checker on the wire**: WASM `check_jobshop({ problem,
+  solution })` — `problem` is the `solve_jobshop` input, read the same way;
+  `solution` is `{ schedule, makespan? }` — answers `{ feasible, violations:
+  [{ code, entity, message }] }` from the library's own `check_schedule`, plus
+  `makespan_mismatch` for a reported makespan other than the latest end. Every
+  schedule `solve_jobshop` returns checks clean.
 - `solve_jobshop` says why its search stopped: `stop_reason` —
   `"iteration_limit"` when it ran its `max_generations`, `"no_improvement"`
   when it stalled first, `"completed"` for a problem with no jobs (the

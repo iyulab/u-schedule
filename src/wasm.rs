@@ -38,7 +38,11 @@ use crate::dispatching::rules;
 use crate::dispatching::{RuleEngine, SchedulingContext};
 use crate::ga::operators::{CrossoverType, GeneticOperators, MutationType};
 use crate::ga::SchedulingGaProblem;
-use crate::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
+use crate::models::{
+    Activity, ActivityDuration, Assignment, Resource, ResourceRequirement, Schedule, Task,
+    Violation, ViolationType,
+};
+use crate::scheduler::feasibility::{check_schedule, FeasibilityInput};
 use crate::validation::{ValidationError, ValidationErrorKind};
 use crate::Problem;
 use u_metaheur::ga::{GaConfig, GaRunner};
@@ -1583,6 +1587,192 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     Ok(output)
 }
 
+// ── checking a job-shop schedule ────────────────────────────────────────────
+
+/// One placed step of a schedule to check -- an entry of a `solve_jobshop`
+/// answer's `schedule`. `operation` is read as given: a number the job has no
+/// step for (0, negative, past its last) is a violation, not a refusal.
+#[derive(Debug, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct JobShopStep {
+    job_id: String,
+    #[serde(deserialize_with = "whole")]
+    #[tsify(type = "number")]
+    operation: i128,
+    machine: String,
+    start: f64,
+    end: f64,
+}
+
+/// A schedule to check: the `schedule` of a `solve_jobshop` answer, or one
+/// built elsewhere in its shape, and the `makespan` it reports, if any.
+#[derive(Debug, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct JobShopPlan {
+    schedule: Vec<JobShopStep>,
+    /// The makespan the schedule claims, compared with its latest end.
+    #[serde(default)]
+    #[tsify(optional, type = "number | null")]
+    makespan: Option<f64>,
+}
+
+/// The input of `check_jobshop`: the problem as given to `solve_jobshop`,
+/// unchanged, and the schedule to check against it.
+#[derive(Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct JobShopCheckInput {
+    problem: JobShopInput,
+    solution: JobShopPlan,
+}
+
+/// One way a schedule breaks its problem, by `code`. `entity` is the step
+/// (`"J1_2"` -- job and step number), job or machine it is about.
+#[derive(Debug, Serialize, tsify::Tsify)]
+#[serde(tag = "code", rename_all = "snake_case")]
+enum JobShopViolation {
+    /// A job or step the problem does not have, or a step placed twice.
+    UnknownActivity { entity: String, message: String },
+    /// A step left out, or put on a machine it cannot run on.
+    RequirementUnfilled { entity: String, message: String },
+    /// Two steps on one machine at once.
+    CapacityExceeded { entity: String, message: String },
+    /// A step that starts before the step ahead of it ends.
+    PrecedenceViolation { entity: String, message: String },
+    /// A step shorter than its processing time.
+    DurationTooShort { entity: String, message: String },
+    /// A step that starts before its job's `release_time`.
+    EarlyStart { entity: String, message: String },
+    /// A job that ends after its `due_date`.
+    DeadlineMiss { entity: String, message: String },
+    /// A step on a machine while the machine is unavailable.
+    ResourceUnavailable { entity: String, message: String },
+    /// A step outside its time window.
+    TimeWindowViolation { entity: String, message: String },
+    /// A reported `makespan` other than the schedule's latest end.
+    MakespanMismatch { reported: f64, actual: f64 },
+}
+
+impl JobShopViolation {
+    /// The wire violation for the library's own: job-shop problems have no
+    /// skills, synchronized steps or custom checks, so those do not arise.
+    fn of(v: Violation) -> Self {
+        let (entity, message) = (v.entity_id, v.message);
+        match v.violation_type {
+            ViolationType::UnknownActivity => Self::UnknownActivity { entity, message },
+            ViolationType::RequirementUnfilled | ViolationType::SkillMismatch => {
+                Self::RequirementUnfilled { entity, message }
+            }
+            ViolationType::CapacityExceeded => Self::CapacityExceeded { entity, message },
+            ViolationType::PrecedenceViolation | ViolationType::SynchronizeViolation => {
+                Self::PrecedenceViolation { entity, message }
+            }
+            ViolationType::DurationTooShort => Self::DurationTooShort { entity, message },
+            ViolationType::EarlyStart => Self::EarlyStart { entity, message },
+            ViolationType::DeadlineMiss => Self::DeadlineMiss { entity, message },
+            ViolationType::ResourceUnavailable | ViolationType::Custom(_) => {
+                Self::ResourceUnavailable { entity, message }
+            }
+            ViolationType::TimeWindowViolation => Self::TimeWindowViolation { entity, message },
+        }
+    }
+}
+
+/// Whether a schedule keeps its problem, and every way it does not.
+#[derive(Debug, Serialize, tsify::Tsify)]
+struct JobShopCheckOutput {
+    feasible: bool,
+    violations: Vec<JobShopViolation>,
+}
+
+/// Checks a job-shop schedule against the problem it answers -- each step of
+/// each job placed once, on a machine it can run on, for its processing time,
+/// after the step ahead of it and the job's release, no two steps on one
+/// machine at once, and the reported `makespan` equal to the latest end.
+///
+/// `problem` is read as `solve_jobshop` reads it (the same refusals);
+/// `solution` is `{ schedule, makespan? }` -- the schedule of an answer, so a
+/// caller passes `{ schedule: answer.schedule, makespan: answer.makespan }`.
+/// A schedule that breaks the problem is a result, not an error.
+#[wasm_bindgen(unchecked_return_type = "JobShopCheckOutput")]
+pub fn check_jobshop(
+    #[wasm_bindgen(unchecked_param_type = "JobShopCheckInput")] input: JsValue,
+) -> Result<JsValue, JsValue> {
+    let input: JobShopCheckInput = from_js(input, "input")?;
+    to_js(&check_jobshop_input(&input).map_err(js_err)?)
+}
+
+/// The whole of `check_jobshop` past the JS boundary.
+fn check_jobshop_input(input: &JobShopCheckInput) -> Result<JobShopCheckOutput, WireError> {
+    let problem = jobshop_problem(&input.problem)?;
+
+    // Each (job, step) of the problem, by the activity it is.
+    let mut activity_of: std::collections::HashMap<(&str, usize), &str> =
+        std::collections::HashMap::new();
+    for task in problem.tasks() {
+        for activity in &task.activities {
+            let step = usize::try_from(activity.sequence).unwrap_or(usize::MAX);
+            activity_of.insert((task.id.as_str(), step + 1), activity.id.as_str());
+        }
+    }
+
+    let mut violations = Vec::new();
+    let mut schedule = Schedule::new();
+    for a in &input.solution.schedule {
+        let step = usize::try_from(a.operation).ok();
+        let Some(activity_id) = step.and_then(|step| activity_of.get(&(a.job_id.as_str(), step)))
+        else {
+            violations.push(JobShopViolation::UnknownActivity {
+                entity: a.job_id.clone(),
+                message: format!(
+                    "job '{}' has no operation {} in the problem",
+                    a.job_id, a.operation
+                ),
+            });
+            continue;
+        };
+        let mut assignment = Assignment::new(
+            *activity_id,
+            &a.job_id,
+            &a.machine,
+            sec_to_ms(a.start),
+            sec_to_ms(a.end),
+        );
+        assignment.sequence = i32::try_from(a.operation).ok();
+        schedule.assignments.push(assignment);
+    }
+
+    let feasibility = FeasibilityInput {
+        tasks: problem.tasks(),
+        resources: problem.resources(),
+        constraints: &[],
+    };
+    violations.extend(
+        check_schedule(&schedule, &feasibility)
+            .into_iter()
+            .map(JobShopViolation::of),
+    );
+
+    if let Some(reported) = input.solution.makespan {
+        let latest = input
+            .solution
+            .schedule
+            .iter()
+            .map(|a| a.end)
+            .fold(0.0_f64, f64::max);
+        if sec_to_ms(reported) != sec_to_ms(latest) {
+            violations.push(JobShopViolation::MakespanMismatch {
+                reported,
+                actual: latest,
+            });
+        }
+    }
+
+    Ok(JobShopCheckOutput {
+        feasible: violations.is_empty(),
+        violations,
+    })
+}
+
 // ── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2304,6 +2494,225 @@ mod tests {
                 "got": 1.0,
             })
         );
+    }
+
+    /// A three-job, three-machine problem; `flexible` lets the second step
+    /// of each job run on either of two machines.
+    fn check_problem(seed: i128, flexible: bool) -> JobShopInput {
+        let step = |machine: &str, alt: Option<&str>, t: f64| JobShopOperation {
+            machine: if flexible && alt.is_some() {
+                None
+            } else {
+                Some(machine.to_string())
+            },
+            machines: match (flexible, alt) {
+                (true, Some(other)) => vec![machine.to_string(), other.to_string()],
+                _ => vec![],
+            },
+            processing_time: t,
+        };
+        JobShopInput {
+            jobs: vec![
+                JobShopJob {
+                    id: "J1".into(),
+                    operations: vec![
+                        step("M1", None, 3.0),
+                        step("M2", Some("M3"), 2.0),
+                        step("M3", None, 2.0),
+                    ],
+                    due_date: None,
+                    release_time: None,
+                },
+                JobShopJob {
+                    id: "J2".into(),
+                    operations: vec![
+                        step("M2", None, 4.0),
+                        step("M1", Some("M3"), 1.0),
+                        step("M3", None, 3.0),
+                    ],
+                    due_date: None,
+                    release_time: Some(1.0),
+                },
+                JobShopJob {
+                    id: "J3".into(),
+                    operations: vec![
+                        step("M3", None, 2.0),
+                        step("M2", Some("M1"), 3.0),
+                        step("M1", None, 2.0),
+                    ],
+                    due_date: None,
+                    release_time: None,
+                },
+            ],
+            num_machines: Some(3),
+            ga_config: JobShopGaConfig {
+                population_size: 20,
+                max_generations: 30,
+                mutation_rate: 0.1,
+                seed: Some(seed),
+                tardiness_weight: 0.0,
+                crossover: "POX".to_string(),
+                mutation: "Swap".to_string(),
+            },
+        }
+    }
+
+    /// The answer's schedule as a schedule to check.
+    fn steps(schedule: &[JobShopAssignment]) -> Vec<JobShopStep> {
+        schedule
+            .iter()
+            .map(|a| JobShopStep {
+                job_id: a.job_id.clone(),
+                operation: a.operation as i128,
+                machine: a.machine.clone(),
+                start: a.start,
+                end: a.end,
+            })
+            .collect()
+    }
+
+    fn codes(
+        problem: JobShopInput,
+        schedule: Vec<JobShopStep>,
+        makespan: Option<f64>,
+    ) -> Vec<String> {
+        let out = check_jobshop_input(&JobShopCheckInput {
+            problem,
+            solution: JobShopPlan { schedule, makespan },
+        })
+        .expect("a valid problem");
+        assert_eq!(out.feasible, out.violations.is_empty());
+        out.violations
+            .iter()
+            .map(|v| {
+                serde_json::to_value(v).expect("serializes")["code"]
+                    .as_str()
+                    .expect("a code")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Every schedule `solve_jobshop` returns checks clean.
+    #[test]
+    fn a_solved_schedule_has_no_violations() {
+        for seed in 0..12 {
+            for flexible in [false, true] {
+                let answer = jobshop(&check_problem(seed, flexible)).expect("solved");
+                let found = codes(
+                    check_problem(seed, flexible),
+                    steps(&answer.schedule),
+                    Some(answer.makespan),
+                );
+                assert!(
+                    found.is_empty(),
+                    "seed {seed} flexible {flexible}: {found:?}"
+                );
+            }
+        }
+    }
+
+    /// Each way of breaking a solved schedule is named.
+    #[test]
+    fn a_broken_schedule_names_each_violation() {
+        let solved = || steps(&jobshop(&check_problem(3, false)).expect("solved").schedule);
+        let find = |s: &[JobShopStep], job: &str, op: i128| {
+            s.iter()
+                .position(|a| a.job_id == job && a.operation == op)
+                .expect("placed")
+        };
+        let run = |s: Vec<JobShopStep>, m: Option<f64>| codes(check_problem(3, false), s, m);
+        let has = |found: Vec<String>, code: &str| found.iter().any(|c| c == code);
+
+        // A step left out.
+        let mut s = solved();
+        s.remove(find(&s, "J1", 2));
+        assert!(has(run(s, None), "requirement_unfilled"));
+        // A job the problem does not have; a step number it does not have,
+        // read as given (past the last, and negative).
+        let mut s = solved();
+        s[0].job_id = "J9".into();
+        assert!(has(run(s, None), "unknown_activity"));
+        for op in [4, -1] {
+            let mut s = solved();
+            let i = find(&s, "J2", 3);
+            s[i].operation = op;
+            assert!(has(run(s, None), "unknown_activity"), "operation {op}");
+        }
+        // A step placed twice.
+        let mut s = solved();
+        let i = find(&s, "J3", 1);
+        let copy = JobShopStep {
+            job_id: s[i].job_id.clone(),
+            operation: s[i].operation,
+            machine: s[i].machine.clone(),
+            start: 100.0,
+            end: 102.0,
+        };
+        s.push(copy);
+        assert!(has(run(s, None), "unknown_activity"));
+        // On a machine the step cannot run on.
+        let mut s = solved();
+        let i = find(&s, "J1", 1);
+        s[i].machine = "M2".into();
+        assert!(has(run(s, None), "requirement_unfilled"));
+        // Shorter than its processing time.
+        let mut s = solved();
+        let i = find(&s, "J1", 1);
+        s[i].end = s[i].start + 1.0;
+        assert!(has(run(s, None), "duration_too_short"));
+        // Before the job's release.
+        let mut s = solved();
+        let i = find(&s, "J2", 1);
+        let length = s[i].end - s[i].start;
+        s[i].start = 0.0;
+        s[i].end = length;
+        assert!(has(run(s, None), "early_start"));
+        // Two steps on one machine at once, and a step before its predecessor.
+        let mut s = solved();
+        for a in &mut s {
+            let length = a.end - a.start;
+            a.start = 50.0;
+            a.end = 50.0 + length;
+        }
+        let found = run(s, None);
+        assert!(has(found.clone(), "capacity_exceeded"), "{found:?}");
+        assert!(has(found.clone(), "precedence_violation"), "{found:?}");
+        // A makespan that is not the latest end.
+        let answer = jobshop(&check_problem(3, false)).expect("solved");
+        let out = check_jobshop_input(&JobShopCheckInput {
+            problem: check_problem(3, false),
+            solution: JobShopPlan {
+                schedule: steps(&answer.schedule),
+                makespan: Some(answer.makespan + 1.0),
+            },
+        })
+        .expect("a valid problem");
+        assert!(
+            matches!(
+                out.violations[..],
+                [JobShopViolation::MakespanMismatch { reported, actual }]
+                    if reported == answer.makespan + 1.0 && actual == answer.makespan
+            ),
+            "{:?}",
+            out.violations
+        );
+    }
+
+    /// The problem is read as `solve_jobshop` reads it: the same refusals.
+    #[test]
+    fn a_check_refuses_the_problems_a_solve_refuses() {
+        let mut problem = check_problem(1, false);
+        problem.jobs[0].operations[0].machine = None;
+        let refused = check_jobshop_input(&JobShopCheckInput {
+            problem,
+            solution: JobShopPlan {
+                schedule: vec![],
+                makespan: None,
+            },
+        })
+        .expect_err("no machine");
+        assert_eq!(refused.code(), "missing_machine");
     }
 
     /// The answer says why the search stopped -- the reason the runner
