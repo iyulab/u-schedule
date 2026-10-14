@@ -244,29 +244,19 @@ impl SchedulingGaProblem {
             let release = self.release_times.get(task_id).copied().unwrap_or(0);
             let earliest = resource_ready.max(task_ready).max(release);
 
-            // Setup: the changeover from the resource's previous category
-            // where it has a transition matrix (none before its first
-            // activity), the activity's own setup otherwise -- the rule
-            // `SimpleScheduler` places by. Teardown follows processing.
-            let setup = if self.transition_matrices.has_matrix(resource_id) {
-                match last_category.get(resource_id) {
-                    Some(&prev_cat) => {
-                        let task_cat = self
-                            .task_categories
-                            .get(task_id)
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
-                        self.transition_matrices.get_transition_time(
-                            resource_id,
-                            prev_cat,
-                            task_cat,
-                        )
-                    }
-                    None => 0,
-                }
-            } else {
-                act.duration.setup_ms
-            };
+            // Setup by the one rule every scheduler places by; teardown
+            // follows processing.
+            let task_cat = self
+                .task_categories
+                .get(task_id)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let setup = self.transition_matrices.setup_ms(
+                resource_id,
+                last_category.get(resource_id).copied(),
+                task_cat,
+                act.duration.setup_ms,
+            );
 
             let start = earliest;
             let end = start + setup + act.duration.process_ms + act.duration.teardown_ms;

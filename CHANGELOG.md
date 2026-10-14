@@ -18,6 +18,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   (`EarlyStart`). An assignment under a task the model does not have — a pinned
   booking — still counts against capacity and calendars only.
 
+- `TransitionMatrixCollection::setup_ms(resource, previous_category, category,
+  own_setup_ms)`: the setup an activity incurs — the changeover where the
+  resource has a transition matrix (none before its first activity), the
+  activity's own setup elsewhere. `SimpleScheduler` and the GA place by it.
+
 ### Fixed
 
 - The GA and CP schedulers dropped an activity's own setup and teardown: an

@@ -307,18 +307,12 @@ impl SimpleScheduler {
         let process = activity.duration.process_ms;
         let teardown = activity.duration.teardown_ms;
         let setup_for = |resource_id: &str| -> i64 {
-            if self.transition_matrices.has_matrix(resource_id) {
-                match last_category.get(resource_id) {
-                    Some(prev) => self.transition_matrices.get_transition_time(
-                        resource_id,
-                        prev,
-                        &task.category,
-                    ),
-                    None => 0, // 첫 작업엔 changeover 없음 (기존 의미 유지)
-                }
-            } else {
-                activity.duration.setup_ms
-            }
+            self.transition_matrices.setup_ms(
+                resource_id,
+                last_category.get(resource_id).map(String::as_str),
+                &task.category,
+                activity.duration.setup_ms,
+            )
         };
 
         // Phase 1: 고정점 — 모든 requirement가 t에서 시작 가능한 최소 t

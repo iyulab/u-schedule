@@ -221,6 +221,26 @@ impl TransitionMatrixCollection {
             .unwrap_or(0)
     }
 
+    /// The setup an activity incurs on `resource_id`: on a resource with a
+    /// transition matrix, the changeover from `previous_category` (the
+    /// category last run there) to `category` -- none before the resource's
+    /// first activity; on any other resource, the activity's own setup
+    /// (`own_setup_ms`). Every scheduler places by this one rule.
+    pub fn setup_ms(
+        &self,
+        resource_id: &str,
+        previous_category: Option<&str>,
+        category: &str,
+        own_setup_ms: i64,
+    ) -> i64 {
+        match self.matrices.get(resource_id) {
+            Some(matrix) => {
+                previous_category.map_or(0, |prev| matrix.get_transition(prev, category))
+            }
+            None => own_setup_ms,
+        }
+    }
+
     /// Number of matrices in the collection.
     pub fn len(&self) -> usize {
         self.matrices.len()
@@ -235,6 +255,19 @@ impl TransitionMatrixCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_the_changeover_where_a_matrix_exists_and_the_activity_s_own_elsewhere() {
+        let mut matrix = TransitionMatrix::new("changeover", "M1").with_default(30);
+        matrix.set_transition("red", "blue", 120);
+        let matrices = TransitionMatrixCollection::new().with_matrix(matrix);
+        // M1 has a matrix: the changeover, none before its first activity.
+        assert_eq!(matrices.setup_ms("M1", Some("red"), "blue", 500), 120);
+        assert_eq!(matrices.setup_ms("M1", Some("blue"), "red", 500), 30);
+        assert_eq!(matrices.setup_ms("M1", None, "red", 500), 0);
+        // M2 has none: the activity's own setup.
+        assert_eq!(matrices.setup_ms("M2", Some("red"), "blue", 500), 500);
+    }
 
     #[test]
     fn test_precedence_constraint() {
