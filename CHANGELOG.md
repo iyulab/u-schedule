@@ -8,6 +8,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-15
+
 ### Added
 
 - **A job-shop schedule checker on the wire**: WASM `check_jobshop({ problem,
@@ -20,8 +22,6 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `"iteration_limit"` when it ran its `max_generations`, `"no_improvement"`
   when it stalled first, `"completed"` for a problem with no jobs (the
   `StopReason` vocabulary of `u-metaheur`'s runners).
-
-### Added
 
 - `check_schedule` judges each assignment against its activity: an assignment
   under a model task must name one of that task's activities (`UnknownActivity`
