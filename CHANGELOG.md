@@ -8,6 +8,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-14
+
 ### Added
 
 - **WASM `available_rules()`**: every dispatching rule `run_schedule` takes, with
