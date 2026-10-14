@@ -221,6 +221,21 @@ Times are in seconds. The engine schedules in whole milliseconds, so every time 
 `processing_time` must be `>= 0` and `num_machines` at least 1.
 `atc_k` (`> 0`, default 2) is the lookahead `k` of `ATC` and is read by `ATC`
 only: given with any other rule it is refused as `invalid_option`, not ignored.
+`available_rules()` returns which rule reads which setting -- the table that
+refusal is made from -- so a form can offer `atc_k` only where it has an effect:
+
+```js
+import { available_rules } from '@iyulab/u-schedule';
+
+const rules = available_rules();
+// [{ name: "SPT", reads: ["num_machines"] }, ..., { name: "ATC", reads: ["num_machines", "atc_k"] }, ...]
+console.log(rules.filter((r) => r.reads.includes('atc_k')).map((r) => r.name)); // ["ATC"]
+```
+
+#### `available_rules() -> RuleInfo[]`
+
+Every rule `run_schedule` takes, once each (`"SRO"` is accepted as another spelling of
+`"S/RO"`), with the `config` settings it reads (`{ name, reads }`).
 
 #### `solve_jobshop(input) -> JobShopOutput`
 

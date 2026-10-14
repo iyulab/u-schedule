@@ -817,6 +817,67 @@ const RULES: [&str; 13] = [
     "PRIORITY",
 ];
 
+/// The settings a `run_schedule` request's `config` can carry besides `rule`.
+/// Which of them a rule reads is [`rule_reads`].
+const RULE_SETTINGS: [&str; 2] = ["num_machines", "atc_k"];
+
+/// Whether `rule` reads `setting` (one of [`RULE_SETTINGS`]): the one table
+/// both the refusal of a setting the rule does not read and the published
+/// catalog ([`available_rules`]) come from. `num_machines` is read by every
+/// rule, `atc_k` by `ATC` only.
+fn rule_reads(rule: &str, setting: &str) -> bool {
+    match setting {
+        "num_machines" => true,
+        "atc_k" => rule == "ATC",
+        _ => false,
+    }
+}
+
+/// One dispatching rule and the `config` settings it reads; a request giving
+/// any other setting with this rule is refused (`invalid_option`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct RuleInfo {
+    /// The rule, as a request's `config.rule` names it.
+    #[tsify(
+        type = "\"SPT\" | \"LPT\" | \"EDD\" | \"FCFS\" | \"CR\" | \"WSPT\" | \"MST\" | \"S/RO\" | \"ATC\" | \"LWKR\" | \"MWKR\" | \"PRIORITY\""
+    )]
+    name: String,
+    /// The settings it reads, in [`RULE_SETTINGS`] order.
+    #[tsify(type = "(\"num_machines\" | \"atc_k\")[]")]
+    reads: Vec<String>,
+}
+
+/// Every rule, once each (`"SRO"` is another spelling of `"S/RO"`), with the
+/// settings it reads.
+fn rule_catalog() -> Vec<RuleInfo> {
+    RULES
+        .into_iter()
+        .filter(|r| *r != "SRO")
+        .map(|rule| RuleInfo {
+            name: rule.to_string(),
+            reads: RULE_SETTINGS
+                .into_iter()
+                .filter(|s| rule_reads(rule, s))
+                .map(String::from)
+                .collect(),
+        })
+        .collect()
+}
+
+/// Every dispatching rule `run_schedule` takes, with the `config` settings
+/// each reads: `[{ name: "SPT", reads: ["num_machines"] }, ..., { name: "ATC",
+/// reads: ["num_machines", "atc_k"] }, ...]`.
+///
+/// It is the table `run_schedule`'s refusal of a setting the rule does not
+/// read (`invalid_option`) comes from, so a form can show only the settings
+/// that change the chosen rule's run.
+#[wasm_bindgen(unchecked_return_type = "RuleInfo[]")]
+pub fn available_rules() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&rule_catalog())
+        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
+}
+
 /// Builds the rule engine `rule` names. A setting only some rules read
 /// (`atc_k`) is refused when the chosen rule does not read it -- it used to
 /// be ignored, so a caller tuning `k` under another rule saw no effect and
@@ -838,11 +899,16 @@ fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, WireE
         "PRIORITY" => engine.with_rule(rules::Priority),
         other => return Err(WireError::unknown_option("rule", other, &RULES)),
     };
-    if config.atc_k.is_some() && rule != "ATC" {
+    if config.atc_k.is_some() && !rule_reads(rule, "atc_k") {
+        let readers: Vec<&str> = RULES
+            .into_iter()
+            .filter(|r| *r != "SRO" && rule_reads(r, "atc_k"))
+            .collect();
         return Err(WireError::new(
             "invalid_option",
             format!(
-                "config.atc_k is read by ATC -- rule \"{rule}\" does not read it; leave it out"
+                "config.atc_k is read by {} -- rule \"{rule}\" does not read it; leave it out",
+                readers.join(", ")
             ),
             json!({ "parameter": "config.atc_k", "rule": rule }),
         ));
@@ -1648,6 +1714,39 @@ mod tests {
                     "code": "parameter_out_of_range",
                     "parameter": "config.num_machines", "min": 1.0, "max": null, "got": 0.0,
                 })
+            );
+        }
+    }
+
+    /// The catalog and the refusal are one table: every rule once, and
+    /// `atc_k` accepted exactly by the rules the catalog says read it.
+    #[test]
+    fn the_rule_catalog_is_what_run_schedule_accepts() {
+        let catalog = rule_catalog();
+        let mut names: Vec<&str> = catalog.iter().map(|r| r.name.as_str()).collect();
+        names.push("SRO");
+        names.sort_unstable();
+        let mut rules = RULES.to_vec();
+        rules.sort_unstable();
+        assert_eq!(names, rules, "every rule once, SRO as a spelling of S/RO");
+        let jobs = || vec![make_input_job("A", 2.0, Some(10.0), None, 1.0)];
+        for info in &catalog {
+            let mut config = ScheduleConfig::default_for(&info.name);
+            config.num_machines = 2;
+            config.atc_k = Some(3.0);
+            let run = schedule_jobs(&ScheduleInput {
+                jobs: jobs(),
+                config,
+            });
+            if info.reads.iter().any(|r| r == "atc_k") {
+                assert!(run.is_ok(), "{} refused atc_k it reads", info.name);
+            } else {
+                assert_eq!(run.expect_err(&info.name).code(), "invalid_option");
+            }
+            assert!(
+                info.reads.iter().any(|r| r == "num_machines"),
+                "{}",
+                info.name
             );
         }
     }

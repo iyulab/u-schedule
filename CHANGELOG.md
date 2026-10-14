@@ -8,6 +8,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- **WASM `available_rules()`**: every dispatching rule `run_schedule` takes, with
+  the `config` settings it reads (`[{ name: "ATC", reads: ["num_machines",
+  "atc_k"] }, ...]`, typed `RuleInfo[]`). It is made from the same table as the
+  refusal of a setting the rule does not read, so a form can show `atc_k` only
+  for the rules that read it without restating which.
+
 ### Changed
 
 - **Breaking:** removed `ConstraintViolation`, `ConstraintViolationType` and
