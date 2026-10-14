@@ -10,6 +10,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Added
 
+- `solve_jobshop` says why its search stopped: `stop_reason` —
+  `"iteration_limit"` when it ran its `max_generations`, `"no_improvement"`
+  when it stalled first, `"completed"` for a problem with no jobs (the
+  `StopReason` vocabulary of `u-metaheur`'s runners).
+
+### Added
+
 - `check_schedule` judges each assignment against its activity: an assignment
   under a model task must name one of that task's activities (`UnknownActivity`
   — also when an activity is assigned more times than its requirements take

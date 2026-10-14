@@ -42,7 +42,7 @@ use crate::models::{Activity, ActivityDuration, Resource, ResourceRequirement, T
 use crate::validation::{ValidationError, ValidationErrorKind};
 use crate::Problem;
 use u_metaheur::ga::{GaConfig, GaRunner};
-use u_metaheur::ConfigError;
+use u_metaheur::{ConfigError, StopReason};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -1263,6 +1263,13 @@ struct JobShopOutput {
     fitness: f64,
     generations: usize,
     fitness_history: Vec<f64>,
+    /// Why the search stopped: `"iteration_limit"` when it ran its
+    /// `max_generations`, `"no_improvement"` when it stalled first;
+    /// `"completed"` for a problem with no jobs.
+    #[tsify(
+        type = "\"completed\" | \"optimal\" | \"target_reached\" | \"iteration_limit\" | \"no_improvement\" | \"time_limit\" | \"cancelled\""
+    )]
+    stop_reason: StopReason,
 }
 
 // ── conversion helpers ──────────────────────────────────────────────────────
@@ -1487,6 +1494,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
             fitness: 0.0,
             generations: 0,
             fitness_history: vec![],
+            stop_reason: StopReason::Completed,
         };
         return Ok(output);
     }
@@ -1569,6 +1577,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
         fitness: result.best_fitness,
         generations: result.generations,
         fitness_history: result.fitness_history,
+        stop_reason: result.stop_reason,
     };
 
     Ok(output)
@@ -2295,6 +2304,47 @@ mod tests {
                 "got": 1.0,
             })
         );
+    }
+
+    /// The answer says why the search stopped -- the reason the runner
+    /// recorded, not one derived here.
+    #[test]
+    fn a_jobshop_answer_says_why_the_search_stopped() {
+        let input = |jobs: usize, max_generations: i128| JobShopInput {
+            jobs: (0..jobs)
+                .map(|j| JobShopJob {
+                    id: format!("J{j}"),
+                    operations: vec![
+                        JobShopOperation {
+                            machine: Some("M1".to_string()),
+                            machines: vec![],
+                            processing_time: 3.0,
+                        },
+                        JobShopOperation {
+                            machine: Some("M2".to_string()),
+                            machines: vec![],
+                            processing_time: 2.0,
+                        },
+                    ],
+                    due_date: None,
+                    release_time: None,
+                })
+                .collect(),
+            num_machines: Some(2),
+            ga_config: JobShopGaConfig {
+                population_size: 20,
+                max_generations,
+                mutation_rate: 0.1,
+                seed: Some(42),
+                tardiness_weight: 0.0,
+                crossover: "POX".to_string(),
+                mutation: "Swap".to_string(),
+            },
+        };
+        let stop = |jobs, gens| jobshop(&input(jobs, gens)).expect("solved").stop_reason;
+        assert_eq!(stop(2, 2), StopReason::IterationLimit);
+        assert_eq!(stop(2, 100_000), StopReason::NoImprovement);
+        assert_eq!(stop(0, 2), StopReason::Completed);
     }
 
     #[test]

@@ -274,9 +274,14 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
   "makespan": 5.0,
   "fitness": 5.0,
   "generations": 200,
-  "fitness_history": [10.0, 8.0, 5.0]
+  "fitness_history": [10.0, 8.0, 5.0],
+  "stop_reason": "iteration_limit"
 }
 ```
+
+`stop_reason` says why the search stopped: `"iteration_limit"` when it ran its
+`max_generations`, `"no_improvement"` when it stalled first (`"completed"` for a
+problem with no jobs).
 
 `operation` counts from 1 in the order the job's `operations` array lists them,
 not the order they run on the timeline.
