@@ -237,6 +237,14 @@ console.log(rules.filter((r) => r.reads.includes('atc_k')).map((r) => r.name)); 
 Every rule `run_schedule` takes, once each (`"SRO"` is accepted as another spelling of
 `"S/RO"`), with the `config` settings it reads (`{ name, reads }`).
 
+#### `codes() -> Codes`
+
+Every refusal `code` this package's functions throw, with the fields that can come
+with it, and every violation `code` `check_jobshop` reports:
+`{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }`. It is
+built from the tables the refusals and violations come from; the tables under
+[Errors](#errors) and `check_jobshop` list the same codes with their meaning.
+
 #### `solve_jobshop(input) -> JobShopOutput`
 
 GA-based job-shop scheduling with multi-machine routing and precedence constraints.
@@ -354,7 +362,9 @@ and a readable `message`; `makespan_mismatch` carries `reported` and `actual`.
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
 | `seed` | optional, a whole number from 0 to 2^64 − 1 | random |
 
-**Errors:** both functions are synchronous and throw an `Error` whose `message` is
+#### Errors
+
+Every function is synchronous and throws an `Error` whose `message` is
 readable text and which carries a `code` naming the reason, next to the values
 behind it — so a program can point at what to change without parsing the
 message:
@@ -383,6 +393,16 @@ try {
 | `invalid_option` | `parameter` (and `rule` for `config.atc_k`) | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population), or `config.atc_k` given with a `rule` other than `ATC` — `rule` names the chosen one; a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), a count or seed that is not a whole number (`config.num_machines: 2.5` — `parameter` is the field), or a JSON string |
+| `invalid_resource_reference` | `activity`, `resource` | A step that names a machine the problem does not have (not produced by today's inputs: the machines are the ones the operations name) |
+| `invalid_predecessor` | `activity`, `predecessor` | A step that waits on a step the problem does not have (not produced by today's inputs) |
+| `cyclic_dependency` | `activity` | Steps that wait on each other in a cycle (not produced by today's inputs: a job's steps run in their listed order) |
+| `invalid_calendar_period` | `parameter`, `resource`, `index`, `start`, `end` | A machine calendar period that ends before it starts (not produced by today's inputs: they carry no calendars) |
+| `internal` | — | A fault in this package rather than in the request — please report it |
+
+`codes()` returns this table and the `check_jobshop` violations below as data —
+`{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }` — built
+from the same tables the refusals and violations are, so a caller that translates
+codes can compare its list with the package's.
 
 When the problem check finds several things wrong (two jobs without operations, a
 duplicate id and a cycle, …), `code` and its fields are the first finding's, and

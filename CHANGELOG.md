@@ -16,6 +16,21 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   not carry. Rust: `tardiness_ms` and `Task::tardiness_ms`, the one definition
   of tardiness behind the KPIs, the GA fitness, the feasibility check and every
   reported value.
+- `codes()`: every refusal `code` the package throws (with the fields that can
+  come with it) and every `check_jobshop` violation `code`, as data —
+  `{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }` —
+  built from the tables the refusals and violations are built from, so a caller
+  that translates codes can check its list against the package's rather than
+  parse the README.
+
+### Fixed
+
+- The README's refusal table now lists every code the package throws:
+  `invalid_resource_reference`, `invalid_predecessor`, `cyclic_dependency`,
+  `invalid_calendar_period` and `internal` were missing. A test keeps the tables
+  and `codes()` equal.
+- A problem refused with no finding is `internal`, not the undocumented
+  `invalid_input` (no input reaches it).
 
 ## [0.18.0] - 2026-10-15
 

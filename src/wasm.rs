@@ -50,6 +50,109 @@ use u_metaheur::{ConfigError, StopReason};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+/// Every reason a function of this binding refuses with: the `code` an
+/// `Error` carries, and the fields that can stand beside it. A refusal is
+/// built from one of these ([`WireError::new`]), so [`codes`] -- the list a
+/// caller reads -- is the list the binding refuses from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Code {
+    MalformedInput,
+    UnknownOption,
+    ParameterOutOfRange,
+    InvalidOption,
+    ValueNotFinite,
+    EmptyInput,
+    DuplicateId,
+    MissingMachine,
+    NoMachines,
+    InvalidResourceReference,
+    CyclicDependency,
+    InvalidPredecessor,
+    InvalidCalendarPeriod,
+    Internal,
+}
+
+impl Code {
+    const ALL: [Code; 14] = [
+        Code::MalformedInput,
+        Code::UnknownOption,
+        Code::ParameterOutOfRange,
+        Code::InvalidOption,
+        Code::ValueNotFinite,
+        Code::EmptyInput,
+        Code::DuplicateId,
+        Code::MissingMachine,
+        Code::NoMachines,
+        Code::InvalidResourceReference,
+        Code::CyclicDependency,
+        Code::InvalidPredecessor,
+        Code::InvalidCalendarPeriod,
+        Code::Internal,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Code::MalformedInput => "malformed_input",
+            Code::UnknownOption => "unknown_option",
+            Code::ParameterOutOfRange => "parameter_out_of_range",
+            Code::InvalidOption => "invalid_option",
+            Code::ValueNotFinite => "value_not_finite",
+            Code::EmptyInput => "empty_input",
+            Code::DuplicateId => "duplicate_id",
+            Code::MissingMachine => "missing_machine",
+            Code::NoMachines => "no_machines",
+            Code::InvalidResourceReference => "invalid_resource_reference",
+            Code::CyclicDependency => "cyclic_dependency",
+            Code::InvalidPredecessor => "invalid_predecessor",
+            Code::InvalidCalendarPeriod => "invalid_calendar_period",
+            Code::Internal => "internal",
+        }
+    }
+
+    /// The fields a refusal with this code can carry besides `code`. A
+    /// refusal from the problem check also carries `errors`, every finding.
+    fn fields(self) -> &'static [&'static str] {
+        match self {
+            Code::MalformedInput | Code::ValueNotFinite => &["parameter", "index"],
+            Code::UnknownOption => &["parameter", "got", "expected"],
+            Code::ParameterOutOfRange => &[
+                "parameter",
+                "min",
+                "max",
+                "exclusive_min",
+                "exclusive_max",
+                "got",
+                "index",
+                "id",
+                "task",
+                "activity",
+                "resource",
+                "errors",
+            ],
+            Code::InvalidOption => &["parameter", "rule"],
+            Code::EmptyInput => &["parameter", "task", "errors"],
+            Code::DuplicateId => &["entity", "id", "first", "second", "errors"],
+            Code::MissingMachine => &["job", "operation"],
+            Code::NoMachines | Code::Internal => &[],
+            Code::InvalidResourceReference => &["activity", "resource", "errors"],
+            Code::CyclicDependency => &["activity", "errors"],
+            Code::InvalidPredecessor => &["activity", "predecessor", "errors"],
+            Code::InvalidCalendarPeriod => {
+                &["parameter", "resource", "index", "start", "end", "errors"]
+            }
+        }
+    }
+
+    /// The code the problem check names a finding with.
+    fn of(kind: &ValidationErrorKind) -> Self {
+        let name = kind.code();
+        Code::ALL
+            .into_iter()
+            .find(|c| c.name() == name)
+            .expect("every problem-check reason is a code of this binding")
+    }
+}
+
 /// A refusal on its way to JavaScript: the text for `Error.message`, and the
 /// fields -- `code` first among them -- copied onto the `Error`.
 #[derive(Debug)]
@@ -59,9 +162,17 @@ struct WireError {
 }
 
 impl WireError {
-    fn new(code: &str, message: String, mut extra: serde_json::Value) -> Self {
+    fn new(code: Code, message: String, mut extra: serde_json::Value) -> Self {
+        if let Some(extra) = extra.as_object() {
+            debug_assert!(
+                extra.keys().all(|k| code.fields().contains(&k.as_str())),
+                "{} refusal with undeclared fields: {:?}",
+                code.name(),
+                extra.keys().collect::<Vec<_>>()
+            );
+        }
         let mut fields = serde_json::Map::new();
-        fields.insert("code".into(), json!(code));
+        fields.insert("code".into(), json!(code.name()));
         if let Some(extra) = extra.as_object_mut() {
             fields.append(extra);
         }
@@ -75,7 +186,7 @@ impl WireError {
     /// instead of a value, a wrong type, a missing or unknown key.
     fn malformed_input(parameter: &str, message: String) -> Self {
         Self::new(
-            "malformed_input",
+            Code::MalformedInput,
             message,
             json!({ "parameter": parameter }),
         )
@@ -84,7 +195,7 @@ impl WireError {
     /// A string option that names none of the values the function knows.
     fn unknown_option(parameter: &str, got: &str, expected: &[&str]) -> Self {
         Self::new(
-            "unknown_option",
+            Code::UnknownOption,
             format!(
                 "Unknown {parameter} '{got}'. Supported: {}",
                 expected.join(", ")
@@ -100,7 +211,7 @@ impl WireError {
         let mut fields = json!({ "parameter": parameter, "got": got });
         bounds.insert_into(&mut fields);
         Self::new(
-            "parameter_out_of_range",
+            Code::ParameterOutOfRange,
             format!("{parameter} must be {}, got {got}", bounds.describe()),
             fields,
         )
@@ -206,9 +317,13 @@ fn ga_settings_refused(e: ConfigError) -> WireError {
                 exclusive_max,
             }
             .insert_into(&mut fields);
-            WireError::new("parameter_out_of_range", message, fields)
+            WireError::new(Code::ParameterOutOfRange, message, fields)
         }
-        _ => WireError::new("invalid_option", message, json!({ "parameter": parameter })),
+        _ => WireError::new(
+            Code::InvalidOption,
+            message,
+            json!({ "parameter": parameter }),
+        ),
     }
 }
 
@@ -320,7 +435,11 @@ impl From<Vec<ValidationError>> for WireError {
             .collect::<Vec<_>>()
             .join("; ");
         let Some(first) = errors.first() else {
-            return WireError::new("invalid_input", message, json!({}));
+            return WireError::new(
+                Code::Internal,
+                "internal: a problem refused with no finding".to_string(),
+                json!({}),
+            );
         };
         let findings: Vec<serde_json::Value> = errors
             .iter()
@@ -338,7 +457,7 @@ impl From<Vec<ValidationError>> for WireError {
         if let Some(object) = fields.as_object_mut() {
             object.insert("errors".into(), serde_json::Value::Array(findings));
         }
-        WireError::new(first.kind.code(), message, fields)
+        WireError::new(Code::of(&first.kind), message, fields)
     }
 }
 
@@ -512,7 +631,7 @@ fn from_js<T: serde::de::DeserializeOwned>(value: JsValue, param: &str) -> Resul
     }
     if let Some(found) = find_non_finite(&value, param, false) {
         return Err(js_err(WireError::new(
-            "value_not_finite",
+            Code::ValueNotFinite,
             found.message(),
             found.fields(),
         )));
@@ -757,7 +876,7 @@ fn refuse_repeated_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(),
     for (position, id) in ids.into_iter().enumerate() {
         if let Some(first) = first_at.insert(id, position) {
             return Err(WireError::new(
-                "duplicate_id",
+                Code::DuplicateId,
                 format!(
                     "job {id:?}: the id is given twice, at positions {first} and {position} \
                      of jobs (counting from 0); the schedule names jobs by id, so every \
@@ -802,7 +921,7 @@ fn refuse_job_values(jobs: &[InputJob]) -> Result<(), WireError> {
         });
         bounds.insert_into(&mut fields);
         return Err(WireError::new(
-            "parameter_out_of_range",
+            Code::ParameterOutOfRange,
             format!(
                 "job {:?} (position {index} of jobs, counting from 0): {parameter} must be {rule}, got {got}",
                 job.id
@@ -882,6 +1001,76 @@ pub fn available_rules() -> Result<JsValue, JsValue> {
         .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
 }
 
+// ── vocabularies ────────────────────────────────────────────────────────────
+
+/// A refusal reason: the `code` an `Error` carries and the fields that can
+/// stand beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct RefusalCode {
+    code: String,
+    fields: Vec<String>,
+}
+
+/// A violation a checker reports: its `code`, the fields beside it, and the
+/// function that reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct ViolationCode {
+    code: String,
+    fields: Vec<String>,
+    #[tsify(type = "\"check_jobshop\"")]
+    checker: String,
+}
+
+/// What this package can answer with besides a result: every refusal `code`
+/// and every checker violation `code`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct Codes {
+    refusals: Vec<RefusalCode>,
+    violations: Vec<ViolationCode>,
+}
+
+/// The vocabularies, from the tables the refusals and violations are built
+/// from: [`Code`] and [`JobShopViolation::examples`].
+fn code_catalog() -> Codes {
+    let names = |fields: &[&str]| fields.iter().map(|f| f.to_string()).collect();
+    Codes {
+        refusals: Code::ALL
+            .into_iter()
+            .map(|c| RefusalCode {
+                code: c.name().to_string(),
+                fields: names(c.fields()),
+            })
+            .collect(),
+        violations: JobShopViolation::examples()
+            .iter()
+            .map(|v| {
+                let value = serde_json::to_value(v).expect("a violation serializes");
+                let object = value.as_object().expect("a violation is an object");
+                ViolationCode {
+                    code: object["code"].as_str().expect("tagged").to_string(),
+                    fields: object.keys().filter(|k| *k != "code").cloned().collect(),
+                    checker: "check_jobshop".to_string(),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Every refusal `code` the functions of this package throw, with the fields
+/// that can come with it, and every violation `code` `check_jobshop` reports:
+/// `{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }`.
+///
+/// It is built from the tables the refusals and violations come from, so a
+/// caller that translates codes can check its list against the package's.
+#[wasm_bindgen(unchecked_return_type = "Codes")]
+pub fn codes() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&code_catalog())
+        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
+}
+
 /// Builds the rule engine `rule` names. A setting only some rules read
 /// (`atc_k`) is refused when the chosen rule does not read it -- it used to
 /// be ignored, so a caller tuning `k` under another rule saw no effect and
@@ -909,7 +1098,7 @@ fn build_engine(rule: &str, config: &ScheduleConfig) -> Result<RuleEngine, WireE
             .filter(|r| *r != "SRO" && rule_reads(r, "atc_k"))
             .collect();
         return Err(WireError::new(
-            "invalid_option",
+            Code::InvalidOption,
             format!(
                 "config.atc_k is read by {} -- rule \"{rule}\" does not read it; leave it out",
                 readers.join(", ")
@@ -1378,7 +1567,7 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
         // A negative count is below the minimum like any other: one check.
         if n < named as i128 {
             return Err(WireError::new(
-                "parameter_out_of_range",
+                Code::ParameterOutOfRange,
                 format!(
                     "num_machines must be at least the {named} machine(s) the operations name, got {n}"
                 ),
@@ -1398,7 +1587,7 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
 
     if machine_ids.is_empty() {
         return Err(WireError::new(
-            "no_machines",
+            Code::NoMachines,
             "No machines specified in operations".to_string(),
             json!({}),
         ));
@@ -1420,7 +1609,7 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
             let candidates = op.candidates();
             if candidates.is_empty() {
                 return Err(WireError::new(
-                    "missing_machine",
+                    Code::MissingMachine,
                     format!("Job '{}' operation {} has no machine specified", job.id, i),
                     json!({ "job": job.id, "operation": i }),
                 ));
@@ -1563,7 +1752,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
             // every row silently read "operation 1".
             let operation = a.sequence.ok_or_else(|| {
                 WireError::new(
-                    "internal",
+                    Code::Internal,
                     format!(
                         "internal: assignment for job '{}' on '{}' carries no operation number",
                         a.task_id, a.resource_id
@@ -1594,7 +1783,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
                 .task_completion_time(&task.id)
                 .ok_or_else(|| {
                     WireError::new(
-                        "internal",
+                        Code::Internal,
                         format!("internal: job '{}' has no step in the schedule", task.id),
                         json!({}),
                     )
@@ -1689,6 +1878,57 @@ enum JobShopViolation {
 }
 
 impl JobShopViolation {
+    /// One of each violation, for the published vocabulary ([`codes`]): its
+    /// code and fields are read off these, so they are the structs'.
+    fn examples() -> Vec<Self> {
+        let at = || (String::new(), String::new());
+        let ((e0, m0), (e1, m1), (e2, m2)) = (at(), at(), at());
+        let ((e3, m3), (e4, m4), (e5, m5)) = (at(), at(), at());
+        let ((e6, m6), (e7, m7), (e8, m8)) = (at(), at(), at());
+        vec![
+            Self::UnknownActivity {
+                entity: e0,
+                message: m0,
+            },
+            Self::RequirementUnfilled {
+                entity: e1,
+                message: m1,
+            },
+            Self::CapacityExceeded {
+                entity: e2,
+                message: m2,
+            },
+            Self::PrecedenceViolation {
+                entity: e3,
+                message: m3,
+            },
+            Self::DurationTooShort {
+                entity: e4,
+                message: m4,
+            },
+            Self::EarlyStart {
+                entity: e5,
+                message: m5,
+            },
+            Self::DeadlineMiss {
+                entity: e6,
+                message: m6,
+            },
+            Self::ResourceUnavailable {
+                entity: e7,
+                message: m7,
+            },
+            Self::TimeWindowViolation {
+                entity: e8,
+                message: m8,
+            },
+            Self::MakespanMismatch {
+                reported: 0.0,
+                actual: 0.0,
+            },
+        ]
+    }
+
     /// The wire violation for the library's own: job-shop problems have no
     /// skills, synchronized steps or custom checks, so those do not arise.
     fn of(v: Violation) -> Self {
@@ -1815,6 +2055,124 @@ fn check_jobshop_input(input: &JobShopCheckInput) -> Result<JobShopCheckOutput, 
 #[allow(clippy::useless_vec)]
 mod tests {
     use super::*;
+
+    /// The published vocabulary is what the binding answers with: every
+    /// violation has an example (a new variant fails to compile here until it
+    /// has one), and the fields listed are the ones it serializes.
+    #[test]
+    fn the_code_catalog_covers_every_violation() {
+        let examples = JobShopViolation::examples();
+        let mut seen = [false; 10];
+        for v in &examples {
+            let i = match v {
+                JobShopViolation::UnknownActivity { .. } => 0,
+                JobShopViolation::RequirementUnfilled { .. } => 1,
+                JobShopViolation::CapacityExceeded { .. } => 2,
+                JobShopViolation::PrecedenceViolation { .. } => 3,
+                JobShopViolation::DurationTooShort { .. } => 4,
+                JobShopViolation::EarlyStart { .. } => 5,
+                JobShopViolation::DeadlineMiss { .. } => 6,
+                JobShopViolation::ResourceUnavailable { .. } => 7,
+                JobShopViolation::TimeWindowViolation { .. } => 8,
+                JobShopViolation::MakespanMismatch { .. } => 9,
+            };
+            assert!(!seen[i], "two examples of {v:?}");
+            seen[i] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "a violation without an example");
+
+        let catalog = code_catalog();
+        // The one violation about the report rather than an entity; serde_json
+        // orders an object's keys by name.
+        let tag = serde_json::to_value(JobShopViolation::MakespanMismatch {
+            reported: 0.0,
+            actual: 0.0,
+        })
+        .expect("serializes")["code"]
+            .clone();
+        let mismatch = catalog
+            .violations
+            .iter()
+            .find(|v| tag == v.code.as_str())
+            .expect("listed");
+        assert_eq!(mismatch.fields, ["actual", "reported"]);
+        let late = catalog
+            .violations
+            .iter()
+            .find(|v| v.code == "deadline_miss")
+            .expect("listed");
+        assert_eq!(late.fields, ["entity", "message"]);
+        assert!(catalog
+            .violations
+            .iter()
+            .all(|v| v.checker == "check_jobshop"));
+        let refusals: Vec<&str> = catalog.refusals.iter().map(|r| r.code.as_str()).collect();
+        assert_eq!(refusals.len(), Code::ALL.len());
+        assert!(refusals.contains(&"parameter_out_of_range"));
+    }
+
+    /// Every reason the problem check names is a code of this binding.
+    #[test]
+    fn every_problem_check_reason_is_a_listed_code() {
+        use crate::validation::Entity;
+        let kinds = [
+            ValidationErrorKind::DuplicateId {
+                entity: Entity::Task,
+                id: String::new(),
+            },
+            ValidationErrorKind::EmptyTask {
+                task: String::new(),
+            },
+            ValidationErrorKind::CyclicDependency {
+                activity: String::new(),
+            },
+            ValidationErrorKind::InvalidResourceReference {
+                activity: String::new(),
+                resource: String::new(),
+            },
+            ValidationErrorKind::InvalidPredecessor {
+                activity: String::new(),
+                predecessor: String::new(),
+            },
+            ValidationErrorKind::TardinessWeightOutOfRange { weight: 2.0 },
+        ];
+        for kind in &kinds {
+            assert_eq!(Code::of(kind).name(), kind.code());
+        }
+    }
+
+    /// The README's code tables list exactly the published vocabulary, so the
+    /// tables and `codes()` cannot drift apart.
+    #[test]
+    fn the_readme_documents_every_code_and_no_other() {
+        let readme = include_str!("../README.md");
+        let mut documented = std::collections::BTreeSet::new();
+        let mut in_table = false;
+        for line in readme.lines() {
+            if line.starts_with("| `code` |") {
+                in_table = true;
+                continue;
+            }
+            if !line.starts_with('|') {
+                in_table = false;
+                continue;
+            }
+            if in_table && !line.starts_with("|---") {
+                let first = line.split('|').nth(1).expect("a cell");
+                for code in first.split('·') {
+                    documented.insert(code.trim().trim_matches('`').to_string());
+                }
+            }
+        }
+        let catalog = code_catalog();
+        let published: std::collections::BTreeSet<String> = catalog
+            .refusals
+            .iter()
+            .map(|r| r.code.clone())
+            .chain(catalog.violations.iter().map(|v| v.code.clone()))
+            .collect();
+        assert_eq!(documented, published);
+    }
 
     fn make_input_job(
         id: &str,
