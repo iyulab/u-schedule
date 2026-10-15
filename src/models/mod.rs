@@ -26,5 +26,5 @@ pub use calendar::{Calendar, TimeWindow};
 pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::Resource;
 pub use schedule::{Assignment, Schedule, Violation, ViolationType};
-pub use task::Task;
+pub use task::{tardiness_ms, Task};
 pub use time_constraints::{DurationDistribution, PertEstimate};

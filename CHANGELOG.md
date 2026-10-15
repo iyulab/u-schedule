@@ -8,6 +8,15 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `solve_jobshop` reports how late each job is: `jobs` (`{ id, completion,
+  tardiness }` in request order) and `total_tardiness`, in seconds — the
+  tardiness the search weighs through `tardiness_weight`, which the answer did
+  not carry. Rust: `tardiness_ms` and `Task::tardiness_ms`, the one definition
+  of tardiness behind the KPIs, the GA fitness, the feasibility check and every
+  reported value.
+
 ## [0.18.0] - 2026-10-15
 
 ### Added

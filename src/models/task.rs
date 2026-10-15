@@ -46,6 +46,14 @@ pub struct Task {
     pub attributes: HashMap<String, String>,
 }
 
+/// Tardiness: how far past its deadline a task completes, `max(0, C − d)` --
+/// 0 when it completes on time or has no deadline (Pinedo 2016, §1.2). The
+/// one definition behind the KPIs, the GA's fitness and every reported
+/// tardiness.
+pub fn tardiness_ms(completion_ms: i64, deadline_ms: Option<i64>) -> i64 {
+    deadline_ms.map_or(0, |deadline| (completion_ms - deadline).max(0))
+}
+
 impl Task {
     /// Creates a new task with the given ID.
     pub fn new(id: impl Into<String>) -> Self {
@@ -108,6 +116,12 @@ impl Task {
     pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.attributes.insert(key.into(), value.into());
         self
+    }
+
+    /// How late this task is when it completes at `completion_ms`: see
+    /// [`tardiness_ms`].
+    pub fn tardiness_ms(&self, completion_ms: i64) -> i64 {
+        tardiness_ms(completion_ms, self.deadline)
     }
 
     /// Total processing duration across all activities (ms).

@@ -351,7 +351,7 @@ fn check_deadlines(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<
         if let (Some(deadline), Some(completion)) =
             (task.deadline, schedule.task_completion_time(&task.id))
         {
-            if completion > deadline {
+            if task.tardiness_ms(completion) > 0 {
                 out.push(Violation::deadline_miss(
                     &task.id,
                     format!(

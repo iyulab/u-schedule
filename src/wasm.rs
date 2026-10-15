@@ -955,11 +955,7 @@ fn simulate_single(tasks: &[Task], engine: &RuleEngine) -> Vec<OutputJob> {
         let duration_ms = task.total_duration_ms();
         let end_ms = start_ms + duration_ms;
 
-        let tardiness_ms = if let Some(deadline) = task.deadline {
-            (end_ms - deadline).max(0)
-        } else {
-            0
-        };
+        let tardiness_ms = task.tardiness_ms(end_ms);
 
         result.push(OutputJob {
             id: task.id.clone(),
@@ -1006,11 +1002,7 @@ fn simulate_parallel(tasks: &[Task], engine: &RuleEngine, num_machines: usize) -
         let start_ms = earliest.max(release_ms);
         let end_ms = start_ms + duration_ms;
 
-        let tardiness_ms = if let Some(deadline) = task.deadline {
-            (end_ms - deadline).max(0)
-        } else {
-            0
-        };
+        let tardiness_ms = task.tardiness_ms(end_ms);
 
         result.push(OutputJob {
             id: task.id.clone(),
@@ -1260,10 +1252,25 @@ struct JobShopAssignment {
     end: f64,
 }
 
+/// How a job ends: when its last step finishes and how late that is.
+#[derive(Debug, Serialize, tsify::Tsify)]
+struct JobShopJobResult {
+    id: String,
+    /// When the job's last step ends (seconds).
+    completion: f64,
+    /// `max(0, completion − due_date)` in seconds; 0 without a `due_date`.
+    tardiness: f64,
+}
+
 #[derive(Debug, Serialize, tsify::Tsify)]
 struct JobShopOutput {
     schedule: Vec<JobShopAssignment>,
+    /// Every job, in the order the request lists them -- the tardiness the
+    /// search weighed (`ga_config.tardiness_weight`), per job.
+    jobs: Vec<JobShopJobResult>,
     makespan: f64,
+    /// The sum of `jobs[].tardiness`.
+    total_tardiness: f64,
     fitness: f64,
     generations: usize,
     fitness_history: Vec<f64>,
@@ -1494,7 +1501,9 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     if input.jobs.is_empty() {
         let output = JobShopOutput {
             schedule: vec![],
+            jobs: vec![],
             makespan: 0.0,
+            total_tardiness: 0.0,
             fitness: 0.0,
             generations: 0,
             fitness_history: vec![],
@@ -1575,9 +1584,36 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
 
     let makespan = ms_to_sec(best_schedule.makespan_ms());
 
+    // Completion and tardiness by the definition the fitness weighed.
+    let mut total_tardiness_ms = 0;
+    let jobs = problem
+        .tasks()
+        .iter()
+        .map(|task| {
+            let completion_ms = best_schedule
+                .task_completion_time(&task.id)
+                .ok_or_else(|| {
+                    WireError::new(
+                        "internal",
+                        format!("internal: job '{}' has no step in the schedule", task.id),
+                        json!({}),
+                    )
+                })?;
+            let tardiness_ms = task.tardiness_ms(completion_ms);
+            total_tardiness_ms += tardiness_ms;
+            Ok(JobShopJobResult {
+                id: task.id.clone(),
+                completion: ms_to_sec(completion_ms),
+                tardiness: ms_to_sec(tardiness_ms),
+            })
+        })
+        .collect::<Result<_, WireError>>()?;
+
     let output = JobShopOutput {
         schedule,
+        jobs,
         makespan,
+        total_tardiness: ms_to_sec(total_tardiness_ms),
         fitness: result.best_fitness,
         generations: result.generations,
         fitness_history: result.fitness_history,
@@ -2825,6 +2861,62 @@ mod tests {
         assert!(schedule.makespan_ms() > 0);
         assert_eq!(schedule.assignments.len(), 4); // 2 jobs * 2 ops
         assert!(result.best_fitness.is_finite());
+    }
+
+    /// The answer says how late each job is, by the definition the search
+    /// weighed: with `tardiness_weight` 1 the fitness is the total tardiness.
+    #[test]
+    fn a_jobshop_answer_reports_each_jobs_completion_and_tardiness() {
+        let op = |m: &str, pt: f64| JobShopOperation {
+            machine: Some(m.to_string()),
+            machines: vec![],
+            processing_time: pt,
+        };
+        let job = |id: &str, ops: Vec<JobShopOperation>, due: Option<f64>| JobShopJob {
+            id: id.to_string(),
+            operations: ops,
+            due_date: due,
+            release_time: None,
+        };
+        let input = JobShopInput {
+            jobs: vec![
+                job("J1", vec![op("M1", 3.0), op("M2", 2.0)], Some(2.0)),
+                job("J2", vec![op("M2", 4.0), op("M1", 1.0)], None),
+                job("J3", vec![op("M1", 2.0)], Some(100.0)),
+            ],
+            num_machines: Some(2),
+            ga_config: JobShopGaConfig {
+                population_size: 20,
+                max_generations: 20,
+                seed: Some(7),
+                tardiness_weight: 1.0,
+                ..JobShopGaConfig::default()
+            },
+        };
+        let out = jobshop(&input).expect("solved");
+
+        let ids: Vec<&str> = out.jobs.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, ["J1", "J2", "J3"], "request order");
+        for (j, due) in out.jobs.iter().zip([Some(2.0), None, Some(100.0)]) {
+            let last_end = out
+                .schedule
+                .iter()
+                .filter(|a| a.job_id == j.id)
+                .map(|a| a.end)
+                .fold(f64::MIN, f64::max);
+            assert_eq!(j.completion, last_end, "{}", j.id);
+            let expected = due.map_or(0.0, |d: f64| (last_end - d).max(0.0));
+            assert_eq!(j.tardiness, expected, "{}", j.id);
+        }
+        // J1's two steps take 5 s against a due date of 2 s.
+        assert!(out.jobs[0].tardiness >= 3.0);
+        let total: f64 = out.jobs.iter().map(|j| j.tardiness).sum();
+        assert_eq!(out.total_tardiness, total);
+        assert_eq!(
+            out.fitness,
+            out.total_tardiness * 1000.0,
+            "fitness is in ms"
+        );
     }
 
     #[test]

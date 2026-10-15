@@ -13,7 +13,9 @@ use u_metaheur::ga::GaProblem;
 
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
-use crate::models::{ActivityDuration, Assignment, Resource, Schedule, TransitionMatrixCollection};
+use crate::models::{
+    tardiness_ms, ActivityDuration, Assignment, Resource, Schedule, TransitionMatrixCollection,
+};
 use crate::Problem;
 
 /// Compact activity descriptor for GA encoding.
@@ -287,7 +289,7 @@ impl SchedulingGaProblem {
             .iter()
             .map(|(task_id, &deadline)| {
                 let completion = schedule.task_completion_time(task_id).unwrap_or(0);
-                (completion - deadline).max(0) as f64
+                tardiness_ms(completion, Some(deadline)) as f64
             })
             .sum();
 

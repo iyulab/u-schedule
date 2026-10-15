@@ -271,7 +271,9 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
     { "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 3.0 },
     { "job_id": "J1", "operation": 2, "machine": "M2", "start": 3.0, "end": 5.0 }
   ],
+  "jobs": [{ "id": "J1", "completion": 5.0, "tardiness": 0.0 }],
   "makespan": 5.0,
+  "total_tardiness": 0.0,
   "fitness": 5.0,
   "generations": 200,
   "fitness_history": [10.0, 8.0, 5.0],
@@ -285,6 +287,11 @@ problem with no jobs).
 
 `operation` counts from 1 in the order the job's `operations` array lists them,
 not the order they run on the timeline.
+
+`jobs` lists every job in request order with its `completion` (when its last step
+ends) and `tardiness` (`max(0, completion − due_date)`, 0 without a `due_date`);
+`total_tardiness` is their sum. It is the tardiness the search weighs against
+the makespan (`tardiness_weight`), and the same measure as `run_schedule`'s.
 
 Crossover types: `"POX"` | `"LOX"` | `"JOX"`. Mutation types: `"Swap"` | `"Insert"` | `"Invert"`.
 

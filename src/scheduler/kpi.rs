@@ -64,17 +64,12 @@ impl ScheduleKpi {
                 let release = task.release_time.unwrap_or(0);
                 total_flow_time += (completion - release) as f64;
 
-                // Tardiness
-                if let Some(deadline) = task.deadline {
-                    if completion > deadline {
-                        let tardiness = completion - deadline;
-                        total_tardiness += tardiness;
-                        max_tardiness = max_tardiness.max(tardiness);
-                    } else {
-                        on_time_count += 1;
-                    }
+                // Tardiness; a task without a deadline is on time.
+                let tardiness = task.tardiness_ms(completion);
+                if tardiness > 0 {
+                    total_tardiness += tardiness;
+                    max_tardiness = max_tardiness.max(tardiness);
                 } else {
-                    // No deadline → considered on-time
                     on_time_count += 1;
                 }
             }
