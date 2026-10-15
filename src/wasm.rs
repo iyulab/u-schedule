@@ -182,6 +182,11 @@ impl WireError {
         }
     }
 
+    /// The package failed, not the input: a result it could not hand back.
+    fn internal(message: String) -> Self {
+        Self::new(Code::Internal, message, json!({}))
+    }
+
     /// An argument that is not the shape the function takes: a JSON string
     /// instead of a value, a wrong type, a missing or unknown key.
     fn malformed_input(parameter: &str, message: String) -> Self {
@@ -533,8 +538,7 @@ fn js_err(error: impl Into<WireError>) -> JsValue {
 
 /// Serializes a response; a failure is reported rather than unwrapped.
 fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(value)
-        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
+    serde_wasm_bindgen::to_value(value).map_err(|e| js_err(WireError::internal(e.to_string())))
 }
 
 /// A NaN or ±Infinity found in a JS argument, and where it sits.
@@ -998,7 +1002,7 @@ fn rule_catalog() -> Vec<RuleInfo> {
 #[wasm_bindgen(unchecked_return_type = "RuleInfo[]")]
 pub fn available_rules() -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&rule_catalog())
-        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
+        .map_err(|e| js_err(WireError::internal(e.to_string())))
 }
 
 // ── vocabularies ────────────────────────────────────────────────────────────
@@ -1068,7 +1072,7 @@ fn code_catalog() -> Codes {
 #[wasm_bindgen(unchecked_return_type = "Codes")]
 pub fn codes() -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&code_catalog())
-        .map_err(|e| js_err(WireError::malformed_input("result", e.to_string())))
+        .map_err(|e| js_err(WireError::internal(e.to_string())))
 }
 
 /// Builds the rule engine `rule` names. A setting only some rules read

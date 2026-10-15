@@ -8,6 +8,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Fixed
+
+- A result the package fails to hand back to JavaScript is refused as
+  `internal`, not as `malformed_input` with `parameter: "result"` — the fault
+  is the package's, not the caller's input.
+
 ## [0.19.0] - 2026-10-16
 
 ### Added
