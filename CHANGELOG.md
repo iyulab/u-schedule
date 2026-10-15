@@ -8,6 +8,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-16
+
 ### Added
 
 - `solve_jobshop` reports how late each job is: `jobs` (`{ id, completion,
