@@ -1013,14 +1013,14 @@ struct RefusalCode {
 }
 
 /// A violation a checker reports: its `code`, the fields beside it, and the
-/// function that reports it.
+/// functions that report it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
 #[serde(deny_unknown_fields)]
 struct ViolationCode {
     code: String,
     fields: Vec<String>,
-    #[tsify(type = "\"check_jobshop\"")]
-    checker: String,
+    #[tsify(type = "\"check_jobshop\"[]")]
+    checkers: Vec<String>,
 }
 
 /// What this package can answer with besides a result: every refusal `code`
@@ -1052,7 +1052,7 @@ fn code_catalog() -> Codes {
                 ViolationCode {
                     code: object["code"].as_str().expect("tagged").to_string(),
                     fields: object.keys().filter(|k| *k != "code").cloned().collect(),
-                    checker: "check_jobshop".to_string(),
+                    checkers: vec!["check_jobshop".to_string()],
                 }
             })
             .collect(),
@@ -1061,7 +1061,7 @@ fn code_catalog() -> Codes {
 
 /// Every refusal `code` the functions of this package throw, with the fields
 /// that can come with it, and every violation `code` `check_jobshop` reports:
-/// `{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }`.
+/// `{ refusals: [{ code, fields }], violations: [{ code, fields, checkers }] }`.
 ///
 /// It is built from the tables the refusals and violations come from, so a
 /// caller that translates codes can check its list against the package's.
@@ -2105,7 +2105,7 @@ mod tests {
         assert!(catalog
             .violations
             .iter()
-            .all(|v| v.checker == "check_jobshop"));
+            .all(|v| v.checkers == ["check_jobshop"]));
         let refusals: Vec<&str> = catalog.refusals.iter().map(|r| r.code.as_str()).collect();
         assert_eq!(refusals.len(), Code::ALL.len());
         assert!(refusals.contains(&"parameter_out_of_range"));

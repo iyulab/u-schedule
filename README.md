@@ -241,7 +241,7 @@ Every rule `run_schedule` takes, once each (`"SRO"` is accepted as another spell
 
 Every refusal `code` this package's functions throw, with the fields that can come
 with it, and every violation `code` `check_jobshop` reports:
-`{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }`. It is
+`{ refusals: [{ code, fields }], violations: [{ code, fields, checkers }] }`. It is
 built from the tables the refusals and violations come from; the tables under
 [Errors](#errors) and `check_jobshop` list the same codes with their meaning.
 
@@ -400,7 +400,7 @@ try {
 | `internal` | — | A fault in this package rather than in the request — please report it |
 
 `codes()` returns this table and the `check_jobshop` violations below as data —
-`{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }` — built
+`{ refusals: [{ code, fields }], violations: [{ code, fields, checkers }] }` — built
 from the same tables the refusals and violations are, so a caller that translates
 codes can compare its list with the package's.
 

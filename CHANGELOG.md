@@ -18,7 +18,7 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   reported value.
 - `codes()`: every refusal `code` the package throws (with the fields that can
   come with it) and every `check_jobshop` violation `code`, as data —
-  `{ refusals: [{ code, fields }], violations: [{ code, fields, checker }] }` —
+  `{ refusals: [{ code, fields }], violations: [{ code, fields, checkers }] }` —
   built from the tables the refusals and violations are built from, so a caller
   that translates codes can check its list against the package's rather than
   parse the README.
