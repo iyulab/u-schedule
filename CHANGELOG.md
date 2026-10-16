@@ -8,6 +8,22 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Fixed
+
+- The GA (`SchedulingGaProblem`, and so `solve_jobshop`) starts from the
+  dispatching rules' schedules — MWKR, SPT, LPT, FIFO, LWKR, and EDD and ATC
+  when a task has a deadline — beside random chromosomes. From random ones
+  alone it ended worse than a single dispatching rule: on Taillard
+  `ta01`–`ta40` (population 50, 200 generations) its mean makespan gap was
+  33.0 % against MWKR's 21.9 %; seeded it is 19.5 %, at least as good as MWKR
+  on every instance. Rust: `SchedulingGaProblem::chromosome_of` writes a
+  schedule as a chromosome that decodes no longer.
+
+### Added
+
+- `examples/taillard.rs` measures the GA too (`GA`, or `GA@<ms>` for a time
+  limit).
+
 ## [0.21.0] - 2026-10-16
 
 Depends on u-numflow 0.14.

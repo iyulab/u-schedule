@@ -73,9 +73,13 @@ makespan gap to the optimum or best known upper bound, mean over instances
 | LPUL | 42.0 % |
 | LPT | 44.2 % |
 | LWKR | 47.9 % |
+| GA (population 50, 200 generations, seed 1) | 19.5 % |
 
-Dispatching rules are fast constructive heuristics (milliseconds here); the GA
-(`solve_jobshop`) searches for better schedules.
+The rules take milliseconds; the GA about 4.6 s per instance here. Its first
+population holds the rules' schedules (MWKR, SPT, LPT, FIFO, LWKR, and EDD and
+ATC when tasks have deadlines) beside random ones, and it keeps its best, so it
+never ends worse than the best rule — on all 40 instances it was at least as
+good as MWKR.
 
 ## GA Encoding
 
@@ -160,7 +164,7 @@ assert_eq!(placed.resource_id, "M2");
 cargo build
 cargo test
 # Taillard measurement (instances downloaded separately — see the file header)
-cargo run --release --example taillard -- <dir> [bks.csv]
+cargo run --release --example taillard -- <dir> [bks.csv] [SPT,MWKR,...,GA]
 ```
 
 ## Academic References

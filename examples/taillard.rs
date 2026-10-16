@@ -13,12 +13,17 @@
 //!
 //! `bks.csv` (optional) has lines `instance,makespan` -- the optimum or best
 //! known upper bound; the gap column is against it. `rules` is a comma list of
-//! `SPT,LPT,LWKR,MWKR,FIFO,WINQ,LPUL` (default all).
+//! `SPT,LPT,LWKR,MWKR,FIFO,WINQ,LPUL` (default all) and `GA` -- the genetic
+//! algorithm (`SchedulingGaProblem` with `GaRunner`: makespan only, population
+//! 50, 200 generations, seed 1). `GA@<ms>` gives it a time limit instead of the
+//! generation budget, e.g. `GA@10000`.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
+use u_metaheur::ga::{GaConfig, GaRunner};
 use u_schedule::dispatching::{rules, RuleEngine};
+use u_schedule::ga::SchedulingGaProblem;
 use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
 use u_schedule::scheduler::SimpleScheduler;
 use u_schedule::Problem;
@@ -71,6 +76,25 @@ fn read(path: &std::path::Path) -> Problem {
     Problem::new(tasks, resources).expect("a valid instance")
 }
 
+/// The GA on makespan alone (no due dates here), population 50, seed 1;
+/// 200 generations, or as many as fit in `time_limit_ms`.
+fn genetic(problem: &Problem, time_limit_ms: Option<u64>) -> u_schedule::models::Schedule {
+    let ga = SchedulingGaProblem::new(problem)
+        .with_tardiness_weight(0.0)
+        .expect("a weight in [0, 1]");
+    let mut config = GaConfig::default()
+        .with_population_size(50)
+        .with_max_generations(200)
+        .with_seed(1);
+    if let Some(ms) = time_limit_ms {
+        config = config
+            .with_max_generations(usize::MAX)
+            .with_time_limit_ms(ms);
+    }
+    let result = GaRunner::run(&ga, &config).expect("valid GA settings");
+    ga.decode(&result.best)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::path::Path::new(
@@ -118,9 +142,17 @@ fn main() {
         let size = format!("{}x{}", problem.tasks().len(), problem.resources().len());
         for rule in &chosen {
             let started = Instant::now();
-            let schedule = SimpleScheduler::new()
-                .with_rule_engine(engine(rule))
-                .schedule(&problem, 0);
+            let schedule = match rule.strip_prefix("GA") {
+                Some(limit) => genetic(
+                    &problem,
+                    limit
+                        .strip_prefix('@')
+                        .map(|ms| ms.parse().expect("GA@<milliseconds>")),
+                ),
+                None => SimpleScheduler::new()
+                    .with_rule_engine(engine(rule))
+                    .schedule(&problem, 0),
+            };
             let ms = started.elapsed().as_millis();
             let makespan = schedule.makespan_ms() as f64;
             let reference = best.get(name).copied();

@@ -114,6 +114,8 @@ pub struct SchedulingGaProblem {
     ///
     /// Built once at construction, enables O(1) activity lookup during decode.
     activity_index: HashMap<(String, i32), usize>,
+    /// The problem itself, which the dispatching seeds are scheduled on.
+    problem: Problem,
 }
 
 impl SchedulingGaProblem {
@@ -153,7 +155,81 @@ impl SchedulingGaProblem {
             process_times: HashMap::new(),
             operators: GeneticOperators::default(),
             activity_index,
+            problem: problem.clone(),
         }
+    }
+
+    /// `schedule` as a chromosome: the activities in order of start (ties by
+    /// sequence), each on the resource it was given. Decoding it yields a
+    /// schedule no longer than `schedule` -- the decoder starts every activity
+    /// as early as its resource and its predecessor allow, in this order.
+    /// Activities the schedule leaves out go last, in sequence order, on their
+    /// first candidate.
+    pub fn chromosome_of(&self, schedule: &Schedule) -> ScheduleChromosome {
+        let placed: HashMap<&str, (i64, &str)> = schedule
+            .assignments
+            .iter()
+            .map(|a| (a.activity_id.as_str(), (a.start_ms, a.resource_id.as_str())))
+            .collect();
+        let mut order: Vec<(i64, i32, usize)> = self
+            .activities
+            .iter()
+            .enumerate()
+            .map(|(i, act)| {
+                let start = placed.get(act.id.as_str()).map_or(i64::MAX, |p| p.0);
+                (start, act.sequence, i)
+            })
+            .collect();
+        order.sort();
+        let osv = order
+            .iter()
+            .map(|&(_, _, i)| self.activities[i].task_id.clone())
+            .collect();
+        let mav = self
+            .activities
+            .iter()
+            .map(|act| match placed.get(act.id.as_str()) {
+                Some(&(_, resource)) => resource.to_string(),
+                None => act.candidates.first().cloned().unwrap_or_default(),
+            })
+            .collect();
+        ScheduleChromosome {
+            osv,
+            mav,
+            activity_index: self.activity_index.clone(),
+            fitness: f64::INFINITY,
+        }
+    }
+
+    /// The dispatching rules' schedules ([`SimpleScheduler`]) -- MWKR, SPT,
+    /// LPT, FIFO, LWKR, and EDD and ATC when a task has a deadline -- as
+    /// chromosomes: the population starts from them as well as from random
+    /// ones, so the search never ends worse than the best of them.
+    ///
+    /// [`SimpleScheduler`]: crate::scheduler::SimpleScheduler
+    fn dispatching_seeds(&self) -> Vec<ScheduleChromosome> {
+        use crate::dispatching::{rules, RuleEngine};
+        let mut engines = vec![
+            RuleEngine::new().with_rule(rules::Mwkr),
+            RuleEngine::new().with_rule(rules::Spt),
+            RuleEngine::new().with_rule(rules::Lpt),
+            RuleEngine::new().with_rule(rules::Fifo),
+            RuleEngine::new().with_rule(rules::Lwkr),
+        ];
+        if !self.deadlines.is_empty() {
+            engines.push(RuleEngine::new().with_rule(rules::Edd));
+            engines.push(RuleEngine::new().with_rule(rules::Atc::default()));
+        }
+        engines
+            .into_iter()
+            .map(|engine| {
+                let schedule = crate::scheduler::SimpleScheduler::new()
+                    .with_transition_matrices(self.transition_matrices.clone())
+                    .with_rule_engine(engine)
+                    .schedule(&self.problem, 0);
+                self.chromosome_of(&schedule)
+            })
+            .collect()
     }
 
     /// Sets transition matrices.
@@ -301,6 +377,11 @@ impl SchedulingGaProblem {
 
 impl GaProblem for SchedulingGaProblem {
     type Individual = ScheduleChromosome;
+
+    /// The dispatching rules' schedules seed the population.
+    fn initial_individuals(&self) -> Vec<ScheduleChromosome> {
+        self.dispatching_seeds()
+    }
 
     fn create_individual<R: Rng>(&self, rng: &mut R) -> ScheduleChromosome {
         // 50% random, 25% load-balanced, 25% SPT (or load-balanced if no process_times)
@@ -499,6 +580,46 @@ mod tests {
         // Should have assignments for all 3 activities
         assert!(schedule.assignment_count() > 0);
         assert!(schedule.makespan_ms() > 0);
+    }
+
+    /// A seed decodes to a schedule no longer than the dispatching schedule it
+    /// came from, so the GA (which keeps its best) never ends worse.
+    #[test]
+    fn a_dispatching_seed_decodes_no_longer_than_its_schedule() {
+        use crate::dispatching::{rules, RuleEngine};
+        use crate::scheduler::SimpleScheduler;
+        let mut tasks = Vec::new();
+        for j in 0..6 {
+            let mut task = Task::new(format!("J{j}")).with_category("c");
+            for k in 0..3 {
+                let m = (j + k) % 3;
+                task = task.with_activity(
+                    Activity::new(format!("J{j}_O{k}"), format!("J{j}"), k)
+                        .with_duration(ActivityDuration::fixed(10 + ((j * 7 + k * 3) % 11) as i64))
+                        .with_requirement(
+                            ResourceRequirement::new("M").with_candidates(vec![format!("M{m}")]),
+                        ),
+                );
+            }
+            tasks.push(task);
+        }
+        let resources: Vec<Resource> = (0..3)
+            .map(|m| Resource::new(format!("M{m}"), "M"))
+            .collect();
+        let checked = Problem::new(tasks, resources).expect("valid");
+        let ga = SchedulingGaProblem::new(&checked);
+        let dispatched = SimpleScheduler::new()
+            .with_rule_engine(RuleEngine::new().with_rule(rules::Mwkr))
+            .schedule(&checked, 0);
+        let seed = ga.chromosome_of(&dispatched);
+        assert!(seed.is_valid(&ga.activities));
+        let decoded = ga.decode(&seed);
+        assert!(decoded.makespan_ms() <= dispatched.makespan_ms());
+        assert_eq!(
+            ga.initial_individuals().len(),
+            5,
+            "no deadlines: five rules"
+        );
     }
 
     #[test]
