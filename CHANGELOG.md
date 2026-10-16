@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-16
+
+Depends on u-metaheur 0.12 and u-numflow 0.13.
+
 ### Fixed
 
 - A result the package fails to hand back to JavaScript is refused as
