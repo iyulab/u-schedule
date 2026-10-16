@@ -1,24 +1,45 @@
-//! Simple priority-driven greedy scheduler.
+//! Priority-dispatching scheduler.
 //!
 //! # Algorithm
 //!
-//! 1. Sort tasks by dispatching rule (or priority if no rule engine).
-//! 2. For each task, process activities sequentially.
-//! 3. For each activity, select the earliest-available eligible resource
+//! Operation-level, non-delay dispatching (an event-driven simulation: a
+//! decision is taken whenever a resource could start work, among the work
+//! waiting for it then):
+//!
+//! 1. Every unfinished task offers its next activity. Each is placed at its
+//!    earliest feasible start on eligible resources
 //!    ([`ResourceRequirement::accepts`](crate::models::ResourceRequirement::accepts):
-//!    a listed candidate, or one of the requirement's type, with the skills).
-//! 4. Apply sequence-dependent setup times from transition matrices.
+//!    a listed candidate, or one of the requirement's type, with the skills),
+//!    honoring calendars, capacities and sequence-dependent setups.
+//! 2. The decision time is the earliest of those starts; the offers that can
+//!    start then compete.
+//! 3. The rule (or task priority, without a rule engine) picks one of them,
+//!    judged on a [`SchedulingContext`] filled for that decision: the time,
+//!    each task's imminent activity, work left, arrival in the queue, the
+//!    queue at its next resource, the average imminent operation of the
+//!    competitors, and planned resource utilization.
+//! 4. The pick is booked, and the step repeats until no activity is left.
+//!
+//! A resource never idles while work it can start waits — no slot is held
+//! for a task that arrives later, however much the rule prefers it. On
+//! Taillard's job-shop instances this beats holding slots (active,
+//! Giffler–Thompson schedules) for every rule measured; see
+//! `examples/taillard.rs`.
 //!
 //! # Complexity
-//! O(n * m * c) where n=tasks, m=activities/task, c=candidate resources.
+//! O(A · n · P) where A = activities, n = tasks, P = one placement
+//! (candidate resources × timeline query).
 //!
 //! # Reference
-//! Pinedo (2016), "Scheduling", Ch. 4: Priority Dispatching
+//! Pinedo (2016), "Scheduling", Ch. 4: Priority Dispatching; Kolisch (1996),
+//! "Serial and parallel resource-constrained project scheduling methods
+//! revisited", *EJOR* 90(2) — the parallel (non-delay) scheme with priority
+//! rules.
 
 use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
-use crate::dispatching::{RuleEngine, SchedulingContext};
+use crate::dispatching::{rules, RuleEngine, SchedulingContext};
 use crate::models::{Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
 use crate::Problem;
 
@@ -70,10 +91,12 @@ impl ScheduleRequest {
     }
 }
 
-/// Simple priority-driven greedy scheduler.
+/// Priority-dispatching scheduler.
 ///
-/// Schedules tasks by priority (or dispatching rule), assigning each
-/// activity to the earliest-available candidate resource. Supports
+/// At each decision point — the earliest time some waiting activity can
+/// start — picks one of the activities that can start then, by dispatching
+/// rule (or task priority), and books it on the earliest-available eligible
+/// resource. Supports
 /// sequence-dependent setup times via transition matrices.
 ///
 /// # Example
@@ -124,9 +147,9 @@ impl SimpleScheduler {
         self
     }
 
-    /// Sets a rule engine for task ordering.
+    /// Sets the rule engine that decides each conflict.
     ///
-    /// When set, tasks are sorted by the rule engine instead of by priority.
+    /// Without one, the higher `Task::priority` wins (ties: input order).
     pub fn with_rule_engine(mut self, engine: RuleEngine) -> Self {
         self.rule_engine = Some(engine);
         self
@@ -187,13 +210,16 @@ impl SimpleScheduler {
 
     /// Schedules tasks on resources.
     ///
-    /// # Algorithm (serial SGS)
-    /// 1. Sort tasks by rule engine or priority (descending).
-    /// 2. For each task, schedule activities in sequence order.
-    /// 3. For each activity, find via fixed-point search the earliest
-    ///    common start where **every** resource requirement can hold
-    ///    `quantity` resources simultaneously — honoring calendars and
-    ///    capacities through [`ResourceTimeline`].
+    /// # Algorithm (non-delay dispatching)
+    /// 1. Every unfinished task offers its next activity, placed via
+    ///    fixed-point search at the earliest common start where **every**
+    ///    resource requirement can hold `quantity` resources simultaneously
+    ///    — honoring calendars and capacities through [`ResourceTimeline`].
+    /// 2. The earliest start among the offers is the decision time; the
+    ///    offers that start then compete.
+    /// 3. The rule engine (or task priority) picks one of them on a
+    ///    [`SchedulingContext`] filled for this decision; ties go to input
+    ///    order. The pick is booked; the rest are offered again.
     /// 4. The occupied span is `max(setup) + process + teardown`, where a
     ///    resource's setup comes from its transition matrix if one is
     ///    defined, else from `ActivityDuration::setup_ms`.
@@ -206,7 +232,8 @@ impl SimpleScheduler {
     /// `RequirementUnfilled` rather than silently shrinking the schedule.
     ///
     /// # Reference
-    /// Kolisch & Hartmann (1999), serial schedule generation scheme.
+    /// Kolisch (1996), parallel schedule generation; Kolisch & Hartmann
+    /// (1999) for the resource-feasibility check.
     pub fn schedule(&self, problem: &Problem, start_time_ms: i64) -> Schedule {
         let (tasks, resources) = (problem.tasks(), problem.resources());
         let mut schedule = Schedule::new();
@@ -231,57 +258,113 @@ impl SimpleScheduler {
             schedule.add_assignment(pin.clone());
         }
 
-        let task_order = self.sort_tasks(tasks, start_time_ms);
+        let by_priority;
+        let engine = match &self.rule_engine {
+            Some(engine) => engine,
+            None => {
+                by_priority = RuleEngine::new().with_rule(rules::Priority);
+                &by_priority
+            }
+        };
 
-        for &task_idx in &task_order {
-            let task = &tasks[task_idx];
-            let mut ready = task
-                .release_time
-                .unwrap_or(start_time_ms)
-                .max(start_time_ms);
+        // Per task: the next activity to place, and the earliest it may start.
+        let mut cursor: Vec<usize> = vec![0; tasks.len()];
+        let mut ready: Vec<i64> = tasks
+            .iter()
+            .map(|t| t.release_time.unwrap_or(start_time_ms).max(start_time_ms))
+            .collect();
 
-            for activity in &task.activities {
-                if let Some(pins) = fixed_by_activity.get(activity.id.as_str()) {
-                    // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
-                    let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready);
-                    ready = ready.max(pin_end);
-                    continue;
-                }
-                if activity.resource_requirements.is_empty() {
-                    continue; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
-                }
-                let Some(placement) = self.place_activity(
-                    activity,
-                    task,
-                    &timelines,
-                    &last_category,
-                    resources,
-                    ready,
-                ) else {
-                    continue; // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
-                };
-
-                for (resource_id, setup_ms) in &placement.selections {
-                    let tl = timelines
-                        .get_mut(resource_id)
-                        .expect("selection references known resource");
-                    tl.book(placement.start_ms, placement.end_ms);
-                    schedule.add_assignment(
-                        Assignment::new(
-                            &activity.id,
-                            &task.id,
-                            resource_id,
-                            placement.start_ms,
-                            placement.end_ms,
-                        )
-                        .with_setup(*setup_ms),
-                    );
-                    if self.transition_matrices.has_matrix(resource_id) {
-                        last_category.insert(resource_id.clone(), task.category.clone());
+        loop {
+            let mut offers: Vec<(usize, Placement)> = Vec::new();
+            for (i, task) in tasks.iter().enumerate() {
+                while let Some(activity) = task.activities.get(cursor[i]) {
+                    if let Some(pins) = fixed_by_activity.get(activity.id.as_str()) {
+                        // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
+                        let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready[i]);
+                        ready[i] = ready[i].max(pin_end);
+                        cursor[i] += 1;
+                        continue;
+                    }
+                    if activity.resource_requirements.is_empty() {
+                        cursor[i] += 1; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
+                        continue;
+                    }
+                    match self.place_activity(
+                        activity,
+                        task,
+                        &timelines,
+                        &last_category,
+                        resources,
+                        ready[i],
+                    ) {
+                        Some(placement) => {
+                            offers.push((i, placement));
+                            break;
+                        }
+                        // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
+                        None => cursor[i] += 1,
                     }
                 }
-                ready = placement.end_ms;
             }
+            if offers.is_empty() {
+                break;
+            }
+
+            // Non-delay: decide at the earliest start, among what can start then.
+            let now = offers
+                .iter()
+                .map(|(_, p)| p.start_ms)
+                .min()
+                .expect("offers is non-empty");
+            let conflict: Vec<usize> = offers
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, p))| p.start_ms == now)
+                .map(|(k, _)| k)
+                .collect();
+            let context = decision_context(
+                tasks,
+                resources,
+                &timelines,
+                &fixed_by_activity,
+                &cursor,
+                &ready,
+                &offers,
+                &conflict,
+                start_time_ms,
+            );
+            let candidates: Vec<usize> = conflict.iter().map(|&k| offers[k].0).collect();
+            let chosen = engine
+                .best_of(tasks, &candidates, &context)
+                .expect("the conflict set is non-empty");
+            let k = offers
+                .iter()
+                .position(|(i, _)| *i == chosen)
+                .expect("the chosen task made an offer");
+            let (i, placement) = offers.swap_remove(k);
+            let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
+
+            for (resource_id, setup_ms) in &placement.selections {
+                let tl = timelines
+                    .get_mut(resource_id)
+                    .expect("selection references known resource");
+                tl.book(placement.start_ms, placement.end_ms);
+                schedule.add_assignment(
+                    Assignment::new(
+                        &activity.id,
+                        &task.id,
+                        resource_id,
+                        placement.start_ms,
+                        placement.end_ms,
+                    )
+                    .with_setup(*setup_ms),
+                );
+                if self.transition_matrices.has_matrix(resource_id) {
+                    last_category.insert(resource_id.clone(), task.category.clone());
+                }
+            }
+            ready[i] = placement.end_ms;
+            cursor[i] += 1;
         }
 
         let input = super::feasibility::FeasibilityInput {
@@ -333,7 +416,7 @@ impl SimpleScheduler {
                             .map(|fit| (fit, rid, setup))
                     })
                     .collect();
-                fits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+                fits.sort_by_key(|&(fit, _, _)| fit); // 동시각이면 자원 선언 순서
                 if (fits.len() as i32) < req.quantity {
                     return None; // 후보 부족 — 영원히 충족 불가
                 }
@@ -391,19 +474,91 @@ impl SimpleScheduler {
         super::feasibility::annotate_schedule(&mut schedule, &input);
         schedule
     }
+}
 
-    /// Returns task indices sorted by rule engine or priority.
-    fn sort_tasks(&self, tasks: &[Task], start_time_ms: i64) -> Vec<usize> {
-        if let Some(ref engine) = self.rule_engine {
-            let ctx = SchedulingContext::at_time(start_time_ms);
-            engine.sort_indices(tasks, &ctx)
-        } else {
-            // Default: sort by priority descending
-            let mut indices: Vec<usize> = (0..tasks.len()).collect();
-            indices.sort_by(|&a, &b| tasks[b].priority.cmp(&tasks[a].priority));
-            indices
-        }
+/// The state a rule judges one decision on.
+///
+/// Every task with an offer is waiting: its imminent activity, the work left
+/// on it, when it joined the queue, and how many other waiting tasks want a
+/// resource its next activity can use (WINQ). The average imminent operation
+/// is over the conflict set (ATC's `p̄`). Utilization is booked time over the
+/// planned span so far, per unit of capacity (LPUL).
+#[allow(clippy::too_many_arguments)]
+fn decision_context(
+    tasks: &[Task],
+    resources: &[Resource],
+    timelines: &HashMap<String, ResourceTimeline>,
+    fixed: &HashMap<&str, Vec<&Assignment>>,
+    cursor: &[usize],
+    ready: &[i64],
+    offers: &[(usize, Placement)],
+    conflict: &[usize],
+    start_time_ms: i64,
+) -> SchedulingContext {
+    let time = conflict
+        .iter()
+        .map(|&k| offers[k].1.start_ms)
+        .min()
+        .expect("the conflict set is non-empty");
+    let mut context = SchedulingContext::at_time(time);
+
+    let wanted: Vec<(usize, Vec<&str>)> = offers
+        .iter()
+        .map(|&(i, _)| {
+            (
+                i,
+                tasks[i].activities[cursor[i]].eligible_resources(resources),
+            )
+        })
+        .collect();
+    for &(i, _) in offers {
+        let (task, c) = (&tasks[i], cursor[i]);
+        let remaining: i64 = task.activities[c..]
+            .iter()
+            .map(|a| a.duration.total_ms())
+            .sum();
+        let next_queue = task.activities[c + 1..]
+            .iter()
+            .find(|a| !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str()))
+            .map(|next| {
+                let usable = next.eligible_resources(resources);
+                wanted
+                    .iter()
+                    .filter(|(j, rs)| *j != i && rs.iter().any(|r| usable.contains(r)))
+                    .count()
+            })
+            .unwrap_or(0);
+        context.imminent_activity.insert(task.id.clone(), c);
+        context.remaining_work.insert(task.id.clone(), remaining);
+        context.arrival_times.insert(task.id.clone(), ready[i]);
+        context
+            .next_queue_length
+            .insert(task.id.clone(), next_queue);
     }
+
+    let competing: i64 = conflict
+        .iter()
+        .map(|&k| {
+            let i = offers[k].0;
+            tasks[i].activities[cursor[i]].duration.total_ms()
+        })
+        .sum();
+    context.average_processing_time = Some(competing as f64 / conflict.len() as f64);
+
+    let span = timelines
+        .values()
+        .filter_map(ResourceTimeline::latest_end)
+        .max()
+        .map_or(0, |end| end - start_time_ms);
+    for (id, tl) in timelines {
+        let load = if span > 0 {
+            (tl.booked_ms() as f64 / (f64::from(tl.capacity()) * span as f64)).min(1.0)
+        } else {
+            0.0
+        };
+        context.resource_utilization.insert(id.clone(), load);
+    }
+    context
 }
 
 impl Default for SimpleScheduler {
@@ -803,5 +958,166 @@ mod tests {
         let scheduler = SimpleScheduler::new();
         let schedule = scheduler.schedule(&valid(&[task], &resources), 0);
         assert_eq!(schedule.assignment_count(), 0);
+    }
+
+    // ── decision-time context: each rule reads the state it is about ──
+
+    /// A task of operations `(resource, ms)` run in order.
+    fn routed(id: &str, ops: &[(&str, i64)]) -> Task {
+        let mut task = Task::new(id).with_category("default");
+        for (k, &(resource, ms)) in ops.iter().enumerate() {
+            task = task.with_activity(
+                Activity::new(format!("{id}_O{}", k + 1), id, k as i32)
+                    .with_duration(ActivityDuration::fixed(ms))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec![resource.into()]),
+                    ),
+            );
+        }
+        task
+    }
+
+    fn machines(ids: &[&str]) -> Vec<Resource> {
+        ids.iter().map(|id| make_resource(id)).collect()
+    }
+
+    fn by_rule<R: crate::dispatching::DispatchingRule + 'static>(
+        rule: R,
+        tasks: &[Task],
+        resources: &[Resource],
+    ) -> Schedule {
+        SimpleScheduler::new()
+            .with_rule_engine(RuleEngine::new().with_rule(rule))
+            .schedule(&valid(tasks, resources), 0)
+    }
+
+    fn start_of(s: &Schedule, activity: &str) -> i64 {
+        s.assignment_for_activity(activity)
+            .expect(activity)
+            .start_ms
+    }
+
+    #[test]
+    fn critical_ratio_is_judged_at_each_decision_not_once_at_the_start() {
+        // t=0: CR J2 = 60/50 = 1.2 < J1 = 10 < J3 = 14 → J2 runs 0..50.
+        // t=50: J1 = 50/10 = 5, J3 = 20/5 = 4 → J3 before J1 (a sort at
+        // t=0 would have kept J1 ahead of J3).
+        let tasks = vec![
+            routed("J1", &[("M1", 10)]).with_deadline(100),
+            routed("J2", &[("M1", 50)]).with_deadline(60),
+            routed("J3", &[("M1", 5)]).with_deadline(70),
+        ];
+        let s = by_rule(rules::Cr, &tasks, &machines(&["M1"]));
+        assert_eq!(start_of(&s, "J2_O1"), 0);
+        assert_eq!(start_of(&s, "J3_O1"), 50);
+        assert_eq!(start_of(&s, "J1_O1"), 55);
+    }
+
+    #[test]
+    fn spt_reads_the_imminent_operation_and_lwkr_the_work_left() {
+        // Both start on M1. J1's first operation is short but its job is
+        // long; J2 is one medium operation.
+        let tasks = vec![
+            routed("J1", &[("M1", 5), ("M2", 100)]),
+            routed("J2", &[("M1", 30)]),
+        ];
+        let resources = machines(&["M1", "M2"]);
+        let spt = by_rule(rules::Spt, &tasks, &resources);
+        assert_eq!(start_of(&spt, "J1_O1"), 0, "SPT: 5 < 30");
+        let lwkr = by_rule(rules::Lwkr, &tasks, &resources);
+        assert_eq!(start_of(&lwkr, "J2_O1"), 0, "LWKR: 30 < 105");
+        let mwkr = by_rule(rules::Mwkr, &tasks, &resources);
+        assert_eq!(start_of(&mwkr, "J1_O1"), 0, "MWKR: 105 > 30");
+    }
+
+    #[test]
+    fn winq_counts_who_waits_at_the_next_machine() {
+        // J1 goes on to M2, where J3 already waits; J2 goes on to the idle M3.
+        let tasks = vec![
+            routed("J1", &[("M1", 10), ("M2", 10)]),
+            routed("J2", &[("M1", 10), ("M3", 10)]),
+            routed("J3", &[("M2", 10)]),
+        ];
+        let s = by_rule(rules::Winq, &tasks, &machines(&["M1", "M2", "M3"]));
+        assert_eq!(start_of(&s, "J2_O1"), 0);
+        assert_eq!(start_of(&s, "J1_O1"), 10);
+    }
+
+    #[test]
+    fn lpul_prefers_the_less_loaded_machine() {
+        // M1 (capacity 2) is half booked by a pin; M2 is idle. Both jobs can
+        // start at 0, so the decision order is the rule's.
+        let pin_task = routed("P", &[("M1", 100)]);
+        let tasks = vec![
+            pin_task,
+            routed("J1", &[("M1", 10)]),
+            routed("J2", &[("M2", 10)]),
+        ];
+        let resources = vec![make_resource("M1").with_capacity(2), make_resource("M2")];
+        let s = SimpleScheduler::new()
+            .with_rule_engine(RuleEngine::new().with_rule(rules::Lpul))
+            .with_fixed_assignments(vec![Assignment::new("P_O1", "P", "M1", 0, 100)])
+            .schedule(&valid(&tasks, &resources), 0);
+        let order: Vec<&str> = s.assignments.iter().map(|a| a.task_id.as_str()).collect();
+        assert_eq!(order, ["P", "J2", "J1"]);
+    }
+
+    #[test]
+    fn atc_normalizes_slack_by_the_queue_average() {
+        // k = 2. Own-p normalization: J1 0.1·e^(−20/20) = 0.037 < J2 0.05.
+        // Queue average p̄ = 15: J1 0.1·e^(−20/30) = 0.051 > J2 0.05.
+        let tasks = vec![
+            routed("J1", &[("M1", 10)]).with_deadline(30),
+            routed("J2", &[("M1", 20)]).with_deadline(20),
+        ];
+        let s = by_rule(rules::Atc::default(), &tasks, &machines(&["M1"]));
+        assert_eq!(start_of(&s, "J1_O1"), 0);
+        assert_eq!(start_of(&s, "J2_O1"), 10);
+    }
+
+    #[test]
+    fn a_waiting_task_is_not_held_back_for_a_later_release() {
+        // SPT prefers the short J1, but it is not released until after J2
+        // would finish: the machine runs J2 instead of idling.
+        let tasks = vec![
+            routed("J1", &[("M1", 2)]).with_release_time(5),
+            routed("J2", &[("M1", 3)]),
+        ];
+        let s = by_rule(rules::Spt, &tasks, &machines(&["M1"]));
+        assert_eq!(start_of(&s, "J2_O1"), 0);
+        assert_eq!(start_of(&s, "J1_O1"), 5);
+    }
+
+    #[test]
+    fn no_slot_is_held_for_a_later_higher_priority_task() {
+        // J1 (priority 10) arrives at 100; J2 (priority 1) waits from 0. The
+        // machine starts J2 rather than idling for J1.
+        let tasks = vec![
+            make_task_with_resource("J1", 500, "M1", 10).with_release_time(100),
+            make_task_with_resource("J2", 1000, "M1", 1),
+            make_task_with_resource("J3", 300, "M1", 5),
+        ];
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &machines(&["M1"])), 0);
+        assert_eq!(start_of(&s, "J3_O1"), 0, "J3 outranks J2 at 0");
+        // At 300 both J1 (arrived) and J2 wait: priority decides.
+        assert_eq!(start_of(&s, "J1_O1"), 300);
+        assert_eq!(start_of(&s, "J2_O1"), 800);
+    }
+
+    #[test]
+    fn ties_between_machines_go_to_declaration_order() {
+        let tasks = vec![Task::new("J1").with_category("default").with_activity(
+            Activity::new("J1_O1", "J1", 0)
+                .with_duration(ActivityDuration::fixed(10))
+                .with_requirement(ResourceRequirement::new("Machine")),
+        )];
+        // "M10" sorts before "M2" as a string; declaration order puts M2 first.
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &machines(&["M2", "M10"])), 0);
+        assert_eq!(
+            s.assignment_for_activity("J1_O1")
+                .expect("placed")
+                .resource_id,
+            "M2"
+        );
     }
 }

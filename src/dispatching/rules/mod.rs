@@ -21,7 +21,9 @@ use crate::models::Task;
 
 /// Shortest Processing Time.
 ///
-/// Prioritizes tasks with shorter total processing time.
+/// Prioritizes the shorter imminent operation
+/// ([`SchedulingContext::processing_time_ms`] — the whole task when the
+/// context names no imminent activity).
 /// Minimizes average flow time and WIP (Work-In-Process).
 ///
 /// # Reference
@@ -34,8 +36,8 @@ impl DispatchingRule for Spt {
         "SPT"
     }
 
-    fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
-        task.total_duration_ms() as f64
+    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
+        context.processing_time_ms(task) as f64
     }
 
     fn description(&self) -> &'static str {
@@ -45,7 +47,7 @@ impl DispatchingRule for Spt {
 
 /// Longest Processing Time.
 ///
-/// Prioritizes tasks with longer total processing time.
+/// Prioritizes the longer imminent operation.
 /// Useful for load balancing in parallel machine environments.
 #[derive(Debug, Clone, Copy)]
 pub struct Lpt;
@@ -55,8 +57,8 @@ impl DispatchingRule for Lpt {
         "LPT"
     }
 
-    fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
-        -(task.total_duration_ms() as f64)
+    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
+        -(context.processing_time_ms(task) as f64)
     }
 
     fn description(&self) -> &'static str {
@@ -77,11 +79,7 @@ impl DispatchingRule for Lwkr {
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
-        context
-            .remaining_work
-            .get(&task.id)
-            .copied()
-            .unwrap_or_else(|| task.total_duration_ms()) as f64
+        context.remaining_work_ms(task) as f64
     }
 
     fn description(&self) -> &'static str {
@@ -102,11 +100,7 @@ impl DispatchingRule for Mwkr {
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
-        let remaining = context
-            .remaining_work
-            .get(&task.id)
-            .copied()
-            .unwrap_or_else(|| task.total_duration_ms());
+        let remaining = context.remaining_work_ms(task);
         -(remaining as f64)
     }
 
@@ -118,7 +112,7 @@ impl DispatchingRule for Mwkr {
 /// Weighted Shortest Processing Time.
 ///
 /// Prioritizes by the ratio of weight to processing time, `w_j / p_j`,
-/// reading `w_j` from [`Task::weight`]. Doubling a task's weight never moves
+/// reading `w_j` from [`Task::weight`] and `p_j` from the imminent operation. Doubling a task's weight never moves
 /// it later.
 ///
 /// # Reference
@@ -131,8 +125,8 @@ impl DispatchingRule for Wspt {
         "WSPT"
     }
 
-    fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
-        let processing_time = task.total_duration_ms() as f64;
+    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
+        let processing_time = context.processing_time_ms(task) as f64;
         if processing_time <= 0.0 {
             return f64::MAX;
         }
@@ -190,11 +184,7 @@ impl DispatchingRule for Mst {
             None => return f64::MAX,
         };
 
-        let remaining = context
-            .remaining_work
-            .get(&task.id)
-            .copied()
-            .unwrap_or_else(|| task.total_duration_ms());
+        let remaining = context.remaining_work_ms(task);
 
         let time_until_deadline = deadline - context.current_time_ms;
         (time_until_deadline - remaining) as f64
@@ -227,11 +217,7 @@ impl DispatchingRule for Cr {
             None => return f64::MAX,
         };
 
-        let remaining = context
-            .remaining_work
-            .get(&task.id)
-            .copied()
-            .unwrap_or_else(|| task.total_duration_ms());
+        let remaining = context.remaining_work_ms(task);
 
         if remaining <= 0 {
             return f64::MAX; // Already done
@@ -264,13 +250,9 @@ impl DispatchingRule for Sro {
             None => return f64::MAX,
         };
 
-        let remaining_work = context
-            .remaining_work
-            .get(&task.id)
-            .copied()
-            .unwrap_or_else(|| task.total_duration_ms());
+        let remaining_work = context.remaining_work_ms(task);
 
-        let op_count = task.activity_count().max(1);
+        let op_count = context.remaining_operations(task).max(1);
         let slack = (deadline - context.current_time_ms - remaining_work) as f64;
         slack / op_count as f64
     }
@@ -282,7 +264,12 @@ impl DispatchingRule for Sro {
 
 /// Apparent Tardiness Cost.
 ///
-/// Combines WSPT with deadline urgency using an exponential function.
+/// Combines WSPT with deadline urgency using an exponential function:
+/// `(w / p) · exp(−max(0, d − t − W) / (k · p̄))`, where `p` is the imminent
+/// operation, `W` the work left on the task (the imminent operation
+/// included) and `p̄` the average imminent operation of the tasks competing
+/// at this decision. Without those in the context, `p` = `W` = the whole
+/// task and `p̄` = `p`.
 /// The parameter `k` controls the balance:
 /// - k > 2: more SPT-like (processing time dominates)
 /// - k < 2: more EDD-like (deadline dominates)
@@ -315,7 +302,7 @@ impl DispatchingRule for Atc {
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
-        let processing_time = task.total_duration_ms() as f64;
+        let processing_time = context.processing_time_ms(task) as f64;
         if processing_time <= 0.0 {
             return f64::MAX;
         }
@@ -327,7 +314,8 @@ impl DispatchingRule for Atc {
             None => return -(weight / processing_time), // Fallback to WSPT
         };
 
-        let slack = deadline - processing_time - context.current_time_ms as f64;
+        let slack =
+            deadline - context.remaining_work_ms(task) as f64 - context.current_time_ms as f64;
         let p_avg = context
             .average_processing_time
             .unwrap_or(processing_time)
@@ -377,7 +365,8 @@ impl DispatchingRule for Fifo {
 /// Work In Next Queue.
 ///
 /// Prioritizes tasks whose next resource has the shortest queue.
-/// Uses `context.next_queue_length`.
+/// Uses `context.next_queue_length` (0 when absent — the last operation has
+/// no next queue).
 #[derive(Debug, Clone, Copy)]
 pub struct Winq;
 
@@ -402,7 +391,8 @@ impl DispatchingRule for Winq {
 /// Least Planned Utilization Level.
 ///
 /// Prioritizes tasks whose candidate resources have the lowest utilization.
-/// Uses `context.resource_utilization` and `task.activities[0].resource_requirements`.
+/// Uses `context.resource_utilization` and the imminent activity's
+/// requirements (the first activity when the context names none).
 #[derive(Debug, Clone, Copy)]
 pub struct Lpul;
 
@@ -412,7 +402,7 @@ impl DispatchingRule for Lpul {
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
-        if let Some(activity) = task.activities.first() {
+        if let Some(activity) = context.imminent(task).or(task.activities.first()) {
             let min_util = activity
                 .resource_requirements
                 .iter()

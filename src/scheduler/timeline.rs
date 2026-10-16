@@ -72,6 +72,22 @@ impl ResourceTimeline {
         self.bookings.push(TimeWindow::new(start_ms, end_ms));
     }
 
+    /// Booked time, summed over bookings (a capacity-2 resource with two
+    /// concurrent bookings counts both).
+    pub fn booked_ms(&self) -> i64 {
+        self.bookings.iter().map(|b| b.end_ms - b.start_ms).sum()
+    }
+
+    /// End of the latest booking, if any.
+    pub fn latest_end(&self) -> Option<i64> {
+        self.bookings.iter().map(|b| b.end_ms).max()
+    }
+
+    /// Units that can be booked at once.
+    pub fn capacity(&self) -> i32 {
+        self.capacity
+    }
+
     /// Max concurrent bookings over [start, end) stays below capacity.
     fn capacity_ok(&self, start_ms: i64, end_ms: i64) -> bool {
         let overlapping: Vec<&TimeWindow> = self

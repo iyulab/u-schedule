@@ -27,23 +27,55 @@ u-schedule provides domain models, constraints, validation, dispatching rules, a
 
 | Rule | Description |
 |------|-------------|
-| SPT | Shortest Processing Time |
-| LPT | Longest Processing Time |
+| SPT | Shortest Processing Time — of the imminent operation |
+| LPT | Longest Processing Time — of the imminent operation |
 | EDD | Earliest Due Date |
-| FIFO | First In First Out |
-| MST | Minimum Slack Time |
-| CR | Critical Ratio |
+| FIFO | First In First Out — by arrival in the queue (release, or end of the previous operation) |
+| MST | Minimum Slack Time — `due − now − work left` |
+| CR | Critical Ratio — `(due − now) / work left` |
 | S/RO | Slack per Remaining Operations |
-| ATC | Apparent Tardiness Cost (reads `Task::weight`) |
+| ATC | Apparent Tardiness Cost — `(w/p)·exp(−max(0, due − now − work left) / (k·p̄))`, `p̄` the average imminent operation of the jobs competing (reads `Task::weight`) |
 | WSPT | Weighted Shortest Processing Time — `weight / processing time`, reads `Task::weight` |
-| MWKR | Most Work Remaining |
+| MWKR | Most Work Remaining — this operation and the ones after it |
 | LWKR | Least Work Remaining |
-| WINQ | Work In Next Queue |
-| LPUL | Least Planned Utilization Level |
+| WINQ | Work In Next Queue — how many other waiting jobs want a machine the job's next operation can use |
+| LPUL | Least Planned Utilization Level — booked time over the planned span, per unit of capacity |
 | PRIORITY | Job Priority — reads `Task::priority`, higher first |
 
 `Task::weight` (default 1, finite and `> 0`) is the weight `w_j` of the
 weighted rules; `Task::priority` is a separate ordinal read only by `PRIORITY`.
+
+### When a rule decides
+
+`SimpleScheduler` (and `run_schedule`) dispatch **operation by operation,
+without delay**: whenever a machine could start work, the rule chooses among
+the operations that can start then, and judges them on that moment's
+`SchedulingContext` — the clock, each job's imminent operation, the work left,
+when it joined the queue, the queue at its next machine, and machine load. A
+machine never idles while work it can start is waiting; no slot is held for a
+job that arrives later. Without a rule engine, `Task::priority` decides (higher
+first, ties in input order).
+
+A `SchedulingContext` you build yourself for `RuleEngine::sort_indices` may
+leave fields empty; each rule then reads the task as a whole (SPT the total
+processing time, LWKR the total work, WINQ 0).
+
+Measured on Taillard's 40 job-shop instances `ta01`–`ta40` (15×15 to 30×15),
+makespan gap to the optimum or best known upper bound, mean over instances
+(`examples/taillard.rs`):
+
+| Rule | Gap |
+|------|-----|
+| MWKR | 21.9 % |
+| FIFO | 28.4 % |
+| SPT | 30.3 % |
+| WINQ | 34.3 % |
+| LPUL | 42.0 % |
+| LPT | 44.2 % |
+| LWKR | 47.9 % |
+
+Dispatching rules are fast constructive heuristics (milliseconds here); the GA
+(`solve_jobshop`) searches for better schedules.
 
 ## GA Encoding
 
@@ -127,6 +159,8 @@ assert_eq!(placed.resource_id, "M2");
 ```bash
 cargo build
 cargo test
+# Taillard measurement (instances downloaded separately — see the file header)
+cargo run --release --example taillard -- <dir> [bks.csv]
 ```
 
 ## Academic References
@@ -194,6 +228,10 @@ const result = run_schedule({
 #### `run_schedule(input) -> ScheduleOutput`
 
 Priority dispatching on a flat job list (single or parallel machines). Supports 12 rules: SPT, LPT, EDD, FCFS, CR, WSPT, MST, S/RO, ATC, LWKR, MWKR, PRIORITY.
+Whenever a machine frees, the rule picks among the jobs released by then —
+judged at that moment, so CR, MST, S/RO and ATC see the current time — and a
+machine never waits for a job that is not yet released while another is
+([When a rule decides](#when-a-rule-decides)).
 
 **Input:**
 ```json

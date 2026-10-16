@@ -148,6 +148,39 @@ impl RuleEngine {
         self.sort_indices(tasks, context).first().copied()
     }
 
+    /// The highest-priority task among `candidates` (indices into `tasks`);
+    /// a tie goes to the candidate listed first.
+    pub fn best_of(
+        &self,
+        tasks: &[Task],
+        candidates: &[usize],
+        context: &SchedulingContext,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for &i in candidates {
+            let better = match best {
+                None => true,
+                Some((b, b_score)) => match self.mode {
+                    EvaluationMode::Sequential => {
+                        self.compare_sequential(&tasks[i], &tasks[b], context)
+                            == std::cmp::Ordering::Less
+                    }
+                    EvaluationMode::Weighted => {
+                        self.weighted_score(&tasks[i], context) < b_score - self.epsilon
+                    }
+                },
+            };
+            if better {
+                let score = match self.mode {
+                    EvaluationMode::Weighted => self.weighted_score(&tasks[i], context),
+                    EvaluationMode::Sequential => 0.0,
+                };
+                best = Some((i, score));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
     /// Evaluates a single task and returns scores from each rule.
     pub fn evaluate(&self, task: &Task, context: &SchedulingContext) -> Vec<RuleScore> {
         self.rules

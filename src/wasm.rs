@@ -35,7 +35,7 @@ use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use crate::dispatching::rules;
-use crate::dispatching::{RuleEngine, SchedulingContext};
+use crate::dispatching::RuleEngine;
 use crate::ga::operators::{CrossoverType, GeneticOperators, MutationType};
 use crate::ga::SchedulingGaProblem;
 use crate::models::{
@@ -852,7 +852,8 @@ fn ms_to_sec(ms: i64) -> f64 {
 fn build_task(job: &InputJob) -> Task {
     let duration_ms = sec_to_ms(job.processing_time);
     let activity = Activity::new(format!("{}_O1", job.id), &job.id, 0)
-        .with_duration(ActivityDuration::fixed(duration_ms));
+        .with_duration(ActivityDuration::fixed(duration_ms))
+        .with_requirement(ResourceRequirement::new(MACHINE));
 
     let mut task = Task::new(&job.id)
         .with_priority(job.priority)
@@ -1129,86 +1130,50 @@ fn atc_rule(atc_k: Option<f64>) -> Result<rules::Atc, WireError> {
 
 // ── simulation ──────────────────────────────────────────────────────────────
 
-/// Simulate a non-preemptive single-machine schedule.
+/// Resource type of the identical machines `run_schedule` dispatches on.
+const MACHINE: &str = "Machine";
+
+/// Dispatches the jobs on `num_machines` identical machines with the
+/// scheduler every other path uses ([`SimpleScheduler`]): at each decision
+/// the rule judges the jobs waiting then, on a context filled for that
+/// moment, so a rule that reads the clock (CR, MST, S/RO, ATC) or the queue
+/// (ATC's average) sees the state it is about.
 ///
-/// 1. Sort tasks by the chosen dispatching rule (at t=0, static priority).
-/// 2. Process tasks in that order, respecting `release_time`.
-fn simulate_single(tasks: &[Task], engine: &RuleEngine) -> Vec<OutputJob> {
-    let context = SchedulingContext::at_time(0);
-    let order = engine.sort_indices(tasks, &context);
-
-    let mut current_time_ms: i64 = 0;
-    let mut result = Vec::with_capacity(tasks.len());
-
-    for idx in order {
-        let task = &tasks[idx];
-        let release_ms = task.release_time.unwrap_or(0);
-
-        let start_ms = current_time_ms.max(release_ms);
-        let duration_ms = task.total_duration_ms();
-        let end_ms = start_ms + duration_ms;
-
-        let tardiness_ms = task.tardiness_ms(end_ms);
-
-        result.push(OutputJob {
-            id: task.id.clone(),
-            start: ms_to_sec(start_ms),
-            end: ms_to_sec(end_ms),
-            tardiness: ms_to_sec(tardiness_ms),
-            machine: 0,
-        });
-
-        current_time_ms = end_ms;
-    }
-
-    result
-}
-
-/// Simulate identical parallel machines using LPT-style list scheduling.
-///
-/// Tasks are sorted by the dispatching rule, then greedily assigned to
-/// the machine with the earliest available time (ties broken by lowest
-/// index). This is a standard list-scheduling heuristic.
-///
-/// # Reference
-/// Graham (1969), "Bounds on multiprocessing timing anomalies"
-fn simulate_parallel(tasks: &[Task], engine: &RuleEngine, num_machines: usize) -> Vec<OutputJob> {
-    let context = SchedulingContext::at_time(0);
-    let order = engine.sort_indices(tasks, &context);
-
-    // Per-machine earliest available time.
-    let mut machine_available = vec![0_i64; num_machines];
-    let mut result = Vec::with_capacity(tasks.len());
-
-    for idx in order {
-        let task = &tasks[idx];
-        let release_ms = task.release_time.unwrap_or(0);
-        let duration_ms = task.total_duration_ms();
-
-        // Pick machine with earliest availability.
-        let (m, &earliest) = machine_available
-            .iter()
-            .enumerate()
-            .min_by_key(|&(_, &t)| t)
-            .expect("num_machines >= 1");
-
-        let start_ms = earliest.max(release_ms);
-        let end_ms = start_ms + duration_ms;
-
-        let tardiness_ms = task.tardiness_ms(end_ms);
-
-        result.push(OutputJob {
-            id: task.id.clone(),
-            start: ms_to_sec(start_ms),
-            end: ms_to_sec(end_ms),
-            tardiness: ms_to_sec(tardiness_ms),
-            machine: m,
-        });
-
-        machine_available[m] = end_ms;
-    }
-
-    result
+/// [`SimpleScheduler`]: crate::scheduler::SimpleScheduler
+fn dispatch(
+    tasks: Vec<Task>,
+    engine: RuleEngine,
+    num_machines: usize,
+) -> Result<Vec<OutputJob>, WireError> {
+    let machines: Vec<Resource> = (0..num_machines)
+        .map(|m| Resource::new(format!("M{m}"), MACHINE))
+        .collect();
+    let problem =
+        Problem::new(tasks, machines).map_err(|e| WireError::internal(format!("{e:?}")))?;
+    let schedule = crate::scheduler::SimpleScheduler::new()
+        .with_rule_engine(engine)
+        .schedule(&problem, 0);
+    schedule
+        .assignments
+        .iter()
+        .map(|a| {
+            let task = problem
+                .tasks()
+                .iter()
+                .find(|t| t.id == a.task_id)
+                .expect("an assignment names a task of the problem");
+            let machine = a.resource_id[1..]
+                .parse()
+                .expect("machines are named M<index>");
+            Ok(OutputJob {
+                id: task.id.clone(),
+                start: ms_to_sec(a.start_ms),
+                end: ms_to_sec(a.end_ms),
+                tardiness: ms_to_sec(task.tardiness_ms(a.end_ms)),
+                machine,
+            })
+        })
+        .collect()
 }
 
 /// Compute per-machine utilization from a schedule and makespan.
@@ -1274,11 +1239,7 @@ fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
     refuse_job_values(&input.jobs)?;
     let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
 
-    let schedule = if num_machines == 1 {
-        simulate_single(&tasks, &engine)
-    } else {
-        simulate_parallel(&tasks, &engine, num_machines)
-    };
+    let schedule = dispatch(tasks, engine, num_machines)?;
 
     let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
     let total_tardiness: f64 = schedule.iter().map(|j| j.tardiness).sum();
@@ -2517,7 +2478,11 @@ mod tests {
             "A start should be 5.0 (release respected)"
         );
         assert!((a.end - 7.0).abs() < 1e-9);
-        assert!((makespan - 10.0).abs() < 1e-9);
+        // B waits from 0 and A is not released before B would finish, so the
+        // machine runs B first instead of idling until 5 for the shorter A.
+        let b = schedule.iter().find(|j| j.id == "B").expect("B");
+        assert!((b.start - 0.0).abs() < 1e-9, "B start {}", b.start);
+        assert!((makespan - 7.0).abs() < 1e-9, "makespan {makespan}");
     }
 
     #[test]
@@ -2635,7 +2600,7 @@ mod tests {
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
-        let schedule = simulate_parallel(&tasks, &engine, 2);
+        let schedule = dispatch(tasks, engine, 2).expect("dispatches");
 
         let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
         // Both on separate machines → makespan = 5, not 10
@@ -2658,7 +2623,7 @@ mod tests {
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
-        let schedule = simulate_parallel(&tasks, &engine, 2);
+        let schedule = dispatch(tasks, engine, 2).expect("dispatches");
 
         let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
         let util = compute_utilization(&schedule, 2, makespan);
@@ -2680,7 +2645,7 @@ mod tests {
         };
         let tasks: Vec<Task> = jobs.iter().map(build_task).collect();
         let engine = build_engine(&config.rule, &config).expect("valid rule");
-        let schedule = simulate_single(&tasks, &engine);
+        let schedule = dispatch(tasks, engine, 1).expect("dispatches");
 
         let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
         // Single machine → no utilization reported

@@ -8,6 +8,39 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking** `SimpleScheduler` dispatches operation by operation, without
+  delay: whenever a resource could start work, the rule (or task priority)
+  chooses among the activities that can start then, judged on a
+  `SchedulingContext` filled for that decision — the time, each task's
+  imminent activity, work left, arrival in the queue, the queue at its next
+  resource, the competitors' average imminent operation, and planned resource
+  utilization. It used to sort whole tasks once at the start with an empty
+  context and place them one after another, so LWKR ordered like SPT, MWKR
+  like LPT, WINQ and LPUL like input order, ATC normalized each task's slack by
+  its own processing time, CR/MST/S-RO never saw the clock move, and a machine
+  could idle waiting for a preferred task not yet released. Mean makespan gap
+  on Taillard `ta01`–`ta40`: MWKR 55.3 % → 21.9 %, SPT 73.0 % → 30.3 %.
+- `run_schedule` runs on the same scheduler (its own single- and
+  parallel-machine simulations are gone), with the same decision-time rules.
+- SPT, LPT, WSPT and ATC read the imminent operation's processing time; ATC's
+  slack subtracts the work left and divides by `k` × the competitors' average;
+  S/RO counts the operations left; LPUL reads the imminent activity's
+  resources. With an empty context each rule reads the task as a whole, as
+  before.
+- **Breaking** `SchedulingContext` has an `imminent_activity` field (and
+  `with_imminent_activity`, `imminent`, `processing_time_ms`,
+  `remaining_work_ms`, `remaining_operations`).
+- Equal earliest starts on several eligible resources go to the resource
+  declared first (it was the lexicographically smallest id, so `M10` beat
+  `M2`).
+
+### Added
+
+- `RuleEngine::best_of` — the highest-priority task among given candidates.
+- `examples/taillard.rs` — measures the rules on Taillard's job-shop instances.
+
 ## [0.20.0] - 2026-10-16
 
 Depends on u-metaheur 0.12 and u-numflow 0.13.
