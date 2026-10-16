@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-16
+
+Depends on u-numflow 0.14.
+
 ### Changed
 
 - **Breaking** `SimpleScheduler` dispatches operation by operation, without
