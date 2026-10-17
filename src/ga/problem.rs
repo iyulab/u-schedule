@@ -112,9 +112,10 @@ pub struct SchedulingGaProblem {
     /// Default: POX crossover + Swap mutation.
     /// Override with [`with_operators`](SchedulingGaProblem::with_operators).
     pub operators: GeneticOperators,
-    /// Swaps the local search may make to improve a mutated chromosome (0 turns
-    /// it off): each swap exchanges two neighbours at the edge of a critical
-    /// block and is kept only if the fitness falls.
+    /// Swaps the local search may make to improve each child of a crossover and
+    /// each mutated chromosome (0 turns it off): each swap exchanges two
+    /// neighbours at the edge of a critical block and is kept only if the
+    /// fitness falls.
     ///
     /// Default: 20. Set with
     /// [`with_local_search_steps`](SchedulingGaProblem::with_local_search_steps).
@@ -327,8 +328,8 @@ impl SchedulingGaProblem {
         self
     }
 
-    /// Sets how many swaps the local search may make to improve a mutated
-    /// chromosome; 0 turns it off.
+    /// Sets how many swaps the local search may make to improve each child and
+    /// each mutated chromosome; 0 turns it off.
     pub fn with_local_search_steps(mut self, steps: usize) -> Self {
         self.local_search_steps = steps;
         self
@@ -736,7 +737,11 @@ impl GaProblem for SchedulingGaProblem {
         let (c1, c2) = self
             .operators
             .crossover(parent1, parent2, &self.activities, rng);
-        vec![c1, c2]
+        let mut children = vec![c1, c2];
+        for child in &mut children {
+            self.improve(child);
+        }
+        children
     }
 
     fn mutate<R: Rng>(&self, individual: &mut ScheduleChromosome, rng: &mut R) {

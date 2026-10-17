@@ -12,6 +12,9 @@
 
 use super::*;
 
+/// How many of the swaps estimated best are timed in full at each step.
+const TIMED_SWAPS: usize = 3;
+
 impl SchedulingGaProblem {
     /// Improves `chromosome` in place: repeatedly the best swap at the edge of a
     /// critical block that lowers the fitness, until none does or
@@ -59,7 +62,9 @@ impl SchedulingGaProblem {
 
         for _ in 0..self.local_search_steps {
             let mut best: Option<(f64, usize, usize)> = None;
-            for (r, i) in self.block_edge_swaps(&ix, &seq, &placed, &links) {
+            let mut swaps = self.block_edge_swaps(&ix, &seq, &placed, &links);
+            self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
+            for (r, i) in swaps {
                 seq[r].swap(i, i + 1);
                 if self.time_sequences(&view, &ix, &seq, &links, &mut scratch) {
                     let f = self.fitness_of(&view, &scratch.placed);
@@ -151,6 +156,61 @@ impl SchedulingGaProblem {
             i = j + 1;
         }
         swaps
+    }
+
+    /// Cuts `swaps` to the few that look best, so that only those are timed in
+    /// full. A swap of `u` and `v` (neighbours on a machine) changes the heads
+    /// and tails of just those two, which gives the longest path through them
+    /// from the current heads and tails without timing the sequences again
+    /// (Taillard 1994, "Parallel taboo search techniques for the job shop
+    /// scheduling problem"). The estimate follows the processing times as they
+    /// are, so with sequence-dependent setups it is a ranking, not a bound.
+    fn keep_best_estimated(
+        &self,
+        view: &TaskView<'_>,
+        seq: &[Vec<usize>],
+        placed: &Placed,
+        links: &Links,
+        swaps: &mut Vec<(usize, usize)>,
+    ) {
+        if swaps.len() <= TIMED_SWAPS {
+            return;
+        }
+        let n = self.activities.len();
+        let span = |a: usize| placed.end[a] - placed.start[a];
+        let mut machine_succ: Vec<Option<usize>> = vec![None; n];
+        for s in seq {
+            for pair in s.windows(2) {
+                machine_succ[pair[0]] = Some(pair[1]);
+            }
+        }
+        // The longest path from the end of each activity to the schedule's end.
+        let mut tail = vec![0i64; n];
+        for &a in placed.order.iter().rev() {
+            tail[a] = [machine_succ[a], links.task_succ[a]]
+                .into_iter()
+                .flatten()
+                .map(|succ| span(succ) + tail[succ])
+                .max()
+                .unwrap_or(0);
+        }
+        let ends = |x: Option<usize>| x.map_or(0, |x| placed.end[x]);
+        let after = |x: Option<usize>| x.map_or(0, |x| span(x) + tail[x]);
+        swaps.sort_by_cached_key(|&(r, i)| {
+            let (u, v) = (seq[r][i], seq[r][i + 1]);
+            let before_u = i.checked_sub(1).map(|k| seq[r][k]);
+            let after_v = seq[r].get(i + 2).copied();
+            let head_v = ends(links.task_pred[v])
+                .max(ends(before_u))
+                .max(view.release[self.task_of[v]]);
+            let head_u = ends(links.task_pred[u])
+                .max(head_v + span(v))
+                .max(view.release[self.task_of[u]]);
+            let tail_u = after(links.task_succ[u]).max(after(after_v));
+            let tail_v = after(links.task_succ[v]).max(span(u) + tail_u);
+            (head_v + span(v) + tail_v).max(head_u + span(u) + tail_u)
+        });
+        swaps.truncate(TIMED_SWAPS);
     }
 
     /// Times the machine sequences `seq` into `scratch.placed`: every activity

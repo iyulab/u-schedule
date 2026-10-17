@@ -8,6 +8,21 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The GA improves each child of a crossover and each mutated chromosome with a
+  local search on the critical path (Nowicki & Smutnicki 1996, neighbourhood
+  N5): it swaps the first two and the last two activities of each block of the
+  longest chain on one machine, ranks the swaps by the longest path they leave
+  through the two (Taillard 1994), times the best three, keeps the swap that
+  lowers the fitness most and repeats, up to `local_search_steps` swaps (20),
+  then writes the improved order back into the chromosome. On Taillard
+  `ta01`–`ta40` (population 50, 200 generations, seed 1) the mean makespan gap
+  falls from 16.4 % to 10.0 % (MWKR 21.9 %), at least as good as MWKR on all 40
+  instances and no longer than before on 39, in about 3.8 s per instance (1.3 s
+  before). Rust: `SchedulingGaProblem::local_search_steps` and
+  `with_local_search_steps`; 0 gives the search of 0.22.0.
+
 ## [0.22.0] - 2026-10-17
 
 Depends on u-numflow 0.14 and u-metaheur 0.13.
