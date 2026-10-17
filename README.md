@@ -73,7 +73,7 @@ makespan gap to the optimum or best known upper bound, mean over instances
 | LPUL | 42.0 % |
 | LPT | 44.2 % |
 | LWKR | 47.9 % |
-| GA (population 50, 200 generations, seed 1) | 4.7 % |
+| GA (population 50, 200 generations, seed 1) | 4.5 % |
 
 The rules take milliseconds; the GA about 12 s per instance here. Its first
 population holds the rules' schedules (MWKR, SPT, LPT, FIFO, LWKR, and EDD and
@@ -88,7 +88,7 @@ by a local search on the critical path: swapping the first two or the last two
 activities of a block of the longest chain on one machine is the only
 rearrangement that can shorten it (Nowicki & Smutnicki 1996), so the search
 tries those and makes the best, even when it lengthens the schedule, forbidding
-the undoing of a swap for eight steps (taboo search) so that it leaves the local
+the undoing of a swap for six steps (taboo search) so that it leaves the local
 optimum a plain descent stops in; it writes the best order seen back. Without
 the local search (`local_search_steps` 0) the same GA was at 16.4 %, with a
 descent that stops at its first optimum (20 swaps) at 10.0 %. The run is

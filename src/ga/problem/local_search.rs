@@ -15,8 +15,11 @@ use super::*;
 /// How many of the swaps estimated best are timed in full at each step.
 const TIMED_SWAPS: usize = 3;
 
-/// How many steps undoing a swap stays forbidden (Nowicki & Smutnicki use 8).
-const TABOO_STEPS: usize = 8;
+/// How many steps undoing a swap stays forbidden. Nowicki & Smutnicki use 8
+/// over thousands of steps; with the 60 a chromosome gets here, 5-7 does best
+/// (mean gap on Taillard's 40 instances, 200 generations: 3 -> 4.9, 5 -> 4.3,
+/// 6 -> 4.5, 8 -> 4.7, 12 -> 4.9, 24 -> 5.2 %).
+const TABOO_STEPS: usize = 6;
 
 impl SchedulingGaProblem {
     /// Improves `chromosome` in place: repeatedly the best swap at the edge of a

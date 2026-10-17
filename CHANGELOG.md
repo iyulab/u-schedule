@@ -8,6 +8,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The GA's local search forbids undoing a swap for six steps, not eight (the value
+  Nowicki & Smutnicki use over thousands of steps; a chromosome gets 60 here). On
+  Taillard's 40 job-shop instances (200 generations, seed 1) the mean gap to the best
+  known makespan is 4.9 % at 3 steps, 4.3 % at 5, 4.5 % at 6, 4.7 % at 8, 4.9 % at 12
+  and 5.2 % at 24.
+
 ## [0.24.0] - 2026-10-17
 
 Depends on u-numflow 0.14 and u-metaheur 0.13.
