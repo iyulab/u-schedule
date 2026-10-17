@@ -106,7 +106,7 @@ in the OSV's order) and `decode_active` (the Giffler–Thompson active schedule 
 
 ```toml
 [dependencies]
-u-schedule = "0.22"
+u-schedule = "0.23"
 ```
 
 ```rust
