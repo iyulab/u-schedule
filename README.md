@@ -73,13 +73,17 @@ makespan gap to the optimum or best known upper bound, mean over instances
 | LPUL | 42.0 % |
 | LPT | 44.2 % |
 | LWKR | 47.9 % |
-| GA (population 50, 200 generations, seed 1) | 19.5 % |
+| GA (population 50, 200 generations, seed 1) | 16.4 % |
 
-The rules take milliseconds; the GA about 4.6 s per instance here. Its first
+The rules take milliseconds; the GA about 1.7 s per instance here. Its first
 population holds the rules' schedules (MWKR, SPT, LPT, FIFO, LWKR, and EDD and
 ATC when tasks have deadlines) beside random ones, and it keeps its best, so it
 never ends worse than the best rule — on all 40 instances it was at least as
-good as MWKR.
+good as MWKR. A chromosome is decoded two ways and the shorter schedule is
+kept: in the order its OSV gives, and as an *active* schedule
+(Giffler–Thompson) that lets an activity use idle time before a longer one
+when that delays nothing. Decoding only in the OSV's order left the same GA at
+19.7 %. The run is reproducible: the same seed gives the same schedule.
 
 ## GA Encoding
 
@@ -87,6 +91,10 @@ The GA module uses dual-vector encoding for job-shop scheduling:
 
 - **OSV (Operation Sequence Vector)** — Permutation encoding that determines operation processing order
 - **MAV (Machine Assignment Vector)** — Integer vector that assigns each operation to a specific machine (for flexible job shops)
+
+`SchedulingGaProblem::decode` turns a chromosome into a schedule — the shorter, by the fitness the
+search minimizes, of `decode_semi_active` (each activity as early as its machine and its job allow,
+in the OSV's order) and `decode_active` (the Giffler–Thompson active schedule that order prioritizes).
 
 ## Quick Start
 

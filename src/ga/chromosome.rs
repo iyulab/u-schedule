@@ -253,13 +253,16 @@ pub fn pox_crossover<R: Rng>(
     activities: &[ActivityInfo],
     rng: &mut R,
 ) -> (ScheduleChromosome, ScheduleChromosome) {
-    // Collect unique task IDs
+    // The unique task IDs, in the order the activities first name them -- a
+    // hash map's order differs from run to run, and with it the sample drawn
+    // below, so a seeded run would not repeat.
     let task_ids: Vec<String> = {
-        let mut seen = HashMap::new();
-        for act in activities {
-            seen.entry(act.task_id.clone()).or_insert(());
-        }
-        seen.into_keys().collect()
+        let mut seen = std::collections::HashSet::new();
+        activities
+            .iter()
+            .filter(|act| seen.insert(act.task_id.as_str()))
+            .map(|act| act.task_id.clone())
+            .collect()
     };
 
     if task_ids.is_empty() {

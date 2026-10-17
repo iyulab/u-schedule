@@ -8,14 +8,28 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The GA decodes a chromosome two ways and keeps the shorter schedule: in the
+  order of its OSV as before, and as an active schedule (Giffler & Thompson
+  1960) that lets an activity use the idle time before a longer one when that
+  delays nothing. On Taillard `ta01`–`ta40` (population 50, 200 generations,
+  seed 1) the mean makespan gap falls from 19.7 % to 16.4 % (MWKR 21.9 %), at
+  least as good as MWKR on all 40 instances, in about 1.7 s per instance (2.6 s
+  before). The decoders work on indices rather than ids, which is where the
+  time went. Rust: `SchedulingGaProblem::decode_semi_active` and
+  `decode_active`; `decode` is the better of the two.
+
 ### Fixed
 
+- A seeded GA run repeats. POX crossover drew its sample from the task ids in
+  a hash map's order, which differs from run to run, so the same seed ended on
+  different schedules (1397, 1405, 1412 on one instance).
 - `run_schedule` reports `machine_utilization` for every machine, one machine
   included. It used to leave the field out when `num_machines` was 1 (and
   returned an empty list for a schedule of zero length), so a caller charting
   busy time re-summed the schedule in exactly that case. The README example
   already showed the entry.
-
 - The GA (`SchedulingGaProblem`, and so `solve_jobshop`) starts from the
   dispatching rules' schedules — MWKR, SPT, LPT, FIFO, LWKR, and EDD and ATC
   when a task has a deadline — beside random chromosomes. From random ones

@@ -114,6 +114,17 @@ pub struct SchedulingGaProblem {
     ///
     /// Built once at construction, enables O(1) activity lookup during decode.
     activity_index: HashMap<(String, i32), usize>,
+    /// The activity indices of each task, in sequence order (what
+    /// [`decode_active`](Self::decode_active) steps through).
+    task_activities: Vec<Vec<usize>>,
+    /// The ids of the tasks, in the order of `task_activities`.
+    task_ids: Vec<String>,
+    /// `task id → index in task_ids`.
+    task_index: HashMap<String, usize>,
+    /// The task (index in `task_ids`) of each activity.
+    task_of: Vec<usize>,
+    /// `resource id → index in resources`.
+    resource_index: HashMap<String, usize>,
     /// The problem itself, which the dispatching seeds are scheduled on.
     problem: Problem,
 }
@@ -144,6 +155,38 @@ impl SchedulingGaProblem {
             .map(|(i, a)| ((a.task_id.clone(), a.sequence), i))
             .collect();
 
+        let mut by_task: Vec<(&str, Vec<usize>)> = Vec::new();
+        for (i, act) in activities.iter().enumerate() {
+            match by_task.iter_mut().find(|(t, _)| *t == act.task_id) {
+                Some((_, ops)) => ops.push(i),
+                None => by_task.push((act.task_id.as_str(), vec![i])),
+            }
+        }
+        let task_ids: Vec<String> = by_task.iter().map(|(t, _)| t.to_string()).collect();
+        let task_activities: Vec<Vec<usize>> = by_task
+            .into_iter()
+            .map(|(_, mut ops)| {
+                ops.sort_by_key(|&i| activities[i].sequence);
+                ops
+            })
+            .collect();
+        let task_index: HashMap<String, usize> = task_ids
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), i))
+            .collect();
+        let mut task_of = vec![0usize; activities.len()];
+        for (t, ops) in task_activities.iter().enumerate() {
+            for &a in ops {
+                task_of[a] = t;
+            }
+        }
+        let resource_index: HashMap<String, usize> = resources
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id.clone(), i))
+            .collect();
+
         Self {
             activities,
             resources: resources.to_vec(),
@@ -155,6 +198,11 @@ impl SchedulingGaProblem {
             process_times: HashMap::new(),
             operators: GeneticOperators::default(),
             activity_index,
+            task_activities,
+            task_ids,
+            task_index,
+            task_of,
+            resource_index,
             problem: problem.clone(),
         }
     }
@@ -288,90 +336,346 @@ impl SchedulingGaProblem {
         self
     }
 
-    /// Decodes a chromosome into a Schedule.
+    /// Decodes a chromosome into a schedule: the better, by the fitness the
+    /// search minimizes, of the chromosome's own order
+    /// ([`decode_semi_active`](Self::decode_semi_active)) and the active
+    /// schedule that order prioritizes ([`decode_active`](Self::decode_active)).
+    /// An active schedule lets an activity jump ahead into the idle time
+    /// before a longer one when that delays nothing, so the search reaches
+    /// schedules the order alone cannot express; taking the better of the two
+    /// keeps the guarantee that a chromosome made from a schedule decodes to
+    /// one no longer than it.
     pub fn decode(&self, chromosome: &ScheduleChromosome) -> Schedule {
-        let mut schedule = Schedule::new();
-        let mut resource_available: HashMap<&str, i64> = HashMap::new();
-        let mut task_available: HashMap<&str, i64> = HashMap::new();
-        let mut last_category: HashMap<&str, &str> = HashMap::new();
+        let view = self.view();
+        let ix = self.indexed(chromosome);
+        let (placed, _) = self.better_placement(&view, &ix);
+        self.schedule_of(&ix, &placed)
+    }
 
-        // Initialize resource availability
-        for resource in &self.resources {
-            resource_available.insert(&resource.id, 0);
+    /// Decodes a chromosome into a Schedule, placing the activities in the
+    /// order of its OSV, each as early as its resource and its predecessor
+    /// allow.
+    pub fn decode_semi_active(&self, chromosome: &ScheduleChromosome) -> Schedule {
+        let view = self.view();
+        let ix = self.indexed(chromosome);
+        self.schedule_of(&ix, &self.place_in_order(&view, &ix))
+    }
+
+    /// Decodes a chromosome into an *active* schedule (Giffler & Thompson 1960):
+    /// repeatedly take, among the activities next in their tasks, the one that
+    /// could finish earliest, and of those waiting for its resource before it
+    /// finishes, start the one the chromosome's order ranks first. No activity
+    /// can then start earlier without delaying another, and an optimal
+    /// schedule is among the active ones. Each activity runs on the resource
+    /// the chromosome assigns it.
+    pub fn decode_active(&self, chromosome: &ScheduleChromosome) -> Schedule {
+        let view = self.view();
+        let ix = self.indexed(chromosome);
+        self.schedule_of(&ix, &self.place_active(&view, &ix))
+    }
+
+    /// The tasks' release times, categories and deadlines, by task index --
+    /// read from the public maps each time, since they may be changed after
+    /// the problem is built.
+    fn view(&self) -> TaskView<'_> {
+        let ids = &self.task_ids;
+        TaskView {
+            release: ids
+                .iter()
+                .map(|t| self.release_times.get(t).copied().unwrap_or(0))
+                .collect(),
+            category: ids
+                .iter()
+                .map(|t| self.task_categories.get(t).map_or("", String::as_str))
+                .collect(),
+            deadline: ids.iter().map(|t| self.deadlines.get(t).copied()).collect(),
         }
+    }
 
-        // Decode OSV to get operation order
-        let operation_order = chromosome.decode_osv();
+    /// A chromosome as indices: its OSV as the activities in order, and the
+    /// resource of each activity. An OSV entry with no activity behind it, and
+    /// an activity with no resource, are left out, as the decoders always
+    /// have.
+    fn indexed(&self, chromosome: &ScheduleChromosome) -> Indexed {
+        let mut seen = vec![0usize; self.task_activities.len()];
+        let order = chromosome
+            .osv
+            .iter()
+            .filter_map(|task_id| {
+                let t = *self.task_index.get(task_id.as_str())?;
+                let k = seen[t];
+                seen[t] += 1;
+                self.task_activities[t].get(k).copied()
+            })
+            .collect();
+        let mut extra: Vec<&str> = Vec::new();
+        let resource = (0..self.activities.len())
+            .map(|a| match chromosome.mav.get(a).map(String::as_str) {
+                Some(id) if !id.is_empty() => Some(match self.resource_index.get(id) {
+                    Some(&r) => r,
+                    // A resource the problem does not list: it is free from the
+                    // start, like any other.
+                    None => {
+                        let at = extra.iter().position(|&e| e == id).unwrap_or_else(|| {
+                            extra.push(id);
+                            extra.len() - 1
+                        });
+                        self.resources.len() + at
+                    }
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The names of the resources the problem does not list, which a
+        // schedule needs; `extra` borrowed them from the chromosome, so keep
+        // them as owned strings.
+        Indexed {
+            order,
+            resource,
+            extra: extra.into_iter().map(str::to_string).collect(),
+        }
+    }
 
-        for (task_id, seq) in &operation_order {
-            // O(1) activity lookup via precomputed index
-            let act = match self.activity_index.get(&(task_id.clone(), *seq)) {
-                Some(&idx) => &self.activities[idx],
-                None => continue,
-            };
+    /// The setup of `activity` on `resource`, after the task last run there
+    /// (`previous`): the activity's own, or the transition matrix's.
+    fn setup_of(
+        &self,
+        view: &TaskView<'_>,
+        ix: &Indexed,
+        activity: usize,
+        resource: usize,
+        previous: Option<usize>,
+    ) -> i64 {
+        let own = self.activities[activity].duration.setup_ms;
+        if self.transition_matrices.is_empty() {
+            return own;
+        }
+        self.transition_matrices.setup_ms(
+            ix.resource_name(self, resource),
+            previous.map(|t| view.category[t]),
+            view.category[self.task_of[activity]],
+            own,
+        )
+    }
 
-            // Get assigned resource from MAV
-            let resource_id = match chromosome.resource_for(task_id, *seq) {
-                Some(r) if !r.is_empty() => r,
-                _ => continue,
-            };
+    /// Places the activities in the order of the chromosome, each as early as
+    /// its resource and its predecessor allow.
+    fn place_in_order(&self, view: &TaskView<'_>, ix: &Indexed) -> Placed {
+        let n_resources = self.resources.len() + ix.extra.len();
+        let mut resource_available = vec![0i64; n_resources];
+        let mut last_task: Vec<Option<usize>> = vec![None; n_resources];
+        let mut task_available = vec![0i64; self.task_activities.len()];
+        let mut placed = Placed::new(self.activities.len());
+        for &a in &ix.order {
+            let Some(r) = ix.resource[a] else { continue };
+            let t = self.task_of[a];
+            let start = resource_available[r]
+                .max(task_available[t])
+                .max(view.release[t]);
+            let setup = self.setup_of(view, ix, a, r, last_task[r]);
+            let duration = &self.activities[a].duration;
+            let end = start + setup + duration.process_ms + duration.teardown_ms;
+            placed.put(a, start, end, setup);
+            resource_available[r] = end;
+            task_available[t] = end;
+            last_task[r] = Some(t);
+        }
+        placed
+    }
 
-            // Calculate start time
-            let resource_ready = resource_available.get(resource_id).copied().unwrap_or(0);
-            let task_ready = task_available.get(task_id.as_str()).copied().unwrap_or(0);
-            let release = self.release_times.get(task_id).copied().unwrap_or(0);
-            let earliest = resource_ready.max(task_ready).max(release);
+    /// Places the activities as an active schedule; see
+    /// [`decode_active`](Self::decode_active).
+    fn place_active(&self, view: &TaskView<'_>, ix: &Indexed) -> Placed {
+        // Rank of each activity in the chromosome's order.
+        let mut rank = vec![usize::MAX; self.activities.len()];
+        for (position, &a) in ix.order.iter().enumerate() {
+            rank[a] = position;
+        }
+        let n_resources = self.resources.len() + ix.extra.len();
+        let mut resource_available = vec![0i64; n_resources];
+        let mut last_task: Vec<Option<usize>> = vec![None; n_resources];
+        let mut task_available = vec![0i64; self.task_activities.len()];
+        let mut next = vec![0usize; self.task_activities.len()];
+        let mut placed = Placed::new(self.activities.len());
 
-            // Setup by the one rule every scheduler places by; teardown
-            // follows processing.
-            let task_cat = self
-                .task_categories
-                .get(task_id)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let setup = self.transition_matrices.setup_ms(
-                resource_id,
-                last_category.get(resource_id).copied(),
-                task_cat,
-                act.duration.setup_ms,
-            );
+        // The activity next in a task, with the resource it runs on and when
+        // it could start and finish there.
+        struct Candidate {
+            activity: usize,
+            resource: usize,
+            setup: i64,
+            start: i64,
+            finish: i64,
+        }
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(self.task_activities.len());
 
-            let start = earliest;
-            let end = start + setup + act.duration.process_ms + act.duration.teardown_ms;
-
-            schedule.add_assignment(
-                Assignment::new(&act.id, task_id, resource_id, start, end)
-                    .with_sequence(act.sequence)
-                    .with_setup(setup),
-            );
-
-            // Update state
-            resource_available.insert(resource_id, end);
-            task_available.insert(task_id, end);
-            if let Some(cat) = self.task_categories.get(task_id) {
-                last_category.insert(resource_id, cat);
+        loop {
+            candidates.clear();
+            for (t, ops) in self.task_activities.iter().enumerate() {
+                // An activity with no resource is left out, as the order-based
+                // decoder leaves it out.
+                while let Some(&a) = ops.get(next[t]) {
+                    let Some(r) = ix.resource[a] else {
+                        next[t] += 1;
+                        continue;
+                    };
+                    let start = resource_available[r]
+                        .max(task_available[t])
+                        .max(view.release[t]);
+                    let setup = self.setup_of(view, ix, a, r, last_task[r]);
+                    let duration = &self.activities[a].duration;
+                    candidates.push(Candidate {
+                        activity: a,
+                        resource: r,
+                        setup,
+                        start,
+                        finish: start + setup + duration.process_ms + duration.teardown_ms,
+                    });
+                    break;
+                }
             }
-        }
 
+            // The one that could finish first fixes the resource and the
+            // moment the conflict is judged at.
+            let Some(first) = candidates
+                .iter()
+                .min_by_key(|c| (c.finish, rank[c.activity]))
+            else {
+                break;
+            };
+            let (resource, finish, first_activity) = (first.resource, first.finish, first.activity);
+            let chosen = candidates
+                .iter()
+                .filter(|c| {
+                    c.resource == resource && (c.start < finish || c.activity == first_activity)
+                })
+                .min_by_key(|c| rank[c.activity])
+                .expect("the first candidate is in the conflict set");
+
+            let t = self.task_of[chosen.activity];
+            placed.put(chosen.activity, chosen.start, chosen.finish, chosen.setup);
+            resource_available[resource] = chosen.finish;
+            task_available[t] = chosen.finish;
+            last_task[resource] = Some(t);
+            next[t] += 1;
+        }
+        placed
+    }
+
+    /// The better of the two placements of a chromosome, with its fitness.
+    /// The one placed in the chromosome's order wins a tie.
+    fn better_placement(&self, view: &TaskView<'_>, ix: &Indexed) -> (Placed, f64) {
+        let in_order = self.place_in_order(view, ix);
+        let in_order_fitness = self.fitness_of(view, &in_order);
+        let active = self.place_active(view, ix);
+        let active_fitness = self.fitness_of(view, &active);
+        if active_fitness < in_order_fitness {
+            (active, active_fitness)
+        } else {
+            (in_order, in_order_fitness)
+        }
+    }
+
+    /// A placement as a [`Schedule`], its assignments in the order they were
+    /// placed.
+    fn schedule_of(&self, ix: &Indexed, placed: &Placed) -> Schedule {
+        let mut schedule = Schedule::new();
+        for &a in &placed.order {
+            let act = &self.activities[a];
+            let resource = ix.resource[a].expect("a placed activity has a resource");
+            schedule.add_assignment(
+                Assignment::new(
+                    &act.id,
+                    &act.task_id,
+                    ix.resource_name(self, resource),
+                    placed.start[a],
+                    placed.end[a],
+                )
+                .with_sequence(act.sequence)
+                .with_setup(placed.setup[a]),
+            );
+        }
         schedule
     }
 
-    /// Computes fitness: weighted combination of makespan and tardiness.
-    fn compute_fitness(&self, schedule: &Schedule) -> f64 {
-        let makespan = schedule.makespan_ms() as f64;
-
-        let total_tardiness: f64 = self
-            .deadlines
+    /// Fitness of a placement: weighted combination of makespan and tardiness.
+    fn fitness_of(&self, view: &TaskView<'_>, placed: &Placed) -> f64 {
+        let makespan = placed
+            .order
             .iter()
-            .map(|(task_id, &deadline)| {
-                let completion = schedule.task_completion_time(task_id).unwrap_or(0);
-                tardiness_ms(completion, Some(deadline)) as f64
-            })
+            .map(|&a| placed.end[a])
+            .max()
+            .unwrap_or(0) as f64;
+        let mut completion = vec![0i64; self.task_activities.len()];
+        for &a in &placed.order {
+            let t = self.task_of[a];
+            completion[t] = completion[t].max(placed.end[a]);
+        }
+        let total_tardiness: f64 = completion
+            .iter()
+            .zip(&view.deadline)
+            .map(|(&c, &d)| tardiness_ms(c, d) as f64)
             .sum();
 
         // Weighted combination (both terms in ms, comparable scale)
         let makespan_weight = 1.0 - self.tardiness_weight;
         makespan_weight * makespan + self.tardiness_weight * total_tardiness
+    }
+}
+
+/// The tasks' release times, categories and deadlines, by task index.
+struct TaskView<'a> {
+    release: Vec<i64>,
+    category: Vec<&'a str>,
+    deadline: Vec<Option<i64>>,
+}
+
+/// A chromosome as indices into the problem's activities and resources.
+struct Indexed {
+    /// The activities in the order of the OSV.
+    order: Vec<usize>,
+    /// The resource each activity runs on: an index into the problem's
+    /// resources, or past them for one the problem does not list. `None` when
+    /// the chromosome gives it none.
+    resource: Vec<Option<usize>>,
+    /// The ids of the unlisted resources, in the order of their indices past
+    /// the problem's.
+    extra: Vec<String>,
+}
+
+impl Indexed {
+    fn resource_name<'s>(&'s self, problem: &'s SchedulingGaProblem, resource: usize) -> &'s str {
+        match problem.resources.get(resource) {
+            Some(r) => r.id.as_str(),
+            None => self.extra[resource - problem.resources.len()].as_str(),
+        }
+    }
+}
+
+/// Where and when each activity was placed.
+struct Placed {
+    /// The activities in the order they were placed.
+    order: Vec<usize>,
+    start: Vec<i64>,
+    end: Vec<i64>,
+    setup: Vec<i64>,
+}
+
+impl Placed {
+    fn new(n: usize) -> Self {
+        Self {
+            order: Vec::with_capacity(n),
+            start: vec![0; n],
+            end: vec![0; n],
+            setup: vec![0; n],
+        }
+    }
+
+    fn put(&mut self, activity: usize, start: i64, end: i64, setup: i64) {
+        self.order.push(activity);
+        self.start[activity] = start;
+        self.end[activity] = end;
+        self.setup[activity] = setup;
     }
 }
 
@@ -401,8 +705,9 @@ impl GaProblem for SchedulingGaProblem {
     }
 
     fn evaluate(&self, individual: &ScheduleChromosome) -> f64 {
-        let schedule = self.decode(individual);
-        self.compute_fitness(&schedule)
+        let view = self.view();
+        let ix = self.indexed(individual);
+        self.better_placement(&view, &ix).1
     }
 
     fn crossover<R: Rng>(
@@ -620,6 +925,174 @@ mod tests {
             5,
             "no deadlines: five rules"
         );
+    }
+
+    /// Job A is one short activity on M1; job B runs on M2 and then on M1.
+    /// With the order B, B, A the semi-active decoder leaves M1 idle until B
+    /// is ready and runs A after it; the active one lets A use the idle time.
+    fn idle_gap_problem() -> (SchedulingGaProblem, ScheduleChromosome) {
+        let op = |id: &str, task: &str, k: i32, machine: &str, ms: i64| {
+            Activity::new(id, task, k)
+                .with_duration(ActivityDuration::fixed(ms))
+                .with_requirement(
+                    ResourceRequirement::new("M").with_candidates(vec![machine.to_string()]),
+                )
+        };
+        let tasks = vec![
+            Task::new("A").with_activity(op("A1", "A", 0, "M1", 3)),
+            Task::new("B")
+                .with_activity(op("B1", "B", 0, "M2", 5))
+                .with_activity(op("B2", "B", 1, "M1", 3)),
+        ];
+        let resources = vec![Resource::new("M1", "M"), Resource::new("M2", "M")];
+        let ga = SchedulingGaProblem::new(&valid(&tasks, &resources))
+            .with_tardiness_weight(0.0)
+            .expect("a weight in [0, 1]");
+        let chromosome = ScheduleChromosome {
+            osv: vec!["B".into(), "B".into(), "A".into()],
+            mav: vec!["M1".into(), "M2".into(), "M1".into()],
+            activity_index: ga.activity_index.clone(),
+            fitness: f64::INFINITY,
+        };
+        (ga, chromosome)
+    }
+
+    #[test]
+    fn the_active_decoder_uses_idle_time_the_order_leaves() {
+        let (ga, chromosome) = idle_gap_problem();
+        assert_eq!(ga.decode_semi_active(&chromosome).makespan_ms(), 11);
+        assert_eq!(ga.decode_active(&chromosome).makespan_ms(), 8);
+        // `decode` takes the better of the two; the search sees 8.
+        assert_eq!(ga.decode(&chromosome).makespan_ms(), 8);
+        assert_eq!(ga.evaluate(&chromosome), 8.0);
+    }
+
+    /// Whatever the chromosome, an active schedule is a schedule: every
+    /// activity once, each resource and each task one thing at a time, a task's
+    /// activities in sequence -- and `decode` is never longer than the order
+    /// alone gives.
+    #[test]
+    fn decoded_schedules_are_valid_and_never_longer_than_the_order_gives() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let machines = 4;
+        for instance in 0..20 {
+            let tasks: Vec<Task> = (0..5)
+                .map(|j| {
+                    let mut order: Vec<usize> = (0..machines).collect();
+                    for i in (1..order.len()).rev() {
+                        order.swap(i, rng.random_range(0..=i));
+                    }
+                    let mut task = Task::new(format!("J{j}"));
+                    for (k, m) in order.into_iter().enumerate() {
+                        let ms = rng.random_range(1..20) as i64;
+                        task = task.with_activity(
+                            Activity::new(format!("J{j}_{k}"), format!("J{j}"), k as i32)
+                                .with_duration(ActivityDuration::fixed(ms))
+                                .with_requirement(
+                                    ResourceRequirement::new("M")
+                                        .with_candidates(vec![format!("M{m}")]),
+                                ),
+                        );
+                    }
+                    task
+                })
+                .collect();
+            let resources: Vec<Resource> = (0..machines)
+                .map(|m| Resource::new(format!("M{m}"), "M"))
+                .collect();
+            let ga = SchedulingGaProblem::new(&valid(&tasks, &resources));
+            for _ in 0..10 {
+                let chromosome = ga.create_individual(&mut rng);
+                let semi = ga.decode_semi_active(&chromosome);
+                let active = ga.decode_active(&chromosome);
+                let best = ga.decode(&chromosome);
+                assert!(
+                    best.makespan_ms() <= semi.makespan_ms(),
+                    "instance {instance}"
+                );
+                for schedule in [&semi, &active, &best] {
+                    assert_eq!(schedule.assignments.len(), 5 * machines);
+                    let mut by_resource: HashMap<&str, Vec<(i64, i64)>> = HashMap::new();
+                    let mut by_task: HashMap<&str, Vec<(i32, i64, i64)>> = HashMap::new();
+                    for a in &schedule.assignments {
+                        by_resource
+                            .entry(a.resource_id.as_str())
+                            .or_default()
+                            .push((a.start_ms, a.end_ms));
+                        by_task.entry(a.task_id.as_str()).or_default().push((
+                            a.sequence.unwrap_or(0),
+                            a.start_ms,
+                            a.end_ms,
+                        ));
+                    }
+                    for spans in by_resource.values_mut() {
+                        spans.sort();
+                        assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "overlap");
+                    }
+                    for spans in by_task.values_mut() {
+                        spans.sort();
+                        assert!(spans.windows(2).all(|w| w[0].2 <= w[1].1), "precedence");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A seed reproduces the run: two GAs with the same seed on the same
+    /// problem end with the same schedule.
+    #[test]
+    fn a_seeded_run_repeats() {
+        let op = |id: String, task: &str, k: i32, machine: usize, ms: i64| {
+            Activity::new(id, task, k)
+                .with_duration(ActivityDuration::fixed(ms))
+                .with_requirement(
+                    ResourceRequirement::new("M").with_candidates(vec![format!("M{machine}")]),
+                )
+        };
+        let tasks: Vec<Task> = (0..6)
+            .map(|j| {
+                (0..3).fold(Task::new(format!("J{j}")), |task, k| {
+                    let machine = (j + k) % 3;
+                    let ms = 1 + ((j * 7 + k * 3) % 9) as i64;
+                    task.with_activity(op(
+                        format!("J{j}_{k}"),
+                        &format!("J{j}"),
+                        k as i32,
+                        machine,
+                        ms,
+                    ))
+                })
+            })
+            .collect();
+        let resources: Vec<Resource> = (0..3)
+            .map(|m| Resource::new(format!("M{m}"), "M"))
+            .collect();
+        let problem = valid(&tasks, &resources);
+        let run = || {
+            let ga = SchedulingGaProblem::new(&problem)
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]");
+            let config = GaConfig::default()
+                .with_population_size(20)
+                .with_max_generations(30)
+                .with_seed(1)
+                .with_parallel(false);
+            let result = GaRunner::run(&ga, &config).expect("valid settings");
+            let means: Vec<f64> = result
+                .generation_stats
+                .iter()
+                .map(|g| g.mean_fitness)
+                .collect();
+            (ga.decode(&result.best), result.best.osv.clone(), means)
+        };
+        let (first, first_osv, first_means) = run();
+        for _ in 0..5 {
+            let (again, osv, means) = run();
+            assert_eq!(again.makespan_ms(), first.makespan_ms());
+            assert_eq!(osv, first_osv);
+            // The whole run, not only where it ended.
+            assert_eq!(means, first_means);
+        }
     }
 
     #[test]
