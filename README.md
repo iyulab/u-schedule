@@ -257,7 +257,7 @@ machine never waits for a job that is not yet released while another is
 }
 ```
 
-Times are in seconds. The engine schedules in whole milliseconds, so every time you send (`processing_time`, `due_date`, `release_time`) is rounded to the nearest millisecond — `0.0004` becomes `0` and `0.0005` becomes `0.001`. `machine_utilization` is present only when `num_machines > 1`.
+Times are in seconds. The engine schedules in whole milliseconds, so every time you send (`processing_time`, `due_date`, `release_time`) is rounded to the nearest millisecond — `0.0004` becomes `0` and `0.0005` becomes `0.001`. `machine_utilization` has one entry per machine (`num_machines`, one included): its busy time and that time over the makespan.
 `weight` (default 1, `> 0`) is the WSPT/ATC weight — a heavier job goes earlier;
 `priority` (integer, default 0) is read only by `PRIORITY`, higher first.
 `processing_time` must be `>= 0` and `num_machines` at least 1.

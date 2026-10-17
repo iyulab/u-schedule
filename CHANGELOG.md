@@ -10,6 +10,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Fixed
 
+- `run_schedule` reports `machine_utilization` for every machine, one machine
+  included. It used to leave the field out when `num_machines` was 1 (and
+  returned an empty list for a schedule of zero length), so a caller charting
+  busy time re-summed the schedule in exactly that case. The README example
+  already showed the entry.
+
 - The GA (`SchedulingGaProblem`, and so `solve_jobshop`) starts from the
   dispatching rules' schedules — MWKR, SPT, LPT, FIFO, LWKR, and EDD and ATC
   when a task has a deadline — beside random chromosomes. From random ones

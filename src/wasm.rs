@@ -825,8 +825,8 @@ struct ScheduleOutput {
     schedule: Vec<OutputJob>,
     makespan: f64,
     total_tardiness: f64,
-    /// Per-machine utilization. Present only when `num_machines > 1`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Busy time and utilization (busy time over makespan) of every machine,
+    /// one entry per `config.num_machines` -- one machine included.
     machine_utilization: Vec<MachineUtilization>,
 }
 
@@ -1182,9 +1182,6 @@ fn compute_utilization(
     num_machines: usize,
     makespan: f64,
 ) -> Vec<MachineUtilization> {
-    if makespan <= 0.0 {
-        return Vec::new();
-    }
     let mut busy = vec![0.0_f64; num_machines];
     for job in schedule {
         busy[job.machine] += job.end - job.start;
@@ -1194,7 +1191,8 @@ fn compute_utilization(
         .map(|(i, &b)| MachineUtilization {
             machine: i,
             busy_time: b,
-            utilization: b / makespan,
+            // A schedule of zero length keeps no machine busy.
+            utilization: if makespan > 0.0 { b / makespan } else { 0.0 },
         })
         .collect()
 }
@@ -1231,7 +1229,7 @@ fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
             schedule: vec![],
             makespan: 0.0,
             total_tardiness: 0.0,
-            machine_utilization: vec![],
+            machine_utilization: compute_utilization(&[], num_machines, 0.0),
         });
     }
 
@@ -1244,11 +1242,7 @@ fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
     let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
     let total_tardiness: f64 = schedule.iter().map(|j| j.tardiness).sum();
 
-    let machine_utilization = if num_machines > 1 {
-        compute_utilization(&schedule, num_machines, makespan)
-    } else {
-        vec![]
-    };
+    let machine_utilization = compute_utilization(&schedule, num_machines, makespan);
 
     Ok(ScheduleOutput {
         schedule,
@@ -2397,7 +2391,9 @@ mod tests {
             let input: ScheduleInput = serde_json::from_value(input).expect("valid input");
             let out = schedule_jobs(&input).expect("defaults schedule");
             assert_eq!(order(&out.schedule), ["B", "A"]);
-            assert!(out.machine_utilization.is_empty());
+            assert_eq!(out.machine_utilization.len(), 1);
+            assert!((out.machine_utilization[0].busy_time - 3.0).abs() < 1e-9);
+            assert!((out.machine_utilization[0].utilization - 1.0).abs() < 1e-9);
         }
     }
 
@@ -2635,8 +2631,8 @@ mod tests {
     }
 
     #[test]
-    fn test_single_machine_no_utilization() {
-        // num_machines=1 → machine_utilization should be empty
+    fn test_single_machine_utilization() {
+        // num_machines=1 → one entry, not an absent field
         let jobs = vec![make_input_job("A", 3.0, None, None, 1.0)];
         let config = ScheduleConfig {
             rule: "SPT".to_string(),
@@ -2648,9 +2644,7 @@ mod tests {
         let schedule = dispatch(tasks, engine, 1).expect("dispatches");
 
         let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
-        // Single machine → no utilization reported
         let util = compute_utilization(&schedule, 1, makespan);
-        // (utilization is computed but for 1 machine it would just be 1.0)
         assert_eq!(util.len(), 1);
         assert!((util[0].utilization - 1.0).abs() < 1e-9);
     }
@@ -3747,9 +3741,9 @@ mod whole_number_tests {
         // `2.0` is the number 2 in JS.
         let out = schedule(json!({ "num_machines": 2.0 })).expect("two machines");
         assert_eq!(out.machine_utilization.len(), 2);
-        // Omitted: one machine.
+        // Omitted: one machine, and it is reported like any other.
         let out = schedule(json!({})).expect("default");
-        assert!(out.machine_utilization.is_empty());
+        assert_eq!(out.machine_utilization.len(), 1);
 
         let config: JobShopGaConfig = from_json(
             json!({ "population_size": 3, "max_generations": 1, "seed": 42 }),
