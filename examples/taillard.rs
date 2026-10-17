@@ -16,7 +16,8 @@
 //! `SPT,LPT,LWKR,MWKR,FIFO,WINQ,LPUL` (default all) and `GA` -- the genetic
 //! algorithm (`SchedulingGaProblem` with `GaRunner`: makespan only, population
 //! 50, 200 generations, seed 1). `GA@<ms>` gives it a time limit instead of the
-//! generation budget, e.g. `GA@10000`.
+//! generation budget, e.g. `GA@10000`; `GA:<n>` sets the local search's swaps
+//! per improved chromosome (`GA:0` turns it off), e.g. `GA:5@10000`.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -78,10 +79,17 @@ fn read(path: &std::path::Path) -> Problem {
 
 /// The GA on makespan alone (no due dates here), population 50, seed 1;
 /// 200 generations, or as many as fit in `time_limit_ms`.
-fn genetic(problem: &Problem, time_limit_ms: Option<u64>) -> u_schedule::models::Schedule {
-    let ga = SchedulingGaProblem::new(problem)
+fn genetic(
+    problem: &Problem,
+    local_search_steps: Option<usize>,
+    time_limit_ms: Option<u64>,
+) -> u_schedule::models::Schedule {
+    let mut ga = SchedulingGaProblem::new(problem)
         .with_tardiness_weight(0.0)
         .expect("a weight in [0, 1]");
+    if let Some(steps) = local_search_steps {
+        ga = ga.with_local_search_steps(steps);
+    }
     let mut config = GaConfig::default()
         .with_population_size(50)
         .with_max_generations(200)
@@ -143,12 +151,18 @@ fn main() {
         for rule in &chosen {
             let started = Instant::now();
             let schedule = match rule.strip_prefix("GA") {
-                Some(limit) => genetic(
-                    &problem,
-                    limit
-                        .strip_prefix('@')
-                        .map(|ms| ms.parse().expect("GA@<milliseconds>")),
-                ),
+                Some(options) => {
+                    let (steps, limit) = options
+                        .split_once('@')
+                        .map_or((options, ""), |(s, ms)| (s, ms));
+                    genetic(
+                        &problem,
+                        steps
+                            .strip_prefix(':')
+                            .map(|n| n.parse().expect("GA:<swaps>")),
+                        (!limit.is_empty()).then(|| limit.parse().expect("GA@<milliseconds>")),
+                    )
+                }
                 None => SimpleScheduler::new()
                     .with_rule_engine(engine(rule))
                     .schedule(&problem, 0),

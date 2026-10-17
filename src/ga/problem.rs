@@ -18,6 +18,8 @@ use crate::models::{
 };
 use crate::Problem;
 
+mod local_search;
+
 /// Compact activity descriptor for GA encoding.
 ///
 /// Extracted from `Task`/`Activity` to avoid cloning full domain objects.
@@ -110,6 +112,13 @@ pub struct SchedulingGaProblem {
     /// Default: POX crossover + Swap mutation.
     /// Override with [`with_operators`](SchedulingGaProblem::with_operators).
     pub operators: GeneticOperators,
+    /// Swaps the local search may make to improve a mutated chromosome (0 turns
+    /// it off): each swap exchanges two neighbours at the edge of a critical
+    /// block and is kept only if the fitness falls.
+    ///
+    /// Default: 20. Set with
+    /// [`with_local_search_steps`](SchedulingGaProblem::with_local_search_steps).
+    pub local_search_steps: usize,
     /// Precomputed index: `(task_id, sequence) → activities index`.
     ///
     /// Built once at construction, enables O(1) activity lookup during decode.
@@ -197,6 +206,7 @@ impl SchedulingGaProblem {
             tardiness_weight: 0.5,
             process_times: HashMap::new(),
             operators: GeneticOperators::default(),
+            local_search_steps: 20,
             activity_index,
             task_activities,
             task_ids,
@@ -314,6 +324,13 @@ impl SchedulingGaProblem {
         process_times: HashMap<(String, i32, String), i64>,
     ) -> Self {
         self.process_times = process_times;
+        self
+    }
+
+    /// Sets how many swaps the local search may make to improve a mutated
+    /// chromosome; 0 turns it off.
+    pub fn with_local_search_steps(mut self, steps: usize) -> Self {
+        self.local_search_steps = steps;
         self
     }
 
@@ -724,6 +741,7 @@ impl GaProblem for SchedulingGaProblem {
 
     fn mutate<R: Rng>(&self, individual: &mut ScheduleChromosome, rng: &mut R) {
         self.operators.mutate(individual, &self.activities, rng);
+        self.improve(individual);
     }
 }
 
@@ -1036,6 +1054,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The local search never lengthens the schedule the order gives, leaves a
+    /// valid schedule, and on random chromosomes of random 5 x 4 job shops
+    /// shortens a good many of them -- a search that never found a swap, or one
+    /// that corrupted the order, would fail one of the three.
+    #[test]
+    fn the_local_search_shortens_and_keeps_the_schedule_valid() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        let machines = 4;
+        let (mut shortened, mut total) = (0, 0);
+        for _ in 0..20 {
+            let tasks: Vec<Task> = (0..5)
+                .map(|j| {
+                    let mut order: Vec<usize> = (0..machines).collect();
+                    for i in (1..order.len()).rev() {
+                        order.swap(i, rng.random_range(0..=i));
+                    }
+                    let mut task = Task::new(format!("J{j}"));
+                    for (k, m) in order.into_iter().enumerate() {
+                        let ms = rng.random_range(1..20) as i64;
+                        task = task.with_activity(
+                            Activity::new(format!("J{j}_{k}"), format!("J{j}"), k as i32)
+                                .with_duration(ActivityDuration::fixed(ms))
+                                .with_requirement(
+                                    ResourceRequirement::new("M")
+                                        .with_candidates(vec![format!("M{m}")]),
+                                ),
+                        );
+                    }
+                    task
+                })
+                .collect();
+            let resources: Vec<Resource> = (0..machines)
+                .map(|m| Resource::new(format!("M{m}"), "M"))
+                .collect();
+            let ga = SchedulingGaProblem::new(&valid(&tasks, &resources))
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]");
+            for _ in 0..10 {
+                let mut chromosome = ga.create_individual(&mut rng);
+                let before = ga.decode_semi_active(&chromosome).makespan_ms();
+                ga.improve(&mut chromosome);
+                let schedule = ga.decode_semi_active(&chromosome);
+                assert!(schedule.makespan_ms() <= before);
+                assert_eq!(schedule.assignments.len(), 5 * machines);
+                let mut by_resource: HashMap<&str, Vec<(i64, i64)>> = HashMap::new();
+                let mut by_task: HashMap<&str, Vec<(i32, i64, i64)>> = HashMap::new();
+                for a in &schedule.assignments {
+                    by_resource
+                        .entry(a.resource_id.as_str())
+                        .or_default()
+                        .push((a.start_ms, a.end_ms));
+                    by_task.entry(a.task_id.as_str()).or_default().push((
+                        a.sequence.unwrap_or(0),
+                        a.start_ms,
+                        a.end_ms,
+                    ));
+                }
+                for spans in by_resource.values_mut() {
+                    spans.sort();
+                    assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "overlap");
+                }
+                for spans in by_task.values_mut() {
+                    spans.sort();
+                    assert!(spans.windows(2).all(|w| w[0].2 <= w[1].1), "precedence");
+                }
+                total += 1;
+                shortened += usize::from(schedule.makespan_ms() < before);
+            }
+        }
+        assert!(
+            shortened * 4 >= total,
+            "only {shortened} of {total} shortened"
+        );
+    }
+
+    /// With the steps at 0 the local search leaves the chromosome as it is.
+    #[test]
+    fn no_local_search_steps_leave_the_chromosome_alone() {
+        let (tasks, resources) = make_test_problem();
+        let ga = SchedulingGaProblem::new(&valid(&tasks, &resources)).with_local_search_steps(0);
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut chromosome = ga.create_individual(&mut rng);
+        let before = chromosome.osv.clone();
+        ga.improve(&mut chromosome);
+        assert_eq!(chromosome.osv, before);
     }
 
     /// A seed reproduces the run: two GAs with the same seed on the same
