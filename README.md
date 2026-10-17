@@ -417,6 +417,7 @@ and a readable `message`; `makespan_mismatch` carries `reported` and `actual`.
 |-----------|-----------|---------|
 | `population_size` | >= 2 | 100 |
 | `max_generations` | >= 1 | 200 |
+| `local_search_steps` | >= 0 (0 turns the local search off) | 60 |
 | `mutation_rate` | 0.0 -- 1.0 | 0.1 |
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
 | `seed` | optional, a whole number from 0 to 2^64 − 1 | random |

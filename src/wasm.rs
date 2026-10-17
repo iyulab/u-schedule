@@ -1310,6 +1310,10 @@ fn default_max_generations() -> i128 {
     200
 }
 
+fn default_local_search_steps() -> i128 {
+    60
+}
+
 fn default_mutation_rate() -> f64 {
     0.1
 }
@@ -1338,6 +1342,12 @@ struct JobShopGaConfig {
     #[serde(default = "default_max_generations", deserialize_with = "whole")]
     #[tsify(optional, type = "number")]
     max_generations: i128,
+    /// From 0: the swaps the local search may make to improve each child and
+    /// each mutated schedule, 0 turning it off. More swaps give a shorter
+    /// schedule and a longer run.
+    #[serde(default = "default_local_search_steps", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    local_search_steps: i128,
     #[serde(default = "default_mutation_rate")]
     #[tsify(optional)]
     mutation_rate: f64,
@@ -1364,6 +1374,7 @@ impl Default for JobShopGaConfig {
         Self {
             population_size: default_population_size(),
             max_generations: default_max_generations(),
+            local_search_steps: default_local_search_steps(),
             mutation_rate: default_mutation_rate(),
             seed: None,
             tardiness_weight: default_tardiness_weight(),
@@ -1467,6 +1478,7 @@ fn parse_mutation(s: &str) -> Result<MutationType, WireError> {
 struct GaCounts {
     population_size: usize,
     max_generations: usize,
+    local_search_steps: usize,
     seed: Option<u64>,
 }
 
@@ -1478,6 +1490,7 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<GaCounts, WireError> {
     let counts = GaCounts {
         population_size: count("ga_config.population_size", cfg.population_size, 2)?,
         max_generations: count("ga_config.max_generations", cfg.max_generations, 1)?,
+        local_search_steps: count("ga_config.local_search_steps", cfg.local_search_steps, 0)?,
         seed: cfg
             .seed
             .map(|seed| whole_in("ga_config.seed", seed, 0, u64::MAX.into()))
@@ -1666,6 +1679,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     let ga_problem = SchedulingGaProblem::new(&problem)
         .with_tardiness_weight(input.ga_config.tardiness_weight)
         .map_err(|e| WireError::from(vec![e]))?
+        .with_local_search_steps(counts.local_search_steps)
         .with_operators(GeneticOperators {
             crossover_type,
             mutation_type,
@@ -2903,6 +2917,7 @@ mod tests {
             ],
             num_machines: Some(3),
             ga_config: JobShopGaConfig {
+                local_search_steps: 20,
                 population_size: 20,
                 max_generations: 30,
                 mutation_rate: 0.1,
@@ -3098,6 +3113,7 @@ mod tests {
                 .collect(),
             num_machines: Some(2),
             ga_config: JobShopGaConfig {
+                local_search_steps: 20,
                 population_size: 20,
                 max_generations,
                 mutation_rate: 0.1,
@@ -3155,6 +3171,7 @@ mod tests {
             ],
             num_machines: Some(2),
             ga_config: JobShopGaConfig {
+                local_search_steps: 20,
                 population_size: 20,
                 max_generations: 30,
                 mutation_rate: 0.1,
@@ -3389,6 +3406,24 @@ mod tests {
     }
 
     #[test]
+    fn the_local_search_steps_are_a_count_from_zero() {
+        let cfg = JobShopGaConfig {
+            local_search_steps: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_ga_config(&cfg).expect("zero").local_search_steps,
+            0
+        );
+        let cfg = JobShopGaConfig {
+            local_search_steps: -1,
+            ..Default::default()
+        };
+        let err = validate_ga_config(&cfg).unwrap_err();
+        assert!(err.message.contains("local_search_steps"), "got: {}", err);
+    }
+
+    #[test]
     fn test_validate_ga_config_population_size_one() {
         let cfg = JobShopGaConfig {
             population_size: 1,
@@ -3475,6 +3510,7 @@ mod tests {
         // Verify that invalid GA config is caught as an error, not a panic.
         // We test via validate_ga_config since solve_jobshop requires JsValue (WASM).
         let cfg = JobShopGaConfig {
+            local_search_steps: 20,
             population_size: 0,
             max_generations: 10,
             mutation_rate: 0.1,
@@ -3502,6 +3538,7 @@ mod tests {
             }],
             num_machines: Some(1),
             ga_config: JobShopGaConfig {
+                local_search_steps: 20,
                 population_size: 4,
                 max_generations: 5,
                 mutation_rate: 0.1,
@@ -3755,6 +3792,7 @@ mod whole_number_tests {
             GaCounts {
                 population_size: 3,
                 max_generations: 1,
+                local_search_steps: 60,
                 seed: Some(42),
             }
         );
@@ -3763,6 +3801,7 @@ mod whole_number_tests {
             GaCounts {
                 population_size: 100,
                 max_generations: 200,
+                local_search_steps: 60,
                 seed: None,
             }
         );

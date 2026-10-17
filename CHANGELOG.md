@@ -18,6 +18,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   mean gap to the best known makespan falls from 10.0 to 4.7 %, in about 12 s per
   instance instead of 4 s; 20 steps give 7.4 % in 7 s and 200 steps 3.9 % in 15 s.
   `local_search_steps` 0 still turns the search off.
+- `solve_jobshop` takes `ga_config.local_search_steps` (a whole number from 0,
+  default 60), the knob that trades the schedule's length for the run's.
 
 ## [0.23.0] - 2026-10-17
 
