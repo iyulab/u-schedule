@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-17
+
+Depends on u-numflow 0.14 and u-metaheur 0.13.
+
 ### Changed
 
 - The GA's local search is a taboo search: each step makes the best block-edge
