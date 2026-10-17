@@ -8,6 +8,17 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The GA's local search is a taboo search: each step makes the best block-edge
+  swap even when it lengthens the schedule, undoing a swap is forbidden for eight
+  steps, and the best sequences seen are written back. A plain descent stopped in
+  the first local optimum, so raising `local_search_steps` hardly helped. The
+  default is now 60 steps (was 20): on Taillard's 40 job-shop instances the GA's
+  mean gap to the best known makespan falls from 10.0 to 4.7 %, in about 12 s per
+  instance instead of 4 s; 20 steps give 7.4 % in 7 s and 200 steps 3.9 % in 15 s.
+  `local_search_steps` 0 still turns the search off.
+
 ## [0.23.0] - 2026-10-17
 
 Depends on u-numflow 0.14 and u-metaheur 0.13.

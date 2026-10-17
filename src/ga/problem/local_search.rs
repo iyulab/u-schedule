@@ -15,6 +15,9 @@ use super::*;
 /// How many of the swaps estimated best are timed in full at each step.
 const TIMED_SWAPS: usize = 3;
 
+/// How many steps undoing a swap stays forbidden (Nowicki & Smutnicki use 8).
+const TABOO_STEPS: usize = 8;
+
 impl SchedulingGaProblem {
     /// Improves `chromosome` in place: repeatedly the best swap at the edge of a
     /// critical block that lowers the fitness, until none does or
@@ -58,17 +61,29 @@ impl SchedulingGaProblem {
         }
         let mut placed = std::mem::replace(&mut scratch.placed, Placed::new(n));
         let mut fitness = self.fitness_of(&view, &placed);
-        let start_fitness = fitness;
 
-        for _ in 0..self.local_search_steps {
+        // Taboo search over the block-edge swaps: the best swap is made even when
+        // it lengthens the schedule, and undoing a swap is forbidden for a few
+        // steps, so the search leaves the local optimum a strict descent stops
+        // in. The best sequences seen are the result.
+        let mut best_fitness = fitness;
+        let mut best_order: Option<Vec<usize>> = None;
+        let mut taboo: Vec<(usize, usize, usize)> = Vec::new();
+        for step in 0..self.local_search_steps {
+            taboo.retain(|&(_, _, until)| until > step);
             let mut best: Option<(f64, usize, usize)> = None;
             let mut swaps = self.block_edge_swaps(&ix, &seq, &placed, &links);
             self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
             for (r, i) in swaps {
+                let (u, v) = (seq[r][i], seq[r][i + 1]);
+                let forbidden = taboo
+                    .iter()
+                    .any(|&(a, b, _)| (a, b) == (u, v) || (a, b) == (v, u));
                 seq[r].swap(i, i + 1);
                 if self.time_sequences(&view, &ix, &seq, &links, &mut scratch) {
                     let f = self.fitness_of(&view, &scratch.placed);
-                    if f < fitness && best.is_none_or(|(b, ..)| f < b) {
+                    // A forbidden swap is allowed when it beats the best so far.
+                    if (!forbidden || f < best_fitness) && best.is_none_or(|(b, ..)| f < b) {
                         best = Some((f, r, i));
                     }
                 }
@@ -77,6 +92,7 @@ impl SchedulingGaProblem {
             let Some((f, r, i)) = best else {
                 break;
             };
+            let (u, v) = (seq[r][i], seq[r][i + 1]);
             seq[r].swap(i, i + 1);
             // The best swap's timing was in `scratch` only until the next
             // candidate overwrote it.
@@ -84,13 +100,17 @@ impl SchedulingGaProblem {
             debug_assert!(timed, "a swap that was timed once is timed again");
             fitness = f;
             std::mem::swap(&mut placed, &mut scratch.placed);
+            taboo.push((u, v, step + TABOO_STEPS));
+            if fitness < best_fitness {
+                best_fitness = fitness;
+                // `placed.order` is a topological order of the sequences just
+                // timed, so placing in it reproduces them.
+                best_order = Some(placed.order.clone());
+            }
         }
 
-        if fitness < start_fitness {
-            // `placed.order` is a topological order of the improved sequences,
-            // so placing in it reproduces them.
-            chromosome.osv = placed
-                .order
+        if let Some(order) = best_order {
+            chromosome.osv = order
                 .iter()
                 .map(|&a| self.task_ids[self.task_of[a]].clone())
                 .collect();

@@ -114,10 +114,10 @@ pub struct SchedulingGaProblem {
     pub operators: GeneticOperators,
     /// Swaps the local search may make to improve each child of a crossover and
     /// each mutated chromosome (0 turns it off): each swap exchanges two
-    /// neighbours at the edge of a critical block and is kept only if the
-    /// fitness falls.
+    /// neighbours at the edge of a critical block, the best one even when it
+    /// lengthens the schedule (taboo search), and the best sequences seen are kept.
     ///
-    /// Default: 20. Set with
+    /// Default: 60. Set with
     /// [`with_local_search_steps`](SchedulingGaProblem::with_local_search_steps).
     pub local_search_steps: usize,
     /// Precomputed index: `(task_id, sequence) → activities index`.
@@ -207,7 +207,7 @@ impl SchedulingGaProblem {
             tardiness_weight: 0.5,
             process_times: HashMap::new(),
             operators: GeneticOperators::default(),
-            local_search_steps: 20,
+            local_search_steps: 60,
             activity_index,
             task_activities,
             task_ids,
@@ -1061,6 +1061,68 @@ mod tests {
         }
     }
 
+    /// A random job shop: every job visits every machine once, in a random order.
+    fn random_job_shop(
+        rng: &mut SmallRng,
+        jobs: usize,
+        machines: usize,
+    ) -> (Vec<Task>, Vec<Resource>) {
+        let tasks: Vec<Task> = (0..jobs)
+            .map(|j| {
+                let mut order: Vec<usize> = (0..machines).collect();
+                for i in (1..order.len()).rev() {
+                    order.swap(i, rng.random_range(0..=i));
+                }
+                let mut task = Task::new(format!("J{j}"));
+                for (k, m) in order.into_iter().enumerate() {
+                    let ms = rng.random_range(1..20) as i64;
+                    task = task.with_activity(
+                        Activity::new(format!("J{j}_{k}"), format!("J{j}"), k as i32)
+                            .with_duration(ActivityDuration::fixed(ms))
+                            .with_requirement(
+                                ResourceRequirement::new("M")
+                                    .with_candidates(vec![format!("M{m}")]),
+                            ),
+                    );
+                }
+                task
+            })
+            .collect();
+        let resources: Vec<Resource> = (0..machines)
+            .map(|m| Resource::new(format!("M{m}"), "M"))
+            .collect();
+        (tasks, resources)
+    }
+
+    /// The taboo search continues the descent: the same chromosome improved with
+    /// more steps is never longer than with fewer, since the first steps are
+    /// the same and the best sequences seen are kept.
+    #[test]
+    fn more_local_search_steps_never_give_a_longer_schedule() {
+        let mut rng = SmallRng::seed_from_u64(23);
+        for _ in 0..15 {
+            let (tasks, resources) = random_job_shop(&mut rng, 6, 5);
+            let few = SchedulingGaProblem::new(&valid(&tasks, &resources))
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]")
+                .with_local_search_steps(1);
+            let many = SchedulingGaProblem::new(&valid(&tasks, &resources))
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]")
+                .with_local_search_steps(60);
+            for _ in 0..5 {
+                let start = few.create_individual(&mut rng);
+                let (mut a, mut b) = (start.clone(), start);
+                few.improve(&mut a);
+                many.improve(&mut b);
+                assert!(
+                    many.decode_semi_active(&b).makespan_ms()
+                        <= few.decode_semi_active(&a).makespan_ms()
+                );
+            }
+        }
+    }
+
     /// The local search never lengthens the schedule the order gives, leaves a
     /// valid schedule, and on random chromosomes of random 5 x 4 job shops
     /// shortens a good many of them -- a search that never found a swap, or one
@@ -1071,30 +1133,7 @@ mod tests {
         let machines = 4;
         let (mut shortened, mut total) = (0, 0);
         for _ in 0..20 {
-            let tasks: Vec<Task> = (0..5)
-                .map(|j| {
-                    let mut order: Vec<usize> = (0..machines).collect();
-                    for i in (1..order.len()).rev() {
-                        order.swap(i, rng.random_range(0..=i));
-                    }
-                    let mut task = Task::new(format!("J{j}"));
-                    for (k, m) in order.into_iter().enumerate() {
-                        let ms = rng.random_range(1..20) as i64;
-                        task = task.with_activity(
-                            Activity::new(format!("J{j}_{k}"), format!("J{j}"), k as i32)
-                                .with_duration(ActivityDuration::fixed(ms))
-                                .with_requirement(
-                                    ResourceRequirement::new("M")
-                                        .with_candidates(vec![format!("M{m}")]),
-                                ),
-                        );
-                    }
-                    task
-                })
-                .collect();
-            let resources: Vec<Resource> = (0..machines)
-                .map(|m| Resource::new(format!("M{m}"), "M"))
-                .collect();
+            let (tasks, resources) = random_job_shop(&mut rng, 5, machines);
             let ga = SchedulingGaProblem::new(&valid(&tasks, &resources))
                 .with_tardiness_weight(0.0)
                 .expect("a weight in [0, 1]");
