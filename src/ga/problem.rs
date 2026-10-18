@@ -138,6 +138,10 @@ pub struct SchedulingGaProblem {
     /// Whether any activity's time depends on its resource — when none does,
     /// the decoders read each activity's own duration without a lookup.
     timed: bool,
+    /// Each activity's [`predecessors`](crate::models::Activity::predecessors)
+    /// in any task, as activity indices: a decoder places an activity only
+    /// once they are, and not before they end.
+    predecessors: Vec<Vec<usize>>,
     /// `resource id → index in resources`.
     resource_index: HashMap<String, usize>,
     /// The problem itself, which the dispatching seeds are scheduled on.
@@ -214,6 +218,23 @@ impl SchedulingGaProblem {
             .enumerate()
             .map(|(i, r)| (r.id.clone(), i))
             .collect();
+        // `Problem::new` refused unknown predecessors and cycles.
+        let by_id: HashMap<&str, usize> = activities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.id.as_str(), i))
+            .collect();
+        let predecessors: Vec<Vec<usize>> = problem
+            .tasks()
+            .iter()
+            .flat_map(|t| &t.activities)
+            .map(|a| {
+                a.predecessors
+                    .iter()
+                    .filter_map(|p| by_id.get(p.as_str()).copied())
+                    .collect()
+            })
+            .collect();
 
         Self {
             activities,
@@ -233,6 +254,7 @@ impl SchedulingGaProblem {
             activity_release,
             timed: timings.iter().any(|t| !t.is_empty()),
             timings,
+            predecessors,
             resource_index,
             problem: problem.clone(),
         }
@@ -544,12 +566,15 @@ impl SchedulingGaProblem {
         let mut last_task: Vec<Option<usize>> = vec![None; n_resources];
         let mut task_last: Vec<Option<usize>> = vec![None; self.task_activities.len()];
         let mut placed = Placed::new(self.activities.len());
-        for &a in &ix.order {
+        let mut settled = vec![false; self.activities.len()];
+        for a in self.ready_order(ix) {
+            settled[a] = true;
             let Some(r) = ix.resource[a] else { continue };
             let t = self.task_of[a];
             let start = resource_available[r]
                 .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                .max(self.release_of(view, a));
+                .max(self.release_of(view, a))
+                .max(self.predecessors_end(a, &placed.end, &settled));
             let setup = self.setup_of(view, ix, a, r, last_task[r]);
             let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;
@@ -559,6 +584,58 @@ impl SchedulingGaProblem {
             last_task[r] = Some(t);
         }
         placed
+    }
+
+    /// The chromosome's order with each activity moved after its
+    /// [`predecessors`](Self::predecessors) in other tasks (and so after the
+    /// rest of its task's earlier steps): repeatedly the first activity of the
+    /// order still waiting whose predecessors have all been taken — a
+    /// priority list read in a precedence-feasible order, as a serial
+    /// schedule generation scheme reads it (Kolisch & Hartmann 1999). The
+    /// order itself when no activity has such predecessors.
+    fn ready_order(&self, ix: &Indexed) -> Vec<usize> {
+        if self.predecessors.iter().all(Vec::is_empty) {
+            return ix.order.clone();
+        }
+        let mut taken = vec![false; self.activities.len()];
+        // An activity the order leaves out never comes: its successors do not
+        // wait for it.
+        let mut in_order = vec![false; self.activities.len()];
+        for &a in &ix.order {
+            in_order[a] = true;
+        }
+        let mut waiting = ix.order.clone();
+        let mut out = Vec::with_capacity(waiting.len());
+        while !waiting.is_empty() {
+            let k = waiting
+                .iter()
+                .position(|&a| {
+                    self.predecessors[a]
+                        .iter()
+                        .all(|&p| taken[p] || !in_order[p])
+                        && self.task_activities[self.task_of[a]]
+                            .iter()
+                            .take_while(|&&b| b != a)
+                            .all(|&b| taken[b] || !in_order[b])
+                })
+                // Only a cycle `Problem::new` refuses leaves none ready.
+                .unwrap_or(0);
+            let a = waiting.remove(k);
+            taken[a] = true;
+            out.push(a);
+        }
+        out
+    }
+
+    /// When the last of `activity`'s predecessors in other tasks ends, of
+    /// those placed (`settled` and given a resource); 0 when none.
+    fn predecessors_end(&self, activity: usize, end: &[i64], settled: &[bool]) -> i64 {
+        self.predecessors[activity]
+            .iter()
+            .filter(|&&p| settled[p])
+            .map(|&p| end[p])
+            .max()
+            .unwrap_or(0)
     }
 
     /// Places the activities as an active schedule; see
@@ -575,6 +652,8 @@ impl SchedulingGaProblem {
         let mut task_last: Vec<Option<usize>> = vec![None; self.task_activities.len()];
         let mut next = vec![0usize; self.task_activities.len()];
         let mut placed = Placed::new(self.activities.len());
+        // Placed, or passed over for want of a resource.
+        let mut settled = vec![false; self.activities.len()];
 
         // The activity next in a task, with the resource it runs on and when
         // it could start and finish there.
@@ -594,12 +673,18 @@ impl SchedulingGaProblem {
                 // decoder leaves it out.
                 while let Some(&a) = ops.get(next[t]) {
                     let Some(r) = ix.resource[a] else {
+                        settled[a] = true;
                         next[t] += 1;
                         continue;
                     };
+                    // It waits for its predecessors in other tasks.
+                    if !self.predecessors[a].iter().all(|&p| settled[p]) {
+                        break;
+                    }
                     let start = resource_available[r]
                         .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                        .max(self.release_of(view, a));
+                        .max(self.release_of(view, a))
+                        .max(self.predecessors_end(a, &placed.end, &settled));
                     let setup = self.setup_of(view, ix, a, r, last_task[r]);
                     let duration = ix.duration[a];
                     candidates.push(Candidate {
@@ -632,6 +717,7 @@ impl SchedulingGaProblem {
 
             let t = self.task_of[chosen.activity];
             placed.put(chosen.activity, chosen.start, chosen.finish, chosen.setup);
+            settled[chosen.activity] = true;
             resource_available[resource] = chosen.finish;
             task_last[t] = Some(chosen.activity);
             last_task[resource] = Some(t);
@@ -1530,6 +1616,52 @@ mod tests {
                 .expect("placed")
                 .start_ms;
             assert!(start >= 6_000, "J1-2 starts at {start}");
+            let input = crate::scheduler::FeasibilityInput {
+                tasks: problem.tasks(),
+                resources: problem.resources(),
+                constraints: &[],
+            };
+            let violations = crate::scheduler::check_schedule(&schedule, &input);
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
+
+    #[test]
+    fn both_decoders_wait_for_predecessors_in_other_tasks() {
+        // J2-1 waits for J1-2, though the order puts J2 first and its machine
+        // is free from the start.
+        let on = |id: &str, task: &str, seq: i32, machine: &str| {
+            Activity::new(id, task, seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        let tasks = vec![
+            Task::new("J1")
+                .with_activity(on("J1-1", "J1", 0, "A"))
+                .with_activity(on("J1-2", "J1", 1, "A")),
+            Task::new("J2").with_activity(on("J2-1", "J2", 0, "B").with_predecessor("J1-2")),
+        ];
+        let resources = vec![Resource::new("A", "Machine"), Resource::new("B", "Machine")];
+        let problem = valid(&tasks, &resources);
+        let ga = SchedulingGaProblem::new(&problem);
+        let chromosome = ScheduleChromosome {
+            osv: vec!["J2".into(), "J1".into(), "J1".into()],
+            mav: vec!["A".into(), "A".into(), "B".into()],
+            activity_index: ga.activity_index.clone(),
+            fitness: f64::INFINITY,
+        };
+        for schedule in [
+            ga.decode_semi_active(&chromosome),
+            ga.decode_active(&chromosome),
+            ga.decode(&chromosome),
+        ] {
+            let start = schedule
+                .assignment_for_activity("J2-1")
+                .expect("placed")
+                .start_ms;
+            assert_eq!(start, 2_000);
             let input = crate::scheduler::FeasibilityInput {
                 tasks: problem.tasks(),
                 resources: problem.resources(),

@@ -23,9 +23,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   another task's started at once; the feasibility check reported it as a
   `PrecedenceViolation`. A predecessor left unplaced does not hold its
   successors back, as an unplaced step of a task does not hold the next.
-  The genetic algorithm (`ga`) and the CP model (`cp`) still order a task's
-  activities only — the activities they take from a `Problem` with
-  cross-task predecessors are not kept to them.
+- **The genetic algorithm (`ga::SchedulingGaProblem`) and the CP model
+  (`cp::ScheduleCpBuilder`) keep `predecessors` too.** Both decoders place an
+  activity only once its predecessors are placed, and not before they end —
+  the order-based one reading the chromosome's order in a precedence-feasible
+  order (a serial schedule generation scheme), the active one leaving an
+  activity out of the conflict set until then; the CP model states each as a
+  precedence constraint. Both ordered a task's activities only, so a schedule
+  they built from a `Problem` with cross-task predecessors could break them.
 
 ### Changed
 

@@ -69,7 +69,8 @@ impl<'a> ScheduleCpBuilder<'a> {
     /// - An `IntervalVar` per activity
     /// - `NoOverlap` constraints per resource (over the activities it is
     ///   eligible for)
-    /// - `Precedence` constraints for intra-task activity ordering
+    /// - `Precedence` constraints for intra-task activity ordering and for
+    ///   each activity's `predecessors` in other tasks
     /// - User-defined constraints
     /// - `MinimizeMaxEnd` objective (makespan minimization)
     pub fn build(&self, horizon_ms: i64) -> CpModel {
@@ -107,6 +108,15 @@ impl<'a> ScheduleCpBuilder<'a> {
                     _ => 0,
                 };
                 model.add_precedence(pair[0].id.clone(), pair[1].id.clone(), transport);
+            }
+        }
+
+        // Predecessors in any task: each ends before the activity starts.
+        for task in self.problem.tasks() {
+            for activity in &task.activities {
+                for predecessor in &activity.predecessors {
+                    model.add_precedence(predecessor.clone(), activity.id.clone(), 0);
+                }
             }
         }
 
@@ -384,6 +394,32 @@ mod tests {
         let first = schedule.assignment_for_activity("J-1").expect("placed");
         let next = schedule.assignment_for_activity("J-2").expect("placed");
         assert!(next.start_ms >= first.end_ms + 5_000);
+    }
+
+    #[test]
+    fn a_predecessor_in_another_task_ends_before_the_activity_starts() {
+        let on = |id: &str, task: &str, machine: &str| {
+            Activity::new(id, task, 0)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        let problem = crate::Problem::new(
+            vec![
+                Task::new("J1").with_activity(on("J1-1", "J1", "A")),
+                Task::new("J2").with_activity(on("J2-1", "J2", "B").with_predecessor("J1-1")),
+            ],
+            vec![Resource::new("A", "Machine"), Resource::new("B", "Machine")],
+        )
+        .expect("valid");
+        let (schedule, _) = ScheduleCpBuilder::new(&problem).solve(
+            &SimpleCpSolver::new(),
+            &SolverConfig::default(),
+            100_000,
+        );
+        let at = |id: &str| schedule.assignment_for_activity(id).expect("placed");
+        assert!(at("J2-1").start_ms >= at("J1-1").end_ms);
     }
 
     #[test]
