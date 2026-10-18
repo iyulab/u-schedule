@@ -320,13 +320,26 @@ impl SimpleScheduler {
         // work moves on from (`Resource::transport_ms`).
         let mut came_from: Vec<Vec<String>> = vec![Vec::new(); tasks.len()];
 
-        // The resources each activity may run on, by task and step (WINQ).
-        let eligible: Vec<Vec<Vec<&str>>> = tasks
+        // The resources each activity may run on, by task and step, as sets
+        // of resource positions (WINQ asks whether two of them meet).
+        let position: HashMap<&str, usize> = resources
+            .iter()
+            .enumerate()
+            .map(|(k, r)| (r.id.as_str(), k))
+            .collect();
+        let eligible: Vec<Vec<ResourceSet>> = tasks
             .iter()
             .map(|t| {
                 t.activities
                     .iter()
-                    .map(|a| a.eligible_resources(resources))
+                    .map(|a| {
+                        ResourceSet::of(
+                            resources.len(),
+                            a.eligible_resources(resources)
+                                .iter()
+                                .map(|id| position[id]),
+                        )
+                    })
                     .collect()
             })
             .collect();
@@ -778,7 +791,7 @@ fn time_only_span(
 #[allow(clippy::too_many_arguments)]
 fn decision_context(
     tasks: &[Task],
-    eligible: &[Vec<Vec<&str>>],
+    eligible: &[Vec<ResourceSet>],
     timelines: &HashMap<String, ResourceTimeline>,
     fixed: &HashMap<&str, Vec<&Assignment>>,
     cursor: &[usize],
@@ -794,9 +807,9 @@ fn decision_context(
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
 
-    let wanted: Vec<(usize, &[&str])> = offers
+    let wanted: Vec<(usize, &ResourceSet)> = offers
         .iter()
-        .map(|&(i, _)| (i, eligible[i][cursor[i]].as_slice()))
+        .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
         .collect();
     // The rules judge the competing tasks only, so their entries are the
     // ones filled.
@@ -814,7 +827,7 @@ fn decision_context(
                 let usable = &eligible[i][c + 1 + n];
                 wanted
                     .iter()
-                    .filter(|(j, rs)| *j != i && rs.iter().any(|r| usable.contains(r)))
+                    .filter(|(j, rs)| *j != i && rs.meets(usable))
                     .count()
             })
             .unwrap_or(0);
@@ -854,6 +867,25 @@ fn decision_context(
 impl Default for SimpleScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A set of resources by their position in the problem, as bits.
+struct ResourceSet(Vec<u64>);
+
+impl ResourceSet {
+    /// The set of `positions` among `n` resources.
+    fn of(n: usize, positions: impl Iterator<Item = usize>) -> Self {
+        let mut bits = vec![0u64; n.div_ceil(64)];
+        for k in positions {
+            bits[k / 64] |= 1 << (k % 64);
+        }
+        Self(bits)
+    }
+
+    /// Whether the two sets share a resource.
+    fn meets(&self, other: &Self) -> bool {
+        self.0.iter().zip(&other.0).any(|(a, b)| a & b != 0)
     }
 }
 

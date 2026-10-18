@@ -50,6 +50,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   start. With calendars a year long that never work together, finding that
   out used to take time in the number of candidate starts squared; it is now
   one pass.
+- `SimpleScheduler` decides faster on problems with many tasks waiting at
+  once: the count of other waiting tasks that want an activity's next
+  resources (WINQ) compares resource sets as bits instead of resource ids,
+  and a resource timeline keeps its booked time and latest end instead of
+  summing its bookings each decision. On 600 activities over 10 machines
+  with 6 candidates each, a schedule takes 193 ms instead of 300 ms; the
+  schedules are the same.
 
 ## [0.27.0] - 2026-10-18
 

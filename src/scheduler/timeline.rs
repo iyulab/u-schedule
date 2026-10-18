@@ -34,6 +34,8 @@ pub struct ResourceTimeline {
     bookings: Vec<(TimeWindow, i32)>,
     /// The latest end among `bookings[..=i]`.
     latest_end_to: Vec<i64>,
+    /// Booked time × units, over every booking.
+    booked: i64,
 }
 
 impl ResourceTimeline {
@@ -45,6 +47,7 @@ impl ResourceTimeline {
             calendar: resource.calendar.clone(),
             bookings: Vec::new(),
             latest_end_to: Vec::new(),
+            booked: 0,
         }
     }
 
@@ -131,6 +134,7 @@ impl ResourceTimeline {
             .partition_point(|(b, _)| b.start_ms <= start_ms);
         self.bookings
             .insert(at, (TimeWindow::new(start_ms, end_ms), units));
+        self.booked += (end_ms - start_ms) * i64::from(units);
         self.latest_end_to.truncate(at);
         let mut latest = at
             .checked_sub(1)
@@ -166,15 +170,12 @@ impl ResourceTimeline {
     /// Booked unit-time: each booking's length times its units (a capacity-2
     /// resource with two concurrent one-unit bookings counts both).
     pub fn booked_ms(&self) -> i64 {
-        self.bookings
-            .iter()
-            .map(|(b, units)| (b.end_ms - b.start_ms) * i64::from(*units))
-            .sum()
+        self.booked
     }
 
     /// End of the latest booking, if any.
     pub fn latest_end(&self) -> Option<i64> {
-        self.bookings.iter().map(|(b, _)| b.end_ms).max()
+        self.latest_end_to.last().copied()
     }
 
     /// Units that can be booked at once.
