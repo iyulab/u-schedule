@@ -247,8 +247,19 @@ let a = SimpleScheduler::new().schedule(&problem, 11 * H).assignments.remove(0);
 assert_eq!((a.start_ms, a.end_ms), (11 * H, 15 * H)); // 11–12, lunch, 13–15
 ```
 
-`SimpleScheduler` and the feasibility check read calendars; the GA decoders
-and the CP builder do not, so on calendared resources their schedules are
+### Resources held together
+
+A resource can name **companions** it holds whenever an activity runs on it —
+a robot that occupies its cell, a machine that needs its fixture:
+`Resource::new("ROBOT", "Machine").with_companion("CELL")`. A candidate is
+taken only when it and its companions are free for the whole span; the
+companion gets an assignment of its own (same span, no setup), takes no unit
+of any requirement and does not change the activity's time — but its calendar
+counts for a resumable activity. The feasibility check reports a resource used
+without its companion.
+
+`SimpleScheduler` and the feasibility check read calendars and companions; the
+GA decoders and the CP builder do not, so on calendared resources their schedules are
 checked, not built, against working time (breaches appear in
 `Schedule::violations`).
 
@@ -530,7 +541,7 @@ try {
 | `invalid_option` | `parameter` (and `rule` for `config.atc_k`) | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population), or `config.atc_k` given with a `rule` other than `ATC` — `rule` names the chosen one; a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), a count or seed that is not a whole number (`config.num_machines: 2.5` — `parameter` is the field), or a JSON string |
-| `invalid_resource_reference` | `activity`, `resource` | A step that names a machine the problem does not have (not produced by today's inputs: the machines are the ones the operations name) |
+| `invalid_resource_reference` | `activity`, `resource`, `companion` | A step that names a machine the problem does not have, or a machine whose companion is unknown or itself (not produced by today's inputs: the machines are the ones the operations name, and they have no companions) |
 | `invalid_predecessor` | `activity`, `predecessor` | A step that waits on a step the problem does not have (not produced by today's inputs) |
 | `cyclic_dependency` | `activity` | Steps that wait on each other in a cycle (not produced by today's inputs: a job's steps run in their listed order) |
 | `invalid_calendar_period` | `parameter`, `resource`, `index`, `start`, `end` | A machine calendar period that ends before it starts (not produced by today's inputs: they carry no calendars) |

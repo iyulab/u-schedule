@@ -134,7 +134,7 @@ impl Code {
             Code::DuplicateId => &["entity", "id", "first", "second", "errors"],
             Code::MissingMachine => &["job", "operation"],
             Code::NoMachines | Code::Internal => &[],
-            Code::InvalidResourceReference => &["activity", "resource", "errors"],
+            Code::InvalidResourceReference => &["activity", "resource", "companion", "errors"],
             Code::CyclicDependency => &["activity", "errors"],
             Code::InvalidPredecessor => &["activity", "predecessor", "errors"],
             Code::InvalidCalendarPeriod => {
@@ -476,6 +476,10 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
         ValidationErrorKind::InvalidResourceReference { activity, resource } => {
             json!({ "activity": activity, "resource": resource })
         }
+        ValidationErrorKind::InvalidCompanion {
+            resource,
+            companion,
+        } => json!({ "resource": resource, "companion": companion }),
         ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
         ValidationErrorKind::EmptyTask { task } => {
             json!({ "parameter": "operations", "task": task })
@@ -2111,6 +2115,10 @@ mod tests {
             ValidationErrorKind::InvalidResourceReference {
                 activity: String::new(),
                 resource: String::new(),
+            },
+            ValidationErrorKind::InvalidCompanion {
+                resource: String::new(),
+                companion: String::new(),
             },
             ValidationErrorKind::InvalidPredecessor {
                 activity: String::new(),

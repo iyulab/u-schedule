@@ -46,6 +46,13 @@ pub enum ValidationErrorKind {
         /// The resource id that matches no resource.
         resource: String,
     },
+    /// A resource names a companion that doesn't exist, or itself.
+    InvalidCompanion {
+        /// The resource naming the companion.
+        resource: String,
+        /// The companion id.
+        companion: String,
+    },
     /// The precedence graph contains a cycle.
     CyclicDependency {
         /// An activity on the cycle.
@@ -171,7 +178,8 @@ impl ValidationErrorKind {
     pub fn code(&self) -> &'static str {
         match self {
             ValidationErrorKind::DuplicateId { .. } => "duplicate_id",
-            ValidationErrorKind::InvalidResourceReference { .. } => "invalid_resource_reference",
+            ValidationErrorKind::InvalidResourceReference { .. }
+            | ValidationErrorKind::InvalidCompanion { .. } => "invalid_resource_reference",
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
             // The shared reason: a list with nothing in it -- `parameter` names it.
             ValidationErrorKind::EmptyTask { .. } => "empty_input",
@@ -194,6 +202,16 @@ impl ValidationError {
             }
             ValidationErrorKind::InvalidResourceReference { activity, resource } => {
                 format!("Activity '{activity}' references unknown resource '{resource}'")
+            }
+            ValidationErrorKind::InvalidCompanion {
+                resource,
+                companion,
+            } => {
+                if resource == companion {
+                    format!("Resource '{resource}' names itself as a companion")
+                } else {
+                    format!("Resource '{resource}' names unknown companion '{companion}'")
+                }
             }
             ValidationErrorKind::CyclicDependency { activity } => {
                 format!("Circular dependency detected involving activity '{activity}'")
@@ -263,6 +281,7 @@ impl std::error::Error for ValidationError {}
 /// 9. Every activity's setup, process and teardown times are `>= 0`
 /// 10. Every resource's capacity is at least 1
 /// 11. Every calendar window and blocked period has `start_ms <= end_ms`
+/// 12. Every companion names another existing resource
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -350,6 +369,20 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                     entity: Entity::Activity,
                     id: act.id.clone(),
                 }));
+            }
+        }
+    }
+
+    // Companions name other existing resources
+    for r in resources {
+        for c in &r.companions {
+            if c == &r.id || !resource_ids.contains(c.as_str()) {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::InvalidCompanion {
+                        resource: r.id.clone(),
+                        companion: c.clone(),
+                    },
+                ));
             }
         }
     }

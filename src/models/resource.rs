@@ -37,6 +37,11 @@ pub struct Resource {
     /// Skill names (e.g., "welding", "milling"), matched exactly against a
     /// requirement's [`required_skills`](super::ResourceRequirement::required_skills).
     pub skills: Vec<String>,
+    /// Resources held together with this one whenever an activity runs on it
+    /// (a robot that occupies its cell, a machine that needs its fixture) —
+    /// for the activity's whole span, without changing its time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<String>,
     /// Domain-specific metadata.
     pub attributes: HashMap<String, String>,
 }
@@ -52,8 +57,16 @@ impl Resource {
             capacity: 1,
             calendar: None,
             skills: Vec::new(),
+            companions: Vec::new(),
             attributes: HashMap::new(),
         }
+    }
+
+    /// Holds `resource_id` too whenever an activity runs on this resource
+    /// ([`companions`](Self::companions)).
+    pub fn with_companion(mut self, resource_id: impl Into<String>) -> Self {
+        self.companions.push(resource_id.into());
+        self
     }
 
     /// Sets the resource name.

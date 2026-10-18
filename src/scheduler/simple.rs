@@ -349,6 +349,7 @@ impl SimpleScheduler {
                     .get_mut(resource_id)
                     .expect("selection references known resource");
                 tl.book(placement.start_ms, placement.end_ms);
+                let companion = placement.companions.contains(resource_id);
                 schedule.add_assignment(
                     Assignment::new(
                         &activity.id,
@@ -359,7 +360,7 @@ impl SimpleScheduler {
                     )
                     .with_setup(*setup_ms),
                 );
-                if self.transition_matrices.has_matrix(resource_id) {
+                if !companion && self.transition_matrices.has_matrix(resource_id) {
                     last_category.insert(resource_id.clone(), task.category.clone());
                 }
             }
@@ -420,7 +421,16 @@ impl SimpleScheduler {
                         } else {
                             tl.earliest_fit(t, span)
                         };
-                        fit.map(|fit| (fit, d.process_ms, rid))
+                        // With its companions free over the same span.
+                        let fit = with_companions(
+                            fit?,
+                            span,
+                            rid,
+                            resources,
+                            timelines,
+                            activity.resumable,
+                        )?;
+                        Some((fit, d.process_ms, rid))
                     })
                     .collect();
                 // 동시각이면 짧은 처리, 그다음 자원 선언 순서 (stable sort)
@@ -451,8 +461,21 @@ impl SimpleScheduler {
             .collect();
         let max_setup = selections.iter().map(|&(_, s)| s).max().unwrap_or(0);
         let d = max_setup + d.process_ms + d.teardown_ms;
+        // The resources chosen hold their companions for the same span; a
+        // companion has no setup of its own and does not change the time.
+        let mut companions: Vec<String> = Vec::new();
+        for c in selections
+            .iter()
+            .flat_map(|(rid, _)| companions_of(rid, resources))
+        {
+            if selections.iter().all(|(s, _)| s != c) && !companions.contains(c) {
+                companions.push(c.clone());
+            }
+        }
+        let mut selections = selections;
+        selections.extend(companions.iter().map(|c| (c.clone(), 0)));
         if activity.resumable {
-            return Self::place_resumable(timelines, selections, t, d);
+            return Self::place_resumable(timelines, selections, companions, t, d);
         }
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
@@ -467,6 +490,7 @@ impl SimpleScheduler {
                     start_ms: t,
                     end_ms: t + d,
                     selections,
+                    companions,
                 });
             }
             t = t_next;
@@ -481,6 +505,7 @@ impl SimpleScheduler {
     fn place_resumable(
         timelines: &HashMap<String, ResourceTimeline>,
         selections: Vec<(String, i64)>,
+        companions: Vec<String>,
         t: i64,
         work_ms: i64,
     ) -> Option<Placement> {
@@ -505,6 +530,7 @@ impl SimpleScheduler {
                     start_ms: start,
                     end_ms: end,
                     selections: selections.clone(),
+                    companions: companions.clone(),
                 })
         })
     }
@@ -626,7 +652,55 @@ impl Default for SimpleScheduler {
 struct Placement {
     start_ms: i64,
     end_ms: i64,
-    selections: Vec<(String, i64)>, // (resource_id, setup_ms)
+    selections: Vec<(String, i64)>, // (resource_id, setup_ms) — companions included
+    /// The selections held only as companions of another.
+    companions: Vec<String>,
+}
+
+/// The companions `resource_id` declares ([`Resource::companions`]).
+fn companions_of<'a>(resource_id: &str, resources: &'a [Resource]) -> &'a [String] {
+    resources
+        .iter()
+        .find(|r| r.id == resource_id)
+        .map_or(&[], |r| r.companions.as_slice())
+}
+
+/// The earliest start from `fit` on at which `resource_id`'s companions are
+/// also free (non-resumable: in working time) for `span`, and the resource
+/// itself still fits — or `None` if they never are.
+fn with_companions(
+    fit: i64,
+    span: i64,
+    resource_id: &str,
+    resources: &[Resource],
+    timelines: &HashMap<String, ResourceTimeline>,
+    resumable: bool,
+) -> Option<i64> {
+    let companions = companions_of(resource_id, resources);
+    if companions.is_empty() {
+        return Some(fit);
+    }
+    let group: Vec<&ResourceTimeline> = std::iter::once(resource_id)
+        .chain(companions.iter().map(String::as_str))
+        .map(|id| timelines.get(id))
+        .collect::<Option<_>>()?;
+    let mut t = fit;
+    for _ in 0..MAX_FIXED_POINT_ITERS {
+        let mut next = t;
+        for tl in &group {
+            let f = if resumable {
+                tl.earliest_resumable(t, span).map(|(f, _)| f)
+            } else {
+                tl.earliest_fit(t, span)
+            }?;
+            next = next.max(f);
+        }
+        if next == t {
+            return Some(t);
+        }
+        t = next;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -655,6 +729,108 @@ mod tests {
             activity = activity.with_speed_on(m, speed);
         }
         Task::new(id).with_activity(activity)
+    }
+
+    fn on(id: &str, machine: &str, ms: i64) -> Task {
+        Task::new(id).with_activity(
+            Activity::new(format!("{id}-1"), id, 0)
+                .with_process_time(ms)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                ),
+        )
+    }
+
+    #[test]
+    fn test_a_resource_holds_its_companion_for_the_whole_span() {
+        // The robot works in its cell: running on the robot occupies the cell.
+        let tasks = vec![on("A", "ROBOT", 30_000), on("B", "CELL", 20_000)];
+        let resources = vec![
+            Resource::new("ROBOT", "Machine").with_companion("CELL"),
+            Resource::new("CELL", "Machine"),
+        ];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        let spans: Vec<(&str, &str, i64, i64)> = schedule
+            .assignments
+            .iter()
+            .map(|a| {
+                (
+                    a.activity_id.as_str(),
+                    a.resource_id.as_str(),
+                    a.start_ms,
+                    a.end_ms,
+                )
+            })
+            .collect();
+        assert!(spans.contains(&("A-1", "ROBOT", 0, 30_000)));
+        assert!(
+            spans.contains(&("A-1", "CELL", 0, 30_000)),
+            "the companion is booked: {spans:?}"
+        );
+        assert!(spans.contains(&("B-1", "CELL", 30_000, 50_000)));
+    }
+
+    #[test]
+    fn test_a_companion_in_use_holds_back_its_resource() {
+        // The cell is busy first; the robot cannot start until it is free.
+        let tasks = vec![on("A", "CELL", 20_000), on("B", "ROBOT", 10_000)];
+        let resources = vec![
+            Resource::new("CELL", "Machine"),
+            Resource::new("ROBOT", "Machine").with_companion("CELL"),
+        ];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        let b = schedule.assignment_for_activity("B-1").expect("placed");
+        assert_eq!((b.start_ms, b.end_ms), (20_000, 30_000));
+    }
+
+    #[test]
+    fn test_feasibility_requires_the_companion_and_counts_it_as_no_unit() {
+        let tasks = vec![on("A", "ROBOT", 30_000)];
+        let resources = vec![
+            Resource::new("ROBOT", "Machine").with_companion("CELL"),
+            Resource::new("CELL", "Machine"),
+        ];
+        let input = super::super::feasibility::FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let mut with = Schedule::new();
+        with.add_assignment(Assignment::new("A-1", "A", "ROBOT", 0, 30_000));
+        with.add_assignment(Assignment::new("A-1", "A", "CELL", 0, 30_000));
+        assert!(super::super::feasibility::check_schedule(&with, &input).is_empty());
+        let mut without = Schedule::new();
+        without.add_assignment(Assignment::new("A-1", "A", "ROBOT", 0, 30_000));
+        let found = super::super::feasibility::check_schedule(&without, &input);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.message.contains("without its companion 'CELL'")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn test_a_companion_must_be_another_known_resource() {
+        let resources = vec![
+            Resource::new("ROBOT", "Machine").with_companion("NOPE"),
+            Resource::new("CELL", "Machine").with_companion("CELL"),
+        ];
+        let errors = crate::Problem::new(vec![on("A", "CELL", 1)], resources).expect_err("refused");
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| e.kind.code() == "invalid_resource_reference")
+                .count(),
+            2,
+            "{errors:?}"
+        );
     }
 
     #[test]

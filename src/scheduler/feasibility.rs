@@ -34,6 +34,26 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::{Activity, Constraint, Resource, Schedule, Task, Violation};
 
+/// The resources among `assigned` (one activity's) held only as a companion
+/// of another of them ([`Resource::companions`]).
+fn companions_among<'a>(
+    assigned: &[&'a str],
+    res_by_id: &HashMap<&str, &Resource>,
+) -> HashSet<&'a str> {
+    assigned
+        .iter()
+        .filter(|&&r| {
+            assigned.iter().any(|&p| {
+                p != r
+                    && res_by_id
+                        .get(p)
+                        .is_some_and(|res| res.companions.iter().any(|c| c == r))
+            })
+        })
+        .copied()
+        .collect()
+}
+
 /// Model context a schedule is validated against.
 pub struct FeasibilityInput<'a> {
     /// Tasks whose activities the schedule should cover.
@@ -49,7 +69,7 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
     let mut v = Vec::new();
     let res_by_id: HashMap<&str, &Resource> =
         input.resources.iter().map(|r| (r.id.as_str(), r)).collect();
-    check_assignments(schedule, input, &mut v);
+    check_assignments(schedule, input, &res_by_id, &mut v);
     check_requirements(schedule, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
     check_calendars(schedule, input, &res_by_id, &mut v);
@@ -70,7 +90,12 @@ pub fn annotate_schedule(schedule: &mut Schedule, input: &FeasibilityInput) {
 /// activity's span (its recorded setup + processing + teardown) and starts no
 /// earlier than the task's release time. An assignment under a task the model
 /// does not have is an external booking and is not judged here.
-fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+fn check_assignments(
+    schedule: &Schedule,
+    input: &FeasibilityInput,
+    res_by_id: &HashMap<&str, &Resource>,
+    out: &mut Vec<Violation>,
+) {
     let mut by_id: HashMap<&str, (&Task, &Activity)> = HashMap::new();
     for task in input.tasks {
         for activity in &task.activities {
@@ -78,13 +103,21 @@ fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
         }
     }
     let model_tasks: HashSet<&str> = input.tasks.iter().map(|t| t.id.as_str()).collect();
-    // The resources each activity runs on: its time depends on them.
+    // The resources each activity runs on (its time depends on them), and
+    // those it only holds as companions (they take no unit and no time).
     let mut runs_on: HashMap<&str, Vec<&str>> = HashMap::new();
     for a in &schedule.assignments {
         runs_on
             .entry(a.activity_id.as_str())
             .or_default()
             .push(a.resource_id.as_str());
+    }
+    let held: HashMap<&str, HashSet<&str>> = runs_on
+        .iter()
+        .map(|(&act, assigned)| (act, companions_among(assigned, res_by_id)))
+        .collect();
+    for (act, assigned) in runs_on.iter_mut() {
+        assigned.retain(|r| !held[act].contains(r));
     }
     let mut uses: HashMap<&str, i32> = HashMap::new();
     for a in &schedule.assignments {
@@ -117,6 +150,9 @@ fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
             .iter()
             .map(|r| r.quantity)
             .sum();
+        if held[a.activity_id.as_str()].contains(a.resource_id.as_str()) {
+            continue; // a companion: no unit, no time of its own
+        }
         let used = uses.entry(a.activity_id.as_str()).or_default();
         *used += 1;
         if *used > units.max(1) {
@@ -187,8 +223,30 @@ fn check_requirements(
                     ));
                 }
             }
-            // greedy 귀속: 요구별로 미귀속 자원 claim
-            let mut unclaimed: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
+            // greedy 귀속: 요구별로 미귀속 자원 claim — companions are held,
+            // not claimed; each resource that is claimed holds its own.
+            let assigned: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
+            let held = companions_among(&assigned, res_by_id);
+            for &r in assigned.iter().filter(|r| !held.contains(*r)) {
+                if let Some(res) = res_by_id.get(r) {
+                    for c in &res.companions {
+                        if !assigned.contains(&c.as_str()) {
+                            out.push(Violation::requirement_unfilled(
+                                &activity.id,
+                                format!(
+                                    "activity '{}' runs on '{r}' without its companion '{c}'",
+                                    activity.id
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            let mut unclaimed: Vec<&str> = assigned
+                .iter()
+                .copied()
+                .filter(|r| !held.contains(r))
+                .collect();
             for req in &activity.resource_requirements {
                 let candidates: HashSet<&str> = input
                     .resources
@@ -312,7 +370,8 @@ fn check_calendars(
                     .iter()
                     .filter_map(|r| res_by_id.get(r).and_then(|res| res.calendar.as_ref()))
                     .collect();
-                let d = activity.duration_on(runs_on.iter().copied());
+                let held = companions_among(&runs_on, res_by_id);
+                let d = activity.duration_on(runs_on.iter().copied().filter(|r| !held.contains(r)));
                 let needed = a.setup_ms + d.process_ms + d.teardown_ms;
                 let starts_in_work =
                     crate::models::joint_work_end(&calendars, a.start_ms, 0).is_some();

@@ -32,6 +32,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   its span instead of requiring one unbroken stretch.
   `ResourceTimeline::earliest_resumable`, `calendar` and `is_free`.
 
+- Companion resources: `Resource::with_companion` — a resource held together
+  with this one whenever an activity runs on it (a robot and its cell).
+  `SimpleScheduler` takes a candidate only when its companions are free too and
+  books them (an assignment each, same span, no setup); the feasibility check
+  counts them as no unit and reports a resource used without its companion.
+  An unknown companion, or a resource naming itself, is refused
+  (`InvalidCompanion` — `invalid_resource_reference`, field `companion`).
 - Initial setup: `TransitionMatrix::with_initial` / `set_initial(category, ms)`
   — the setup before a resource's first activity, from its initial state
   (Allahverdi's `s_0j`). It was always 0; it still is unless set.
