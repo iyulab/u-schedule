@@ -26,8 +26,9 @@ use serde_json::{json, Map, Value};
 pub const SCHEMA_FILE: &str = "schemas/wasm.schema.json";
 
 /// Exports that are not operations: `codes` lists the refusal vocabulary,
-/// which the card reaches through `errors.source`.
-const NOT_OPERATIONS: &[&str] = &["codes"];
+/// which the card reaches through `errors.source`, and `version` names the
+/// build.
+const NOT_OPERATIONS: &[&str] = &["codes", "version"];
 
 /// One argument of an exported function.
 pub struct Arg {
@@ -68,7 +69,8 @@ pub fn string_enum<'a>(names: impl IntoIterator<Item = &'a str>) -> Schema {
 struct Operation {
     id: &'static str,
     args: Vec<Arg>,
-    output: Schema,
+    /// `None`: the card points at schemas written by hand elsewhere.
+    output: Option<Schema>,
 }
 
 /// The operations of a binding and the generator their schemas share, so a
@@ -94,9 +96,27 @@ impl Schemas {
     /// Declares one exported function: its arguments in call order and what
     /// it returns.
     pub fn op(&self, id: &'static str, args: Vec<Arg>, output: Schema) {
-        self.operations
-            .borrow_mut()
-            .push(Operation { id, args, output });
+        self.operations.borrow_mut().push(Operation {
+            id,
+            args,
+            output: Some(output),
+        });
+    }
+
+    /// Declares an exported function whose schemas are written by hand, not
+    /// generated here: its argument names are still held to the binding, and
+    /// the card may point anywhere for its schemas.
+    #[allow(dead_code, reason = "this file is shared; not every binding has one")]
+    pub fn op_by_hand(&self, id: &'static str, args: &[&'static str]) {
+        let args = args
+            .iter()
+            .map(|name| arg(name, Schema::default()))
+            .collect();
+        self.operations.borrow_mut().push(Operation {
+            id,
+            args,
+            output: None,
+        });
     }
 
     /// The schema file's content: every type the operations use and, per
@@ -104,6 +124,9 @@ impl Schemas {
     pub fn document(&self, title: &str) -> Value {
         let mut defs: Map<String, Value> = self.generator.borrow_mut().take_definitions(true);
         for op in self.operations.borrow().iter() {
+            let Some(output) = &op.output else {
+                continue;
+            };
             let names: Vec<&str> = op.args.iter().map(|a| a.name).collect();
             let mut properties = Map::new();
             for a in &op.args {
@@ -129,7 +152,7 @@ impl Schemas {
                     "additionalProperties": false,
                 }),
             );
-            defs.insert(format!("{}.output", op.id), op.output.clone().to_value());
+            defs.insert(format!("{}.output", op.id), output.clone().to_value());
         }
         json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -187,12 +210,12 @@ impl Schemas {
         assert_eq!(sorted(exported), sorted(declared));
     }
 
-    /// `engine-card.json` lists exactly these operations, each pointing at
-    /// its two schemas in [`SCHEMA_FILE`].
+    /// `engine-card.json` lists exactly these operations, each generated one
+    /// pointing at its two schemas in [`SCHEMA_FILE`].
     pub fn check_card(&self) {
         let card: Value = serde_json::from_str(
             &std::fs::read_to_string(root().join("engine-card.json"))
-                .expect("engine-card.json is at the crate root"),
+                .expect("engine-card.json is at the repository root"),
         )
         .expect("engine-card.json is JSON");
         let listed = card["operations"]
@@ -206,8 +229,18 @@ impl Schemas {
         let mut expected: Vec<&str> = self.operations.borrow().iter().map(|op| op.id).collect();
         expected.sort_unstable();
         assert_eq!(ids, expected, "the card's operations are the binding's");
+        let by_hand: Vec<&str> = self
+            .operations
+            .borrow()
+            .iter()
+            .filter(|op| op.output.is_none())
+            .map(|op| op.id)
+            .collect();
         for op in listed {
             let id = op["id"].as_str().expect("an operation has an id");
+            if by_hand.contains(&id) {
+                continue;
+            }
             for side in ["input", "output"] {
                 assert_eq!(
                     op[side]["schema"].as_str(),
@@ -219,8 +252,15 @@ impl Schemas {
     }
 }
 
+/// The repository root: the nearest directory up from this crate that holds
+/// `engine-card.json` -- the crate itself, or the workspace above a member
+/// crate -- and the crate when there is no card yet.
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .ancestors()
+        .find(|dir| dir.join("engine-card.json").is_file())
+        .map_or(manifest.clone(), PathBuf::from)
 }
 
 /// Calls that read a clock or draw randomness no seed controls.
@@ -238,23 +278,35 @@ const CLOCK_AND_ENTROPY: &[&str] = &[
     "getrandom",
 ];
 
-/// Every place under `src/` that reads a clock or draws unseeded randomness,
-/// as `(path from the crate root, call)`. A card calls an operation
+/// Every place in the repository's `src/` trees (each crate's, in a
+/// workspace) that reads a clock or draws unseeded randomness, as `(path from
+/// the repository root, call)`. A card calls an operation
 /// deterministic, or seeded, only where none of these is on its path; a
 /// crate's test pins this list so a new one cannot arrive unnoticed. It reads
 /// this crate's source only: a clock or randomness reached through a
 /// dependency is the card's to declare.
 pub fn clock_and_entropy_uses() -> Vec<(String, &'static str)> {
     let mut found = Vec::new();
-    let mut dirs = vec![root().join("src")];
+    let mut dirs = vec![root()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).expect("a source directory is readable") {
             let path = entry.expect("a directory entry").path();
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
             if path.is_dir() {
-                dirs.push(path);
+                if !name.is_some_and(|n| n == "target" || n.starts_with('.')) {
+                    dirs.push(path);
+                }
                 continue;
             }
-            if path.extension().is_none_or(|e| e != "rs") || path.ends_with("engine_card.rs") {
+            let in_src = path
+                .strip_prefix(root())
+                .expect("under the repository root")
+                .components()
+                .any(|c| c.as_os_str() == "src");
+            if !in_src
+                || path.extension().is_none_or(|e| e != "rs")
+                || path.ends_with("engine_card.rs")
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("a source file is readable");
@@ -274,7 +326,9 @@ pub fn clock_and_entropy_uses() -> Vec<(String, &'static str)> {
             let code = kept.join("\n");
             for needle in CLOCK_AND_ENTROPY {
                 if code.contains(needle) {
-                    let rel = path.strip_prefix(root()).expect("under the crate root");
+                    let rel = path
+                        .strip_prefix(root())
+                        .expect("under the repository root");
                     found.push((rel.to_string_lossy().replace('\\', "/"), *needle));
                 }
             }
