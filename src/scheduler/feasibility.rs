@@ -810,16 +810,21 @@ mod tests {
         use u_metaheur::cp::{SimpleCpSolver, SolverConfig};
         use u_metaheur::ga::{GaConfig, GaRunner};
 
+        // Odd jobs overlap their second step with the first: from 0.4 of it
+        // on, and ending 300 ms after it.
         let tasks: Vec<Task> = (0..4)
             .map(|j| {
                 let id = format!("J{j}");
                 let mut t = Task::new(&id).with_release_time(200 * j as i64);
                 for k in 0..2 {
-                    t = t.with_activity(
-                        Activity::new(format!("{id}-O{k}"), &id, k)
-                            .with_duration(ActivityDuration::new(100, 1000 + 100 * k as i64, 50))
-                            .with_requirement(ResourceRequirement::new("Machine")),
-                    );
+                    let mut step = Activity::new(format!("{id}-O{k}"), &id, k)
+                        .with_duration(ActivityDuration::new(100, 1000 + 100 * k as i64, 50))
+                        .with_requirement(ResourceRequirement::new("Machine"));
+                    if k == 1 && j % 2 == 1 {
+                        step = step
+                            .with_overlap(crate::models::Overlap::new(0.4).with_finish_after(300));
+                    }
+                    t = t.with_activity(step);
                 }
                 t
             })

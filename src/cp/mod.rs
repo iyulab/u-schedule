@@ -70,7 +70,9 @@ impl<'a> ScheduleCpBuilder<'a> {
     /// - `NoOverlap` constraints per resource (over the activities it is
     ///   eligible for)
     /// - `Precedence` constraints for intra-task activity ordering and for
-    ///   each activity's `predecessors` in other tasks
+    ///   each activity's `predecessors` in other tasks — a step that
+    ///   [overlaps](crate::models::Overlap) the one before by a delay that may
+    ///   be negative (both bounds, exact since every span here is fixed)
     /// - User-defined constraints
     /// - `MinimizeMaxEnd` objective (makespan minimization)
     pub fn build(&self, horizon_ms: i64) -> CpModel {
@@ -107,7 +109,21 @@ impl<'a> ScheduleCpBuilder<'a> {
                     ),
                     _ => 0,
                 };
-                model.add_precedence(pair[0].id.clone(), pair[1].id.clone(), transport);
+                let delay = match &pair[1].overlap {
+                    None => transport,
+                    // start(b) >= start(a) + share of a's span, and end(b) >=
+                    // end(a) + lag: both as end(a) + delay <= start(b).
+                    Some(overlap) => {
+                        let (before, after) = (
+                            self.duration_of(&pair[0]).total_ms(),
+                            self.duration_of(&pair[1]).total_ms(),
+                        );
+                        (overlap.earliest_start((0, before)) - before)
+                            .max(overlap.finish_after_ms - after)
+                            + transport
+                    }
+                };
+                model.add_precedence(pair[0].id.clone(), pair[1].id.clone(), delay);
             }
         }
 
@@ -394,6 +410,48 @@ mod tests {
         let first = schedule.assignment_for_activity("J-1").expect("placed");
         let next = schedule.assignment_for_activity("J-2").expect("placed");
         assert!(next.start_ms >= first.end_ms + 5_000);
+    }
+
+    #[test]
+    fn an_overlapping_step_keeps_both_bounds() {
+        use crate::models::Overlap;
+        let on = |id: &str, seq: i32, ms: i64, machine: &str| {
+            Activity::new(id, "J", seq)
+                .with_process_time(ms)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        for (bend, overlap, expected) in [
+            (1_000, Overlap::new(0.3), (400, 1_400)),
+            (200, Overlap::new(0.3), (900, 1_100)),
+            (200, Overlap::new(0.0).with_finish_after(50), (950, 1_150)),
+        ] {
+            let problem = crate::Problem::new(
+                vec![Task::new("J")
+                    .with_activity(on("cut", 0, 1_000, "A"))
+                    .with_activity(on("bend", 1, bend, "B").with_overlap(overlap))],
+                vec![
+                    Resource::new("A", "Machine").with_transport_to("B", 100),
+                    Resource::new("B", "Machine"),
+                ],
+            )
+            .expect("valid");
+            let (schedule, _) = ScheduleCpBuilder::new(&problem).solve(
+                &SimpleCpSolver::new(),
+                &SolverConfig::default(),
+                100_000,
+            );
+            let a = schedule.assignment_for_activity("bend").expect("placed");
+            assert_eq!((a.start_ms, a.end_ms), expected, "bend {bend}");
+            let input = crate::scheduler::FeasibilityInput {
+                tasks: problem.tasks(),
+                resources: problem.resources(),
+                constraints: &[],
+            };
+            let violations = crate::scheduler::check_schedule(&schedule, &input);
+            assert!(violations.is_empty(), "{violations:?}");
+        }
     }
 
     #[test]

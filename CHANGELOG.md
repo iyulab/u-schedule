@@ -25,7 +25,9 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `finish_after_ms` -- the transport between their resources adding to both.
   `SimpleScheduler` (and `DispatchSearch`) and the genetic algorithm's two
   decoders and local search place by both bounds, holding back a step that
-  would end too early, and the feasibility check reports either
+  would end too early; the CP model states both as one end-to-start delay,
+  which may be negative (exact, since its spans are fixed); and the
+  feasibility check reports either
   bound broken as a `PrecedenceViolation`. `Problem::new` refuses an overlap
   on a task's first step (`invalid_option`), a share outside `[0, 1]` or a
   negative lag (`parameter_out_of_range`). A new public field: a struct
