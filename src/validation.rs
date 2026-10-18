@@ -117,6 +117,14 @@ pub enum ValidationErrorKind {
         /// The speed given.
         speed: f64,
     },
+    /// A requirement's [`usage`](crate::models::ResourceRequirement::usage)
+    /// is below 1: the activity would take nothing of the resource it holds.
+    UsageOutOfRange {
+        /// The activity.
+        activity: String,
+        /// The usage given.
+        usage: i32,
+    },
     /// A resource's capacity is below 1: it could never hold an activity.
     CapacityOutOfRange {
         /// The resource.
@@ -208,6 +216,7 @@ impl ValidationErrorKind {
             | ValidationErrorKind::NegativeDuration { .. }
             | ValidationErrorKind::SpeedOutOfRange { .. }
             | ValidationErrorKind::CapacityOutOfRange { .. }
+            | ValidationErrorKind::UsageOutOfRange { .. }
             | ValidationErrorKind::NegativeTransport { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
@@ -240,6 +249,9 @@ impl ValidationError {
                     format!("Resource '{resource}' gives a transport time to unknown resource '{to}'")
                 }
             }
+            ValidationErrorKind::UsageOutOfRange { activity, usage } => format!(
+                "Activity '{activity}' takes usage {usage} of a resource; a usage must be at least 1"
+            ),
             ValidationErrorKind::NegativeTransport {
                 resource,
                 to,
@@ -317,6 +329,7 @@ impl std::error::Error for ValidationError {}
 /// 11. Every calendar window and blocked period has `start_ms <= end_ms`
 /// 12. Every companion names another existing resource
 /// 13. Every transport time is `>= 0` and to another existing resource
+/// 14. Every requirement's usage is at least 1
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -390,6 +403,12 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
         }
 
         for act in &task.activities {
+            if let Some(req) = act.resource_requirements.iter().find(|r| r.usage < 1) {
+                errors.push(ValidationError::new(ValidationErrorKind::UsageOutOfRange {
+                    activity: act.id.clone(),
+                    usage: req.usage,
+                }));
+            }
             let d = &act.duration;
             if d.setup_ms < 0 || d.process_ms < 0 || d.teardown_ms < 0 {
                 errors.push(ValidationError::new(
@@ -926,5 +945,26 @@ mod tests {
             )),
             ["parameter_out_of_range"]
         );
+    }
+
+    #[test]
+    fn a_usage_is_at_least_one() {
+        let task = |usage: i32| {
+            Task::new("J1").with_activity(
+                Activity::new("O1", "J1", 0)
+                    .with_process_time(1)
+                    .with_requirement(ResourceRequirement::new("Machine").with_usage(usage)),
+            )
+        };
+        assert!(validate_input(&[task(1)], &sample_resources()).is_ok());
+        let errors = validate_input(&[task(0)], &sample_resources()).expect_err("refused");
+        assert_eq!(
+            errors[0].kind,
+            ValidationErrorKind::UsageOutOfRange {
+                activity: "O1".into(),
+                usage: 0
+            }
+        );
+        assert_eq!(errors[0].kind.code(), "parameter_out_of_range");
     }
 }

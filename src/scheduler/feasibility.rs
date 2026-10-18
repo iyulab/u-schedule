@@ -310,33 +310,47 @@ fn check_capacity(
             cap_override.insert(resource_id.as_str(), *max_capacity);
         }
     }
-    let mut by_resource: HashMap<&str, Vec<(i64, i64)>> = HashMap::new();
+    let activities: HashMap<&str, &Activity> = input
+        .tasks
+        .iter()
+        .flat_map(|t| &t.activities)
+        .map(|a| (a.id.as_str(), a))
+        .collect();
+    // Each assignment takes its activity's usage of the resource; an
+    // external booking, one unit.
+    let mut by_resource: HashMap<&str, Vec<(i64, i64, i32)>> = HashMap::new();
     for a in &schedule.assignments {
+        let usage = match (
+            activities.get(a.activity_id.as_str()),
+            res_by_id.get(a.resource_id.as_str()),
+        ) {
+            (Some(activity), Some(resource)) => activity.usage_on(resource),
+            _ => 1,
+        };
         by_resource
             .entry(a.resource_id.as_str())
             .or_default()
-            .push((a.start_ms, a.end_ms));
+            .push((a.start_ms, a.end_ms, usage));
     }
     for (rid, intervals) in by_resource {
         let base = res_by_id.get(rid).map_or(1, |r| r.capacity.max(1));
         let cap = cap_override.get(rid).map_or(base, |&c| base.min(c));
-        // 동시성은 구간 시작점에서만 증가
-        let max_concurrent = intervals
+        // 부하는 구간 시작점에서만 증가
+        let peak = intervals
             .iter()
-            .map(|&(s, _)| {
+            .map(|&(s, _, _)| {
                 intervals
                     .iter()
-                    .filter(|&&(s2, e2)| s2 <= s && s < e2)
-                    .count() as i32
+                    .filter(|&&(s2, e2, _)| s2 <= s && s < e2)
+                    .map(|&(_, _, u)| u)
+                    .sum::<i32>()
             })
             .max()
             .unwrap_or(0);
-        if max_concurrent > cap {
+        if peak > cap {
             out.push(Violation::capacity_exceeded(
                 rid,
-                format!(
-                    "resource '{rid}' peak concurrency {max_concurrent} exceeds capacity {cap}"
-                ),
+                format!("resource '{rid}' peak load {peak} exceeds capacity {cap}"),
             ));
         }
     }
@@ -981,5 +995,54 @@ mod tests {
         assert_eq!(early.len(), 1, "{early:?}");
         assert_eq!(early[0].violation_type, ViolationType::PrecedenceViolation);
         assert!(at(1_500).is_empty());
+    }
+
+    /// A one-activity task on its own machine `M{id}` with operator `W1`,
+    /// taking `usage` of the operator.
+    fn shared(id: &str, usage: i32) -> Task {
+        Task::new(id).with_activity(
+            Activity::new(format!("{id}-1"), id, 0)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![format!("M{id}")]),
+                )
+                .with_requirement(
+                    ResourceRequirement::new("Operator")
+                        .with_candidates(vec!["W1".into()])
+                        .with_usage(usage),
+                ),
+        )
+    }
+
+    fn operator_and_machines(ids: &[&str]) -> Vec<Resource> {
+        let mut resources: Vec<Resource> = ids
+            .iter()
+            .map(|id| Resource::new(format!("M{id}"), "Machine"))
+            .collect();
+        resources.push(Resource::new("W1", "Operator").with_capacity(10));
+        resources
+    }
+
+    #[test]
+    fn the_usages_at_once_are_held_to_the_capacity() {
+        let tasks = [shared("A", 5), shared("B", 6)];
+        let resources = operator_and_machines(&["A", "B"]);
+        let input = FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let at = |b_start: i64| {
+            let mut s = Schedule::new();
+            s.add_assignment(Assignment::new("A-1", "A", "MA", 0, 1_000));
+            s.add_assignment(Assignment::new("A-1", "A", "W1", 0, 1_000));
+            s.add_assignment(Assignment::new("B-1", "B", "MB", b_start, b_start + 1_000));
+            s.add_assignment(Assignment::new("B-1", "B", "W1", b_start, b_start + 1_000));
+            check_schedule(&s, &input)
+        };
+        let together = at(0);
+        assert_eq!(together.len(), 1, "{together:?}");
+        assert_eq!(together[0].violation_type, ViolationType::CapacityExceeded);
+        assert!(at(1_000).is_empty());
     }
 }

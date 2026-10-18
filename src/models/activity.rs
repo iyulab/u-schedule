@@ -145,6 +145,17 @@ impl Activity {
         self
     }
 
+    /// How much of `resource`'s capacity this activity takes when it runs
+    /// there: the [`usage`](ResourceRequirement::usage) of the first
+    /// requirement `resource` is a candidate of, or 1 (a companion, or a
+    /// resource no requirement names).
+    pub fn usage_on(&self, resource: &Resource) -> i32 {
+        self.resource_requirements
+            .iter()
+            .find(|r| r.is_candidate(resource))
+            .map_or(1, |r| r.usage)
+    }
+
     /// IDs of the resources in `resources` that some requirement of this
     /// activity [accepts](ResourceRequirement::accepts), in `resources`
     /// order, each once.
@@ -257,8 +268,16 @@ pub struct ResourceRequirement {
     /// Required resource type (e.g., "Machine", "Operator"), compared exactly
     /// with [`Resource::resource_type`] when `candidates` is empty.
     pub resource_type: String,
-    /// Number of resource units needed simultaneously.
+    /// Number of resources needed simultaneously, each a different one.
     pub quantity: i32,
+    /// How much of each chosen resource's [`capacity`](Resource::capacity)
+    /// the activity takes while it runs (default 1): a resource carries
+    /// activities at once as long as their usages sum to at most its
+    /// capacity -- an operator at capacity 10 can run two activities of
+    /// usage 5 side by side (a renewable resource with demand `r_jk`,
+    /// Kolisch 1996).
+    #[serde(default = "one_unit")]
+    pub usage: i32,
     /// Specific resource IDs that can fulfill this requirement.
     ///
     /// Empty = any resource whose `resource_type` equals this requirement's.
@@ -277,9 +296,17 @@ impl ResourceRequirement {
         Self {
             resource_type: resource_type.into(),
             quantity: 1,
+            usage: 1,
             candidates: Vec::new(),
             required_skills: Vec::new(),
         }
+    }
+
+    /// Sets how much of each chosen resource's capacity the activity takes
+    /// ([`usage`](Self::usage)).
+    pub fn with_usage(mut self, usage: i32) -> Self {
+        self.usage = usage;
+        self
     }
 
     /// Sets the required quantity.
@@ -322,6 +349,10 @@ impl ResourceRequirement {
     pub fn eligible<'a>(&'a self, resources: &'a [Resource]) -> impl Iterator<Item = &'a Resource> {
         resources.iter().filter(move |r| self.accepts(r))
     }
+}
+
+fn one_unit() -> i32 {
+    1
 }
 
 #[cfg(test)]

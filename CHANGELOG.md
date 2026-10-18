@@ -27,12 +27,28 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   to itself as `invalid_resource_reference` (new field `to`), a negative time
   as `parameter_out_of_range`.
 
+- How much of a resource an activity takes: `ResourceRequirement::usage`
+  (`with_usage`, default 1) — a resource carries activities at once while
+  their usages sum to at most its capacity (an operator at capacity 10 runs two
+  activities of usage 5 side by side). `Activity::usage_on(resource)` reads it
+  for the resource an activity runs on. `SimpleScheduler` books it, the
+  feasibility check sums it against capacity (`capacity_exceeded` reports the
+  peak load), `Problem::new` refuses a usage below 1 (`UsageOutOfRange` —
+  `parameter_out_of_range`). The GA decoders and the CP builder hold each
+  resource for one activity at a time, as they did — their schedules stay
+  within any capacity.
+
 ### Changed
 
-- **Breaking:** `Resource` has a `transport_ms` field, and
-  `ValidationErrorKind` the variants `InvalidTransportTarget` and
-  `NegativeTransport` — a struct literal or an exhaustive `match` must name
-  them.
+- **Breaking:** `Resource` has a `transport_ms` field, `ResourceRequirement` a
+  `usage` field, and `ValidationErrorKind` the variants
+  `InvalidTransportTarget`, `NegativeTransport` and `UsageOutOfRange` — a
+  struct literal or an exhaustive `match` must name them.
+- **Breaking:** `ResourceTimeline::fits`, `earliest_fit`, `earliest_resumable`,
+  `is_free` and `book` take the units to fit or book; `booked_ms` is booked
+  unit-time (length × units).
+- `ResourceRequirement::quantity` is documented as what it always was: the
+  number of different resources taken at once.
 
 ## [0.26.0] - 2026-10-18
 

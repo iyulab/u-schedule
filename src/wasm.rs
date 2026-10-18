@@ -523,6 +523,9 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             "parameter": "speed", "activity": activity, "resource": resource, "min": null,
             "max": null, "exclusive_min": 0.0, "got": speed,
         }),
+        ValidationErrorKind::UsageOutOfRange { activity, usage } => json!({
+            "parameter": "usage", "activity": activity, "min": 1.0, "max": null, "got": usage,
+        }),
         ValidationErrorKind::CapacityOutOfRange { resource, capacity } => json!({
             "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
             "got": capacity,

@@ -258,6 +258,17 @@ of any requirement and does not change the activity's time — but its calendar
 counts for a resumable activity. The feasibility check reports a resource used
 without its companion.
 
+### How much of a resource an activity takes
+
+A resource's `capacity` is how much it carries at once, and a requirement's
+`usage` (default 1) how much of it each activity takes: an operator at
+capacity 10 runs two activities that each need half of them
+(`ResourceRequirement::new("Operator").with_usage(5)`) side by side, and a
+third waits. `quantity` is a different count — how many different resources a
+requirement takes. `SimpleScheduler` and the feasibility check read usages;
+the GA decoders and the CP builder hold each resource for one activity at a
+time, so their schedules stay within any capacity without sharing it.
+
 ### Moving work between resources
 
 Work can take time to move from one resource to another — between machines

@@ -254,8 +254,21 @@ impl SimpleScheduler {
                 .entry(pin.activity_id.as_str())
                 .or_default()
                 .push(pin);
+            // A pin of one of the problem's activities takes that activity's
+            // usage; an external booking, one unit.
+            let usage = resources
+                .iter()
+                .find(|r| r.id == pin.resource_id)
+                .and_then(|r| {
+                    tasks
+                        .iter()
+                        .flat_map(|t| &t.activities)
+                        .find(|a| a.id == pin.activity_id)
+                        .map(|a| a.usage_on(r))
+                })
+                .unwrap_or(1);
             if let Some(tl) = timelines.get_mut(&pin.resource_id) {
-                tl.book(pin.start_ms, pin.end_ms); // 선점 예약 (자원 미상이면 feasibility가 보고)
+                tl.book(pin.start_ms, pin.end_ms, usage); // 선점 예약 (자원 미상이면 feasibility가 보고)
             }
             schedule.add_assignment(pin.clone());
         }
@@ -351,11 +364,11 @@ impl SimpleScheduler {
             let (i, placement) = offers.swap_remove(k);
             let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
 
-            for (resource_id, setup_ms) in &placement.selections {
+            for (resource_id, setup_ms, usage) in &placement.selections {
                 let tl = timelines
                     .get_mut(resource_id)
                     .expect("selection references known resource");
-                tl.book(placement.start_ms, placement.end_ms);
+                tl.book(placement.start_ms, placement.end_ms, *usage);
                 let companion = placement.companions.contains(resource_id);
                 schedule.add_assignment(
                     Assignment::new(
@@ -375,7 +388,7 @@ impl SimpleScheduler {
             came_from[i] = placement
                 .selections
                 .iter()
-                .map(|(rid, _)| rid.clone())
+                .map(|(rid, _, _)| rid.clone())
                 .collect();
             cursor[i] += 1;
         }
@@ -432,7 +445,7 @@ impl SimpleScheduler {
         // the one that processes faster is taken (non-delay first, then the
         // shorter processing).
         let mut t = ready;
-        let mut selections: Vec<String> = Vec::new();
+        let mut selections: Vec<(String, i32)> = Vec::new();
         for _ in 0..MAX_FIXED_POINT_ITERS {
             selections.clear();
             let mut t_next = t;
@@ -446,15 +459,16 @@ impl SimpleScheduler {
                         let tl = timelines.get(rid)?;
                         let from = t.max(arrival(rid));
                         let fit = if activity.resumable {
-                            tl.earliest_resumable(from, span).map(|(fit, _)| fit)
+                            tl.earliest_resumable(from, span, req.usage)
+                                .map(|(fit, _)| fit)
                         } else {
-                            tl.earliest_fit(from, span)
+                            tl.earliest_fit(from, span, req.usage)
                         };
                         // With its companions free over the same span.
                         let fit = with_companions(
                             fit?,
                             span,
-                            rid,
+                            (rid, req.usage),
                             resources,
                             timelines,
                             activity.resumable,
@@ -469,7 +483,7 @@ impl SimpleScheduler {
                 }
                 for &(fit, _, rid) in fits.iter().take(req.quantity as usize) {
                     t_next = t_next.max(fit);
-                    selections.push(rid.to_string());
+                    selections.push((rid.to_string(), req.usage));
                 }
             }
             if t_next == t {
@@ -480,38 +494,38 @@ impl SimpleScheduler {
 
         // Phase 2: the time on the chosen resources together, with a common
         // span D (the largest setup), re-checked on every resource.
-        let d = activity.duration_on(selections.iter().map(String::as_str));
-        let selections: Vec<(String, i64)> = selections
+        let d = activity.duration_on(selections.iter().map(|(rid, _)| rid.as_str()));
+        let selections: Vec<(String, i64, i32)> = selections
             .into_iter()
-            .map(|rid| {
+            .map(|(rid, usage)| {
                 let setup = setup_for(&rid, d.setup_ms);
-                (rid, setup)
+                (rid, setup, usage)
             })
             .collect();
-        let max_setup = selections.iter().map(|&(_, s)| s).max().unwrap_or(0);
+        let max_setup = selections.iter().map(|&(_, s, _)| s).max().unwrap_or(0);
         let d = max_setup + d.process_ms + d.teardown_ms;
         // The resources chosen hold their companions for the same span; a
         // companion has no setup of its own and does not change the time.
         let mut companions: Vec<String> = Vec::new();
         for c in selections
             .iter()
-            .flat_map(|(rid, _)| companions_of(rid, resources))
+            .flat_map(|(rid, _, _)| companions_of(rid, resources))
         {
-            if selections.iter().all(|(s, _)| s != c) && !companions.contains(c) {
+            if selections.iter().all(|(s, _, _)| s != c) && !companions.contains(c) {
                 companions.push(c.clone());
             }
         }
         let mut selections = selections;
-        selections.extend(companions.iter().map(|c| (c.clone(), 0)));
+        selections.extend(companions.iter().map(|c| (c.clone(), 0, 1)));
         if activity.resumable {
             return Self::place_resumable(timelines, selections, companions, t, d);
         }
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
-            for (rid, _) in &selections {
+            for (rid, _, usage) in &selections {
                 let tl = timelines.get(rid).expect("selected resource has timeline");
                 // None: 캘린더가 D를 영원히 못 담음
-                let fit = tl.earliest_fit(t, d)?;
+                let fit = tl.earliest_fit(t, d, *usage)?;
                 t_next = t_next.max(fit);
             }
             if t_next == t {
@@ -533,20 +547,27 @@ impl SimpleScheduler {
     /// ([`Activity::resumable`]).
     fn place_resumable(
         timelines: &HashMap<String, ResourceTimeline>,
-        selections: Vec<(String, i64)>,
+        selections: Vec<(String, i64, i32)>,
         companions: Vec<String>,
         t: i64,
         work_ms: i64,
     ) -> Option<Placement> {
-        let selected: Vec<&ResourceTimeline> = selections
+        let selected: Vec<(&ResourceTimeline, i32)> = selections
             .iter()
-            .map(|(rid, _)| timelines.get(rid).expect("selected resource has timeline"))
+            .map(|(rid, _, usage)| {
+                (
+                    timelines.get(rid).expect("selected resource has timeline"),
+                    *usage,
+                )
+            })
             .collect();
-        let calendars: Vec<&crate::models::Calendar> =
-            selected.iter().filter_map(|tl| tl.calendar()).collect();
+        let calendars: Vec<&crate::models::Calendar> = selected
+            .iter()
+            .filter_map(|(tl, _)| tl.calendar())
+            .collect();
         let mut candidates: Vec<i64> = selected
             .iter()
-            .flat_map(|tl| tl.start_candidates(t))
+            .flat_map(|(tl, _)| tl.start_candidates(t))
             .collect();
         candidates.sort_unstable();
         candidates.dedup();
@@ -554,7 +575,7 @@ impl SimpleScheduler {
             let end = crate::models::joint_work_end(&calendars, start, work_ms)?;
             selected
                 .iter()
-                .all(|tl| tl.is_free(start, end))
+                .all(|(tl, usage)| tl.is_free(start, end, *usage))
                 .then(|| Placement {
                     start_ms: start,
                     end_ms: end,
@@ -681,7 +702,7 @@ impl Default for SimpleScheduler {
 struct Placement {
     start_ms: i64,
     end_ms: i64,
-    selections: Vec<(String, i64)>, // (resource_id, setup_ms) — companions included
+    selections: Vec<(String, i64, i32)>, // (resource_id, setup_ms, usage) — companions included
     /// The selections held only as companions of another.
     companions: Vec<String>,
 }
@@ -695,12 +716,12 @@ fn companions_of<'a>(resource_id: &str, resources: &'a [Resource]) -> &'a [Strin
 }
 
 /// The earliest start from `fit` on at which `resource_id`'s companions are
-/// also free (non-resumable: in working time) for `span`, and the resource
-/// itself still fits — or `None` if they never are.
+/// also free (non-resumable: in working time) for `span` -- a unit each --
+/// and the resource itself still fits `usage` -- or `None` if they never are.
 fn with_companions(
     fit: i64,
     span: i64,
-    resource_id: &str,
+    (resource_id, usage): (&str, i32),
     resources: &[Resource],
     timelines: &HashMap<String, ResourceTimeline>,
     resumable: bool,
@@ -709,18 +730,18 @@ fn with_companions(
     if companions.is_empty() {
         return Some(fit);
     }
-    let group: Vec<&ResourceTimeline> = std::iter::once(resource_id)
-        .chain(companions.iter().map(String::as_str))
-        .map(|id| timelines.get(id))
+    let group: Vec<(&ResourceTimeline, i32)> = std::iter::once((resource_id, usage))
+        .chain(companions.iter().map(|c| (c.as_str(), 1)))
+        .map(|(id, units)| timelines.get(id).map(|tl| (tl, units)))
         .collect::<Option<_>>()?;
     let mut t = fit;
     for _ in 0..MAX_FIXED_POINT_ITERS {
         let mut next = t;
-        for tl in &group {
+        for (tl, units) in &group {
             let f = if resumable {
-                tl.earliest_resumable(t, span).map(|(f, _)| f)
+                tl.earliest_resumable(t, span, *units).map(|(f, _)| f)
             } else {
-                tl.earliest_fit(t, span)
+                tl.earliest_fit(t, span, *units)
             }?;
             next = next.max(f);
         }
@@ -1648,5 +1669,61 @@ mod tests {
             SimpleScheduler::new().schedule(&valid(&[moved("A", &["B1", "B2"])], &resources), 0);
         let next = s.assignment_for_activity("J-2").expect("placed");
         assert_eq!((next.resource_id.as_str(), next.start_ms), ("B2", 2_000));
+    }
+
+    /// A one-activity task on its own machine `M{id}` with operator `W1`,
+    /// taking `usage` of the operator.
+    fn shared(id: &str, usage: i32) -> Task {
+        Task::new(id).with_activity(
+            Activity::new(format!("{id}-1"), id, 0)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![format!("M{id}")]),
+                )
+                .with_requirement(
+                    ResourceRequirement::new("Operator")
+                        .with_candidates(vec!["W1".into()])
+                        .with_usage(usage),
+                ),
+        )
+    }
+
+    fn operator_and_machines(ids: &[&str]) -> Vec<Resource> {
+        let mut resources: Vec<Resource> = ids
+            .iter()
+            .map(|id| Resource::new(format!("M{id}"), "Machine"))
+            .collect();
+        resources.push(Resource::new("W1", "Operator").with_capacity(10));
+        resources
+    }
+
+    #[test]
+    fn usages_within_the_capacity_run_side_by_side() {
+        let s = SimpleScheduler::new().schedule(
+            &valid(
+                &[shared("A", 5), shared("B", 5), shared("C", 5)],
+                &operator_and_machines(&["A", "B", "C"]),
+            ),
+            0,
+        );
+        assert_eq!(
+            [
+                start_of(&s, "A-1"),
+                start_of(&s, "B-1"),
+                start_of(&s, "C-1")
+            ],
+            [0, 0, 1_000]
+        );
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn a_usage_above_every_capacity_is_left_unfilled() {
+        let s = SimpleScheduler::new().schedule(
+            &valid(&[shared("A", 11)], &operator_and_machines(&["A"])),
+            0,
+        );
+        assert!(s.assignment_for_activity("A-1").is_none());
+        assert!(!s.violations.is_empty());
     }
 }

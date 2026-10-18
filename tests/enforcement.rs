@@ -451,8 +451,9 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
     #[test]
     fn earliest_fit_matches_brute_force(
-        bookings in prop::collection::vec((0..150i64, 1..40i64), 0..6),
-        cap in 1..3i32,
+        bookings in prop::collection::vec((0..150i64, 1..40i64, 1..3i32), 0..6),
+        cap in 1..5i32,
+        units in 1..4i32,
         dur in 1..50i64,
         from in 0..100i64,
     ) {
@@ -463,11 +464,22 @@ proptest! {
         let mut tl = ResourceTimeline::new(
             &Resource::new("M1", "Machine").with_capacity(cap).with_calendar(cal),
         );
-        for (s, d) in &bookings {
-            tl.book(*s, s + d);
+        for (s, d, u) in &bookings {
+            tl.book(*s, s + d, *u);
         }
-        let fast = tl.earliest_fit(from, dur);
-        let brute = (from..500).find(|&t| tl.fits(t, dur));
+        let fast = tl.earliest_fit(from, dur, units);
+        let brute = (from..500).find(|&t| tl.fits(t, dur, units));
         prop_assert_eq!(fast, brute);
+        // The load at every instant of the found interval, counted directly.
+        if let Some(t) = fast {
+            for x in t..t + dur {
+                let load: i32 = bookings
+                    .iter()
+                    .filter(|(s, d, _)| *s <= x && x < s + d)
+                    .map(|(_, _, u)| u)
+                    .sum();
+                prop_assert!(load + units <= cap, "at {}: {} + {} > {}", x, load, units, cap);
+            }
+        }
     }
 }
