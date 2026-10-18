@@ -127,6 +127,7 @@ impl Code {
                 "task",
                 "activity",
                 "resource",
+                "to",
                 "errors",
             ],
             Code::InvalidOption => &["parameter", "rule"],
@@ -134,7 +135,9 @@ impl Code {
             Code::DuplicateId => &["entity", "id", "first", "second", "errors"],
             Code::MissingMachine => &["job", "operation"],
             Code::NoMachines | Code::Internal => &[],
-            Code::InvalidResourceReference => &["activity", "resource", "companion", "errors"],
+            Code::InvalidResourceReference => {
+                &["activity", "resource", "companion", "to", "errors"]
+            }
             Code::CyclicDependency => &["activity", "errors"],
             Code::InvalidPredecessor => &["activity", "predecessor", "errors"],
             Code::InvalidCalendarPeriod => {
@@ -480,6 +483,17 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             resource,
             companion,
         } => json!({ "resource": resource, "companion": companion }),
+        ValidationErrorKind::InvalidTransportTarget { resource, to } => {
+            json!({ "resource": resource, "to": to })
+        }
+        ValidationErrorKind::NegativeTransport {
+            resource,
+            to,
+            time_ms,
+        } => json!({
+            "parameter": "transport_times", "resource": resource, "to": to, "min": 0.0,
+            "max": null, "got": ms_to_sec(*time_ms),
+        }),
         ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
         ValidationErrorKind::EmptyTask { task } => {
             json!({ "parameter": "operations", "task": task })

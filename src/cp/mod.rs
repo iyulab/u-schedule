@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use u_metaheur::cp::{CpModel, CpSolution, CpSolver, IntervalVar, Objective, SolverConfig};
 
-use crate::models::{Assignment, Constraint, Schedule, TransitionMatrixCollection};
+use crate::models::{
+    transport_between, Assignment, Constraint, Schedule, TransitionMatrixCollection,
+};
 use crate::Problem;
 
 /// Builds a CP model from scheduling domain objects.
@@ -91,13 +93,19 @@ impl<'a> ScheduleCpBuilder<'a> {
                 model.add_interval(interval);
             }
 
-            // Intra-task precedence: activity[i] before activity[i+1]
-            for i in 0..task.activities.len().saturating_sub(1) {
-                model.add_precedence(
-                    task.activities[i].id.clone(),
-                    task.activities[i + 1].id.clone(),
-                    0,
-                );
+            // Intra-task precedence: activity[i] before activity[i+1], with
+            // the time the work moves between the resources they are
+            // reported on.
+            for pair in task.activities.windows(2) {
+                let transport = match (self.reported_on(&pair[0]), self.reported_on(&pair[1])) {
+                    (Some(from), Some(to)) => transport_between(
+                        |id| self.problem.resources().iter().find(|r| r.id == id),
+                        [from],
+                        &[to],
+                    ),
+                    _ => 0,
+                };
+                model.add_precedence(pair[0].id.clone(), pair[1].id.clone(), transport);
             }
         }
 
@@ -172,12 +180,8 @@ impl<'a> ScheduleCpBuilder<'a> {
             for (step, activity) in task.activities.iter().enumerate() {
                 if let Some(interval_sol) = solution.intervals.get(&activity.id) {
                     if interval_sol.is_present {
-                        // Determine resource (first eligible one for now)
-                        let resource_id = activity
-                            .eligible_resources(self.problem.resources())
-                            .first()
-                            .map(|s| s.to_string())
-                            .unwrap_or_default();
+                        let resource_id =
+                            self.reported_on(activity).unwrap_or_default().to_string();
 
                         schedule.add_assignment(
                             Assignment::new(
@@ -198,12 +202,19 @@ impl<'a> ScheduleCpBuilder<'a> {
         schedule
     }
 
-    /// The activity's time on the resource a solution reports it on — the
-    /// first eligible one (this formulation does not choose among
-    /// alternatives).
+    /// The resource a solution reports `activity` on — the first eligible
+    /// one (this formulation does not choose among alternatives).
+    fn reported_on<'p>(&'p self, activity: &crate::models::Activity) -> Option<&'p str> {
+        activity
+            .eligible_resources(self.problem.resources())
+            .first()
+            .copied()
+    }
+
+    /// The activity's time on the resource a solution reports it on
+    /// ([`reported_on`](Self::reported_on)).
     fn duration_of(&self, activity: &crate::models::Activity) -> crate::models::ActivityDuration {
-        let eligible = activity.eligible_resources(self.problem.resources());
-        activity.duration_on(eligible.first().copied())
+        activity.duration_on(self.reported_on(activity))
     }
 
     /// Collects activity IDs per resource (from each activity's eligible
@@ -343,5 +354,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_next_activity_waits_for_the_work_to_arrive() {
+        let on = |id: &str, seq: i32, machine: &str| {
+            Activity::new(id, "J", seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        let problem = crate::Problem::new(
+            vec![Task::new("J")
+                .with_activity(on("J-1", 0, "A"))
+                .with_activity(on("J-2", 1, "B"))],
+            vec![
+                Resource::new("A", "Machine").with_transport_to("B", 5_000),
+                Resource::new("B", "Machine"),
+            ],
+        )
+        .expect("valid");
+        let (schedule, _) = ScheduleCpBuilder::new(&problem).solve(
+            &SimpleCpSolver::new(),
+            &SolverConfig::default(),
+            100_000,
+        );
+        let first = schedule.assignment_for_activity("J-1").expect("placed");
+        let next = schedule.assignment_for_activity("J-2").expect("placed");
+        assert!(next.start_ms >= first.end_ms + 5_000);
     }
 }

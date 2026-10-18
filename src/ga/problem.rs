@@ -405,6 +405,7 @@ impl SchedulingGaProblem {
                 .map(|t| self.task_categories.get(t).map_or("", String::as_str))
                 .collect(),
             deadline: ids.iter().map(|t| self.deadlines.get(t).copied()).collect(),
+            moves: self.resources.iter().any(|r| !r.transport_ms.is_empty()),
         }
     }
 
@@ -469,6 +470,34 @@ impl SchedulingGaProblem {
         )
     }
 
+    /// The time work takes to move from the resource at index `from` to the
+    /// one at `to` ([`Resource::transport_ms`]); a resource the problem does
+    /// not list moves nothing.
+    fn transport(&self, from: usize, to: usize) -> i64 {
+        match (self.resources.get(from), self.resources.get(to)) {
+            (Some(f), Some(t)) if !f.transport_ms.is_empty() => f.transport_to(&t.id),
+            _ => 0,
+        }
+    }
+
+    /// When the work of `activity`'s task reaches `resource`: the end of the
+    /// activity before it in the task (`pred`, if any) plus the move from
+    /// the resource that one ran on.
+    fn arrival(
+        &self,
+        view: &TaskView<'_>,
+        ix: &Indexed,
+        end: &[i64],
+        pred: Option<usize>,
+        resource: usize,
+    ) -> i64 {
+        match pred {
+            None => 0,
+            Some(p) if !view.moves => end[p],
+            Some(p) => end[p] + ix.resource[p].map_or(0, |from| self.transport(from, resource)),
+        }
+    }
+
     /// The setup of `activity` on `resource`, after the task last run there
     /// (`previous`): the activity's own, or the transition matrix's.
     fn setup_of(
@@ -497,20 +526,20 @@ impl SchedulingGaProblem {
         let n_resources = self.resources.len() + ix.extra.len();
         let mut resource_available = vec![0i64; n_resources];
         let mut last_task: Vec<Option<usize>> = vec![None; n_resources];
-        let mut task_available = vec![0i64; self.task_activities.len()];
+        let mut task_last: Vec<Option<usize>> = vec![None; self.task_activities.len()];
         let mut placed = Placed::new(self.activities.len());
         for &a in &ix.order {
             let Some(r) = ix.resource[a] else { continue };
             let t = self.task_of[a];
             let start = resource_available[r]
-                .max(task_available[t])
+                .max(self.arrival(view, ix, &placed.end, task_last[t], r))
                 .max(view.release[t]);
             let setup = self.setup_of(view, ix, a, r, last_task[r]);
             let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;
             placed.put(a, start, end, setup);
             resource_available[r] = end;
-            task_available[t] = end;
+            task_last[t] = Some(a);
             last_task[r] = Some(t);
         }
         placed
@@ -527,7 +556,7 @@ impl SchedulingGaProblem {
         let n_resources = self.resources.len() + ix.extra.len();
         let mut resource_available = vec![0i64; n_resources];
         let mut last_task: Vec<Option<usize>> = vec![None; n_resources];
-        let mut task_available = vec![0i64; self.task_activities.len()];
+        let mut task_last: Vec<Option<usize>> = vec![None; self.task_activities.len()];
         let mut next = vec![0usize; self.task_activities.len()];
         let mut placed = Placed::new(self.activities.len());
 
@@ -553,7 +582,7 @@ impl SchedulingGaProblem {
                         continue;
                     };
                     let start = resource_available[r]
-                        .max(task_available[t])
+                        .max(self.arrival(view, ix, &placed.end, task_last[t], r))
                         .max(view.release[t]);
                     let setup = self.setup_of(view, ix, a, r, last_task[r]);
                     let duration = ix.duration[a];
@@ -588,7 +617,7 @@ impl SchedulingGaProblem {
             let t = self.task_of[chosen.activity];
             placed.put(chosen.activity, chosen.start, chosen.finish, chosen.setup);
             resource_available[resource] = chosen.finish;
-            task_available[t] = chosen.finish;
+            task_last[t] = Some(chosen.activity);
             last_task[resource] = Some(t);
             next[t] += 1;
         }
@@ -661,6 +690,8 @@ struct TaskView<'a> {
     release: Vec<i64>,
     category: Vec<&'a str>,
     deadline: Vec<Option<i64>>,
+    /// Whether any resource gives a transport time.
+    moves: bool,
 }
 
 /// A chromosome as indices into the problem's activities and resources.
@@ -1444,5 +1475,79 @@ mod tests {
                 a.resource_id
             );
         }
+    }
+
+    #[test]
+    fn both_decoders_wait_for_the_work_to_arrive() {
+        // J1 runs A then B; moving A -> B takes 5 s.
+        let on = |id: &str, task: &str, seq: i32, machine: &str| {
+            Activity::new(id, task, seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        let tasks = vec![
+            Task::new("J1")
+                .with_activity(on("J1-1", "J1", 0, "A"))
+                .with_activity(on("J1-2", "J1", 1, "B")),
+            Task::new("J2").with_activity(on("J2-1", "J2", 0, "B")),
+        ];
+        let resources = vec![
+            Resource::new("A", "Machine").with_transport_to("B", 5_000),
+            Resource::new("B", "Machine"),
+        ];
+        let problem = valid(&tasks, &resources);
+        let ga = SchedulingGaProblem::new(&problem);
+        let chromosome = ScheduleChromosome {
+            osv: vec!["J1".into(), "J1".into(), "J2".into()],
+            mav: vec!["A".into(), "B".into(), "B".into()],
+            activity_index: ga.activity_index.clone(),
+            fitness: f64::INFINITY,
+        };
+        for schedule in [
+            ga.decode_semi_active(&chromosome),
+            ga.decode_active(&chromosome),
+        ] {
+            let start = schedule
+                .assignment_for_activity("J1-2")
+                .expect("placed")
+                .start_ms;
+            assert!(start >= 6_000, "J1-2 starts at {start}");
+            let input = crate::scheduler::FeasibilityInput {
+                tasks: problem.tasks(),
+                resources: problem.resources(),
+                constraints: &[],
+            };
+            let violations = crate::scheduler::check_schedule(&schedule, &input);
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
+
+    #[test]
+    fn the_local_search_keeps_the_transport_times() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let (tasks, mut resources) = random_job_shop(&mut rng, 6, 4);
+        let ids: Vec<String> = resources.iter().map(|r| r.id.clone()).collect();
+        for r in &mut resources {
+            for to in ids.iter().filter(|t| **t != r.id) {
+                r.transport_ms.insert(to.clone(), 700);
+            }
+        }
+        let problem = valid(&tasks, &resources);
+        let ga = SchedulingGaProblem::new(&problem).with_local_search_steps(40);
+        let config = GaConfig::default()
+            .with_population_size(20)
+            .with_max_generations(10)
+            .with_seed(3);
+        let result = GaRunner::run(&ga, &config).expect("valid settings");
+        let schedule = ga.decode(&result.best);
+        let input = crate::scheduler::FeasibilityInput {
+            tasks: problem.tasks(),
+            resources: problem.resources(),
+            constraints: &[],
+        };
+        let violations = crate::scheduler::check_schedule(&schedule, &input);
+        assert!(violations.is_empty(), "{violations:?}");
     }
 }

@@ -14,7 +14,7 @@
 //! Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems", Ch. 1.2
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::Calendar;
 
@@ -42,6 +42,15 @@ pub struct Resource {
     /// for the activity's whole span, without changing its time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<String>,
+    /// Time to move work from this resource to another (ms), by the other's
+    /// id: when a task's next activity runs there, it starts no earlier than
+    /// this one's end plus the time. A pair not listed takes none.
+    ///
+    /// Transportation times between machines, `t_kl` -- Hurink & Knust
+    /// (2001), "Makespan minimization for flow-shop problems with
+    /// transportation times and a single robot".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transport_ms: BTreeMap<String, i64>,
     /// Domain-specific metadata.
     pub attributes: HashMap<String, String>,
 }
@@ -58,6 +67,7 @@ impl Resource {
             calendar: None,
             skills: Vec::new(),
             companions: Vec::new(),
+            transport_ms: BTreeMap::new(),
             attributes: HashMap::new(),
         }
     }
@@ -67,6 +77,19 @@ impl Resource {
     pub fn with_companion(mut self, resource_id: impl Into<String>) -> Self {
         self.companions.push(resource_id.into());
         self
+    }
+
+    /// Work moving from this resource to `resource_id` takes `time_ms`
+    /// ([`transport_ms`](Self::transport_ms)).
+    pub fn with_transport_to(mut self, resource_id: impl Into<String>, time_ms: i64) -> Self {
+        self.transport_ms.insert(resource_id.into(), time_ms);
+        self
+    }
+
+    /// The time to move work from this resource to `resource_id` (0 when
+    /// none is given).
+    pub fn transport_to(&self, resource_id: &str) -> i64 {
+        self.transport_ms.get(resource_id).copied().unwrap_or(0)
     }
 
     /// Sets the resource name.
@@ -114,6 +137,22 @@ impl Resource {
             Some(cal) => cal.is_working_time(time_ms),
         }
     }
+}
+
+/// The time to move a task's work from the resources one activity ran on
+/// (`from`) to those its next activity runs on (`to`): the longest of the
+/// pairs, since the work waits for the last of its moves. `resource` looks a
+/// resource up by id; one it does not know moves nothing.
+pub fn transport_between<'r, 'a>(
+    resource: impl Fn(&str) -> Option<&'r Resource>,
+    from: impl IntoIterator<Item = &'a str>,
+    to: &[&str],
+) -> i64 {
+    from.into_iter()
+        .filter_map(&resource)
+        .flat_map(|r| to.iter().map(move |t| r.transport_to(t)))
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

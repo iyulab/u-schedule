@@ -21,7 +21,9 @@
 //! requirements take, last at least its setup (as the assignment records it -- a changeover or
 //! the activity's own), processing and teardown on the resources it runs on
 //! ([`Activity::duration_on`](crate::models::Activity::duration_on)), and start no earlier than its
-//! task's release time.
+//! task's release time. An activity starts no earlier than the one before it
+//! in its task ends, plus the time the work takes to move between the
+//! resources they run on ([`Resource::transport_ms`]).
 //!
 //! Not checked (documented gap): `Constraint::TransitionCost` (needs
 //! sequence semantics), and so whether an assignment's recorded setup is the
@@ -32,7 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{Activity, Constraint, Resource, Schedule, Task, Violation};
+use crate::models::{transport_between, Activity, Constraint, Resource, Schedule, Task, Violation};
 
 /// The resources among `assigned` (one activity's) held only as a companion
 /// of another of them ([`Resource::companions`]).
@@ -73,7 +75,7 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
     check_requirements(schedule, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
     check_calendars(schedule, input, &res_by_id, &mut v);
-    check_precedence(schedule, input, &mut v);
+    check_precedence(schedule, input, &res_by_id, &mut v);
     check_deadlines(schedule, input, &mut v);
     check_constraints(schedule, input, &mut v);
     v
@@ -419,7 +421,12 @@ fn activity_span(schedule: &Schedule, activity_id: &str) -> Option<(i64, i64)> {
     Some((start, end))
 }
 
-fn check_precedence(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+fn check_precedence(
+    schedule: &Schedule,
+    input: &FeasibilityInput,
+    res_by_id: &HashMap<&str, &Resource>,
+    out: &mut Vec<Violation>,
+) {
     let mut push = |before: &str, after: &str, delay: i64| {
         if let (Some((_, before_end)), Some((after_start, _))) = (
             activity_span(schedule, before),
@@ -435,11 +442,24 @@ fn check_precedence(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec
             }
         }
     };
+    let runs_on = |activity: &str| -> Vec<&str> {
+        schedule
+            .assignments_for_activity_all(activity)
+            .iter()
+            .map(|a| a.resource_id.as_str())
+            .collect()
+    };
     for task in input.tasks {
         let mut ordered: Vec<&Activity> = task.activities.iter().collect();
         ordered.sort_by_key(|a| a.sequence);
         for pair in ordered.windows(2) {
-            push(&pair[0].id, &pair[1].id, 0);
+            // The work moves from where one ran to where the next runs.
+            let transport = transport_between(
+                |id| res_by_id.get(id).copied(),
+                runs_on(&pair[0].id),
+                &runs_on(&pair[1].id),
+            );
+            push(&pair[0].id, &pair[1].id, transport);
         }
         for activity in &task.activities {
             for pred in &activity.predecessors {
@@ -925,5 +945,41 @@ mod tests {
         assert!(v
             .iter()
             .any(|x| x.violation_type == ViolationType::SynchronizeViolation));
+    }
+
+    /// A task of two 1 s activities: on `first`, then on any of `next`.
+    fn moved(first: &str, next: &[&str]) -> Task {
+        let on = |id: &str, seq: i32, machines: Vec<String>| {
+            Activity::new(id, "J", seq)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("Machine").with_candidates(machines))
+        };
+        Task::new("J")
+            .with_activity(on("J-1", 0, vec![first.to_string()]))
+            .with_activity(on("J-2", 1, next.iter().map(|m| m.to_string()).collect()))
+    }
+
+    #[test]
+    fn starting_before_the_work_arrives_is_a_precedence_violation() {
+        let tasks = [moved("A", &["B"])];
+        let resources = [
+            Resource::new("A", "Machine").with_transport_to("B", 500),
+            Resource::new("B", "Machine"),
+        ];
+        let input = FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let at = |start: i64| {
+            let mut s = Schedule::new();
+            s.add_assignment(Assignment::new("J-1", "J", "A", 0, 1_000));
+            s.add_assignment(Assignment::new("J-2", "J", "B", start, start + 1_000));
+            check_schedule(&s, &input)
+        };
+        let early = at(1_200);
+        assert_eq!(early.len(), 1, "{early:?}");
+        assert_eq!(early[0].violation_type, ViolationType::PrecedenceViolation);
+        assert!(at(1_500).is_empty());
     }
 }

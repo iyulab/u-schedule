@@ -53,6 +53,24 @@ pub enum ValidationErrorKind {
         /// The companion id.
         companion: String,
     },
+    /// A resource gives a transport time to a resource that doesn't exist, or
+    /// to itself ([`Resource::transport_ms`](crate::models::Resource::transport_ms)).
+    InvalidTransportTarget {
+        /// The resource the work moves from.
+        resource: String,
+        /// The id it moves to.
+        to: String,
+    },
+    /// A transport time below 0: the next activity could start before the
+    /// work arrives.
+    NegativeTransport {
+        /// The resource the work moves from.
+        resource: String,
+        /// The resource it moves to.
+        to: String,
+        /// The time given (ms).
+        time_ms: i64,
+    },
     /// The precedence graph contains a cycle.
     CyclicDependency {
         /// An activity on the cycle.
@@ -179,7 +197,8 @@ impl ValidationErrorKind {
         match self {
             ValidationErrorKind::DuplicateId { .. } => "duplicate_id",
             ValidationErrorKind::InvalidResourceReference { .. }
-            | ValidationErrorKind::InvalidCompanion { .. } => "invalid_resource_reference",
+            | ValidationErrorKind::InvalidCompanion { .. }
+            | ValidationErrorKind::InvalidTransportTarget { .. } => "invalid_resource_reference",
             ValidationErrorKind::CyclicDependency { .. } => "cyclic_dependency",
             // The shared reason: a list with nothing in it -- `parameter` names it.
             ValidationErrorKind::EmptyTask { .. } => "empty_input",
@@ -189,6 +208,7 @@ impl ValidationErrorKind {
             | ValidationErrorKind::NegativeDuration { .. }
             | ValidationErrorKind::SpeedOutOfRange { .. }
             | ValidationErrorKind::CapacityOutOfRange { .. }
+            | ValidationErrorKind::NegativeTransport { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
@@ -213,6 +233,20 @@ impl ValidationError {
                     format!("Resource '{resource}' names unknown companion '{companion}'")
                 }
             }
+            ValidationErrorKind::InvalidTransportTarget { resource, to } => {
+                if resource == to {
+                    format!("Resource '{resource}' gives a transport time to itself")
+                } else {
+                    format!("Resource '{resource}' gives a transport time to unknown resource '{to}'")
+                }
+            }
+            ValidationErrorKind::NegativeTransport {
+                resource,
+                to,
+                time_ms,
+            } => format!(
+                "Resource '{resource}' gives transport time {time_ms} ms to '{to}'; a transport time must be >= 0"
+            ),
             ValidationErrorKind::CyclicDependency { activity } => {
                 format!("Circular dependency detected involving activity '{activity}'")
             }
@@ -282,6 +316,7 @@ impl std::error::Error for ValidationError {}
 /// 10. Every resource's capacity is at least 1
 /// 11. Every calendar window and blocked period has `start_ms <= end_ms`
 /// 12. Every companion names another existing resource
+/// 13. Every transport time is `>= 0` and to another existing resource
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -381,6 +416,29 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                     ValidationErrorKind::InvalidCompanion {
                         resource: r.id.clone(),
                         companion: c.clone(),
+                    },
+                ));
+            }
+        }
+    }
+
+    // Transport times go to other existing resources and are not negative
+    for r in resources {
+        for (to, &time_ms) in &r.transport_ms {
+            if to == &r.id || !resource_ids.contains(to.as_str()) {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::InvalidTransportTarget {
+                        resource: r.id.clone(),
+                        to: to.clone(),
+                    },
+                ));
+            }
+            if time_ms < 0 {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::NegativeTransport {
+                        resource: r.id.clone(),
+                        to: to.clone(),
+                        time_ms,
                     },
                 ));
             }
@@ -830,5 +888,43 @@ mod tests {
         assert!(errors
             .iter()
             .all(|e| e.kind.code() == "parameter_out_of_range"));
+    }
+
+    #[test]
+    fn a_transport_time_goes_to_another_known_resource_and_is_not_negative() {
+        let tasks = sample_tasks();
+        let codes = |resources: Vec<Resource>| -> Vec<&'static str> {
+            match validate_input(&tasks, &resources) {
+                Ok(()) => Vec::new(),
+                Err(errors) => errors.iter().map(|e| e.kind.code()).collect(),
+            }
+        };
+        let with = |m1: Resource| {
+            let mut r = sample_resources();
+            r[0] = m1;
+            r
+        };
+        assert!(codes(with(
+            Resource::new("M1", "Machine").with_transport_to("M2", 0)
+        ))
+        .is_empty());
+        assert_eq!(
+            codes(with(
+                Resource::new("M1", "Machine").with_transport_to("M9", 10)
+            )),
+            ["invalid_resource_reference"]
+        );
+        assert_eq!(
+            codes(with(
+                Resource::new("M1", "Machine").with_transport_to("M1", 10)
+            )),
+            ["invalid_resource_reference"]
+        );
+        assert_eq!(
+            codes(with(
+                Resource::new("M1", "Machine").with_transport_to("M2", -1)
+            )),
+            ["parameter_out_of_range"]
+        );
     }
 }

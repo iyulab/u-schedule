@@ -8,6 +8,27 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- Transport times between resources: `Resource::with_transport_to(to, ms)`
+  (held in `Resource::transport_ms`, read with `Resource::transport_to`) — when
+  a task's next activity runs on `to`, it starts no earlier than the previous
+  activity's end plus the time (transportation times between machines, `t_kl`).
+  Over several resources the longest pair counts (`transport_between`).
+  `SimpleScheduler` takes, at the same start, the resource the work reaches
+  first; the GA decoders and local search, the CP builder (on the resource it
+  reports) and the feasibility check (as a precedence violation) all read it.
+  `Problem::new` refuses a transport time to an unknown resource or to itself
+  (`InvalidTransportTarget` — `invalid_resource_reference`) and a negative one
+  (`NegativeTransport` — `parameter_out_of_range`).
+
+### Changed
+
+- **Breaking:** `Resource` has a `transport_ms` field, and
+  `ValidationErrorKind` the variants `InvalidTransportTarget` and
+  `NegativeTransport` — a struct literal or an exhaustive `match` must name
+  them.
+
 ## [0.26.0] - 2026-10-18
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

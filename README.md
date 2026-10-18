@@ -258,6 +258,40 @@ of any requirement and does not change the activity's time — but its calendar
 counts for a resumable activity. The feasibility check reports a resource used
 without its companion.
 
+### Moving work between resources
+
+Work can take time to move from one resource to another — between machines
+on different floors, from one site to the next:
+`Resource::new("M1", "Machine").with_transport_to("M2", 60_000)`. When a
+task's next activity runs on `M2`, it starts no earlier than the previous
+activity's end plus the minute; a pair not listed takes none, and over several
+resources the longest pair counts. Every scheduler reads it (the GA on the
+resource it chose, the CP builder on the one it reports), and the feasibility
+check reports an activity that starts before its work arrives as a precedence
+violation.
+
+```rust
+use u_schedule::models::{Activity, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+let on = |id: &str, step: i32, machine: &str| {
+    Activity::new(id, "J1", step)
+        .with_process_time(1_000)
+        .with_requirement(ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]))
+};
+let problem = Problem::new(
+    vec![Task::new("J1").with_activity(on("J1-1", 0, "M1")).with_activity(on("J1-2", 1, "M2"))],
+    vec![
+        Resource::new("M1", "Machine").with_transport_to("M2", 5_000),
+        Resource::new("M2", "Machine"),
+    ],
+)
+.expect("valid input");
+let schedule = SimpleScheduler::new().schedule(&problem, 0);
+assert_eq!(schedule.assignment_for_activity("J1-2").unwrap().start_ms, 6_000);
+```
+
 `SimpleScheduler` and the feasibility check read calendars and companions; the
 GA decoders and the CP builder do not, so on calendared resources their schedules are
 checked, not built, against working time (breaches appear in

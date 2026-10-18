@@ -40,7 +40,9 @@ use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
 use crate::dispatching::{rules, RuleEngine, SchedulingContext};
-use crate::models::{Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection};
+use crate::models::{
+    transport_between, Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection,
+};
 use crate::Problem;
 
 /// Safety bound for the serial-SGS fixed-point search.
@@ -273,6 +275,9 @@ impl SimpleScheduler {
             .iter()
             .map(|t| t.release_time.unwrap_or(start_time_ms).max(start_time_ms))
             .collect();
+        // Per task: the resources its last placed activity ran on, which the
+        // work moves on from (`Resource::transport_ms`).
+        let mut came_from: Vec<Vec<String>> = vec![Vec::new(); tasks.len()];
 
         loop {
             let mut offers: Vec<(usize, Placement)> = Vec::new();
@@ -282,6 +287,7 @@ impl SimpleScheduler {
                         // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
                         let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready[i]);
                         ready[i] = ready[i].max(pin_end);
+                        came_from[i] = pins.iter().map(|p| p.resource_id.clone()).collect();
                         cursor[i] += 1;
                         continue;
                     }
@@ -296,6 +302,7 @@ impl SimpleScheduler {
                         &last_category,
                         resources,
                         ready[i],
+                        &came_from[i],
                     ) {
                         Some(placement) => {
                             offers.push((i, placement));
@@ -365,6 +372,11 @@ impl SimpleScheduler {
                 }
             }
             ready[i] = placement.end_ms;
+            came_from[i] = placement
+                .selections
+                .iter()
+                .map(|(rid, _)| rid.clone())
+                .collect();
             cursor[i] += 1;
         }
 
@@ -378,7 +390,11 @@ impl SimpleScheduler {
     }
 
     /// Finds the earliest common start for an activity across all its
-    /// resource requirements (serial-SGS fixed point).
+    /// resource requirements (serial-SGS fixed point), from `ready` on --
+    /// and on each resource, no earlier than the work arrives there from the
+    /// resources its task's previous activity ran on (`came_from`, by
+    /// [`Resource::transport_ms`]).
+    #[allow(clippy::too_many_arguments)]
     fn place_activity(
         &self,
         activity: &Activity,
@@ -387,7 +403,19 @@ impl SimpleScheduler {
         last_category: &HashMap<String, String>,
         resources: &[Resource],
         ready: i64,
+        came_from: &[String],
     ) -> Option<Placement> {
+        let lookup = |id: &str| resources.iter().find(|r| r.id == id);
+        let moves = came_from
+            .iter()
+            .any(|id| lookup(id).is_some_and(|r| !r.transport_ms.is_empty()));
+        let arrival = |rid: &str| -> i64 {
+            if moves {
+                ready + transport_between(lookup, came_from.iter().map(String::as_str), &[rid])
+            } else {
+                ready
+            }
+        };
         // The setup a resource charges for this activity, given the activity's
         // own setup on the resources it runs on.
         let setup_for = |resource_id: &str, own_setup_ms: i64| -> i64 {
@@ -416,10 +444,11 @@ impl SimpleScheduler {
                         let d = activity.duration_on([rid]);
                         let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
                         let tl = timelines.get(rid)?;
+                        let from = t.max(arrival(rid));
                         let fit = if activity.resumable {
-                            tl.earliest_resumable(t, span).map(|(fit, _)| fit)
+                            tl.earliest_resumable(from, span).map(|(fit, _)| fit)
                         } else {
-                            tl.earliest_fit(t, span)
+                            tl.earliest_fit(from, span)
                         };
                         // With its companions free over the same span.
                         let fit = with_companions(
@@ -1581,5 +1610,43 @@ mod tests {
                 .resource_id,
             "M2"
         );
+    }
+
+    /// A task of two 1 s activities: on `first`, then on any of `next`.
+    fn moved(first: &str, next: &[&str]) -> Task {
+        let on = |id: &str, seq: i32, machines: Vec<String>| {
+            Activity::new(id, "J", seq)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("Machine").with_candidates(machines))
+        };
+        Task::new("J")
+            .with_activity(on("J-1", 0, vec![first.to_string()]))
+            .with_activity(on("J-2", 1, next.iter().map(|m| m.to_string()).collect()))
+    }
+
+    #[test]
+    fn the_next_activity_waits_for_the_work_to_arrive() {
+        let resources = vec![
+            Resource::new("A", "Machine").with_transport_to("B", 5_000),
+            Resource::new("B", "Machine"),
+        ];
+        let s = SimpleScheduler::new().schedule(&valid(&[moved("A", &["B"])], &resources), 0);
+        assert_eq!(start_of(&s, "J-2"), 6_000);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn the_resource_the_work_reaches_first_is_taken() {
+        let resources = vec![
+            Resource::new("A", "Machine")
+                .with_transport_to("B1", 5_000)
+                .with_transport_to("B2", 1_000),
+            Resource::new("B1", "Machine"),
+            Resource::new("B2", "Machine"),
+        ];
+        let s =
+            SimpleScheduler::new().schedule(&valid(&[moved("A", &["B1", "B2"])], &resources), 0);
+        let next = s.assignment_for_activity("J-2").expect("placed");
+        assert_eq!((next.resource_id.as_str(), next.start_ms), ("B2", 2_000));
     }
 }

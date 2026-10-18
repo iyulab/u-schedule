@@ -75,7 +75,7 @@ impl SchedulingGaProblem {
         for step in 0..self.local_search_steps {
             taboo.retain(|&(_, _, until)| until > step);
             let mut best: Option<(f64, usize, usize)> = None;
-            let mut swaps = self.block_edge_swaps(&ix, &seq, &placed, &links);
+            let mut swaps = self.block_edge_swaps(&view, &ix, &seq, &placed, &links);
             self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
             for (r, i) in swaps {
                 let (u, v) = (seq[r][i], seq[r][i + 1]);
@@ -125,6 +125,7 @@ impl SchedulingGaProblem {
     /// of at least two, as `(machine, position of the first)`.
     fn block_edge_swaps(
         &self,
+        view: &TaskView<'_>,
         ix: &Indexed,
         seq: &[Vec<usize>],
         placed: &Placed,
@@ -150,7 +151,11 @@ impl SchedulingGaProblem {
             let machine_pred = position[a].checked_sub(1).map(|i| seq[r][i]);
             let next = match (machine_pred, links.task_pred[a]) {
                 (Some(m), _) if placed.end[m] == placed.start[a] => m,
-                (_, Some(t)) if placed.end[t] == placed.start[a] => t,
+                (_, Some(t))
+                    if self.arrival(view, ix, &placed.end, Some(t), r) == placed.start[a] =>
+                {
+                    t
+                }
                 _ => break,
             };
             path.push(next);
@@ -187,7 +192,8 @@ impl SchedulingGaProblem {
     /// from the current heads and tails without timing the sequences again
     /// (Taillard 1994, "Parallel taboo search techniques for the job shop
     /// scheduling problem"). The estimate follows the processing times as they
-    /// are, so with sequence-dependent setups it is a ranking, not a bound.
+    /// are, so with sequence-dependent setups or transport times it is a
+    /// ranking, not a bound.
     fn keep_best_estimated(
         &self,
         view: &TaskView<'_>,
@@ -279,7 +285,7 @@ impl SchedulingGaProblem {
             let t = self.task_of[a];
             let start = machine_pred[a]
                 .map_or(0, |m| placed.end[m])
-                .max(links.task_pred[a].map_or(0, |p| placed.end[p]))
+                .max(self.arrival(view, ix, &placed.end, links.task_pred[a], r))
                 .max(view.release[t]);
             let setup = self.setup_of(view, ix, a, r, machine_pred[a].map(|m| self.task_of[m]));
             let duration = ix.duration[a];
