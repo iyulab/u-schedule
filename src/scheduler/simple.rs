@@ -657,6 +657,32 @@ mod tests {
         Task::new(id).with_activity(activity)
     }
 
+    #[test]
+    fn test_the_first_activity_on_a_resource_takes_the_initial_setup() {
+        let task = |id: &str, category: &str| {
+            Task::new(id).with_category(category).with_activity(
+                Activity::new(format!("{id}-1"), id, 0)
+                    .with_process_time(1_000)
+                    .with_requirement(ResourceRequirement::new("Machine")),
+            )
+        };
+        let tasks = vec![task("A", "red"), task("B", "blue")];
+        let resources = vec![Resource::new("M", "Machine")];
+        let mut matrix = TransitionMatrix::new("m", "M")
+            .with_default(300)
+            .with_initial(500);
+        matrix.set_initial("blue", 50);
+        let matrices = TransitionMatrixCollection::new().with_matrix(matrix);
+
+        let schedule = SimpleScheduler::new()
+            .with_transition_matrices(matrices)
+            .schedule(&valid(&tasks, &resources), 0);
+
+        let at = |a: &str| schedule.assignment_for_activity(a).expect("placed");
+        assert_eq!((at("A-1").setup_ms, at("A-1").end_ms), (500, 1_500)); // from the initial state
+        assert_eq!((at("B-1").setup_ms, at("B-1").end_ms), (300, 2_800)); // red → blue: the default
+    }
+
     const HOUR: i64 = 3_600_000;
 
     /// 08–12 and 13–17 on each of `days` days from 0.

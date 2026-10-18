@@ -32,6 +32,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   its span instead of requiring one unbroken stretch.
   `ResourceTimeline::earliest_resumable`, `calendar` and `is_free`.
 
+- Initial setup: `TransitionMatrix::with_initial` / `set_initial(category, ms)`
+  — the setup before a resource's first activity, from its initial state
+  (Allahverdi's `s_0j`). It was always 0; it still is unless set.
+
 ### Fixed
 
 - The GA scheduled every activity with its own duration on every resource:

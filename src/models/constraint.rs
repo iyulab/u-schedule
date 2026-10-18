@@ -133,6 +133,14 @@ pub struct TransitionMatrix {
     transitions: HashMap<(String, String), i64>,
     /// Default setup time when no explicit transition is defined.
     pub default_ms: i64,
+    /// Setup before the resource's first activity, from its initial state
+    /// (Allahverdi's `s_0j`), for a category with no time of its own in
+    /// `initial`. Default 0.
+    #[serde(default)]
+    pub initial_ms: i64,
+    /// Setup before the resource's first activity, by the category it runs.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    initial: HashMap<String, i64>,
 }
 
 impl TransitionMatrix {
@@ -143,7 +151,30 @@ impl TransitionMatrix {
             resource_id: resource_id.into(),
             transitions: HashMap::new(),
             default_ms: 0,
+            initial_ms: 0,
+            initial: HashMap::new(),
         }
+    }
+
+    /// Sets the setup before the resource's first activity, whatever its
+    /// category ([`initial_ms`](Self::initial_ms)).
+    pub fn with_initial(mut self, initial_ms: i64) -> Self {
+        self.initial_ms = initial_ms;
+        self
+    }
+
+    /// Sets the setup before the resource's first activity when it runs
+    /// `category`.
+    pub fn set_initial(&mut self, category: impl Into<String>, time_ms: i64) {
+        self.initial.insert(category.into(), time_ms);
+    }
+
+    /// The setup before the resource's first activity, of `category`.
+    pub fn get_initial(&self, category: &str) -> i64 {
+        self.initial
+            .get(category)
+            .copied()
+            .unwrap_or(self.initial_ms)
     }
 
     /// Sets the default transition time.
@@ -223,9 +254,10 @@ impl TransitionMatrixCollection {
 
     /// The setup an activity incurs on `resource_id`: on a resource with a
     /// transition matrix, the changeover from `previous_category` (the
-    /// category last run there) to `category` -- none before the resource's
-    /// first activity; on any other resource, the activity's own setup
-    /// (`own_setup_ms`). Every scheduler places by this one rule.
+    /// category last run there) to `category` -- before the resource's first
+    /// activity, the matrix's [initial setup](TransitionMatrix::get_initial);
+    /// on any other resource, the activity's own setup (`own_setup_ms`).
+    /// Every scheduler places by this one rule.
     pub fn setup_ms(
         &self,
         resource_id: &str,
@@ -234,9 +266,10 @@ impl TransitionMatrixCollection {
         own_setup_ms: i64,
     ) -> i64 {
         match self.matrices.get(resource_id) {
-            Some(matrix) => {
-                previous_category.map_or(0, |prev| matrix.get_transition(prev, category))
-            }
+            Some(matrix) => previous_category.map_or_else(
+                || matrix.get_initial(category),
+                |prev| matrix.get_transition(prev, category),
+            ),
             None => own_setup_ms,
         }
     }
