@@ -41,15 +41,22 @@ impl SchedulingGaProblem {
             return;
         }
 
-        // Each activity's neighbours in its task.
+        // Each activity's neighbours in its task, and the activities that
+        // wait for it in other tasks.
         let mut links = Links {
             task_pred: vec![None; n],
             task_succ: vec![None; n],
+            waiting_on: vec![Vec::new(); n],
         };
         for ops in &self.task_activities {
             for pair in ops.windows(2) {
                 links.task_pred[pair[1]] = Some(pair[0]);
                 links.task_succ[pair[0]] = Some(pair[1]);
+            }
+        }
+        for (a, predecessors) in self.predecessors.iter().enumerate() {
+            for &p in predecessors {
+                links.waiting_on[p].push(a);
             }
         }
         // The machine sequences the order gives.
@@ -149,14 +156,30 @@ impl SchedulingGaProblem {
         loop {
             let r = ix.resource[a].expect("a placed activity has a resource");
             let machine_pred = position[a].checked_sub(1).map(|i| seq[r][i]);
+            // A predecessor in another task that ends where this one starts.
+            let waited_for = self.predecessors[a]
+                .iter()
+                .copied()
+                .find(|&p| placed.end[p] == placed.start[a]);
             let next = match (machine_pred, links.task_pred[a]) {
                 (Some(m), _) if placed.end[m] == placed.start[a] => m,
                 (_, Some(t))
-                    if self.arrival(view, ix, &placed.end, Some(t), r) == placed.start[a] =>
+                    if self.arrival(
+                        view,
+                        ix,
+                        placed,
+                        Some(t),
+                        a,
+                        r,
+                        placed.end[a] - placed.start[a],
+                    ) == placed.start[a] =>
                 {
                     t
                 }
-                _ => break,
+                _ => match waited_for {
+                    Some(p) => p,
+                    None => break,
+                },
             };
             path.push(next);
             a = next;
@@ -244,9 +267,10 @@ impl SchedulingGaProblem {
 
     /// Times the machine sequences `seq` into `scratch.placed`: every activity
     /// starts as soon as its predecessor in its task, the one before it on its
-    /// machine and its task's release allow. `false` when the sequences
-    /// contradict the tasks' order. The placement's order is a topological
-    /// order of the sequences.
+    /// machine, its [`predecessors`](SchedulingGaProblem::predecessors) in
+    /// other tasks and its release allow -- the bounds the decoders place by.
+    /// `false` when the sequences contradict the tasks' order or those
+    /// predecessors. The placement's order is a topological order of them all.
     fn time_sequences(
         &self,
         view: &TaskView<'_>,
@@ -273,8 +297,9 @@ impl SchedulingGaProblem {
         }
         ready.clear();
         for a in 0..n {
-            waiting[a] =
-                u8::from(machine_pred[a].is_some()) + u8::from(links.task_pred[a].is_some());
+            waiting[a] = usize::from(machine_pred[a].is_some())
+                + usize::from(links.task_pred[a].is_some())
+                + self.predecessors[a].len();
             if waiting[a] == 0 {
                 ready.push(a);
             }
@@ -282,15 +307,27 @@ impl SchedulingGaProblem {
         placed.order.clear();
         while let Some(a) = ready.pop() {
             let r = ix.resource[a].expect("a sequenced activity has a resource");
-            let start = machine_pred[a]
-                .map_or(0, |m| placed.end[m])
-                .max(self.arrival(view, ix, &placed.end, links.task_pred[a], r))
-                .max(self.release_of(view, a));
             let setup = self.setup_of(view, ix, a, r, machine_pred[a].map(|m| self.task_of[m]));
             let duration = ix.duration[a];
-            let end = start + setup + duration.process_ms + duration.teardown_ms;
+            let span = setup + duration.process_ms + duration.teardown_ms;
+            let start = machine_pred[a]
+                .map_or(0, |m| placed.end[m])
+                .max(self.arrival(view, ix, placed, links.task_pred[a], a, r, span))
+                .max(self.release_of(view, a))
+                .max(
+                    self.predecessors[a]
+                        .iter()
+                        .map(|&p| placed.end[p])
+                        .max()
+                        .unwrap_or(0),
+                );
+            let end = start + span;
             placed.put(a, start, end, setup);
-            for succ in [machine_succ[a], links.task_succ[a]].into_iter().flatten() {
+            let successors = [machine_succ[a], links.task_succ[a]]
+                .into_iter()
+                .flatten()
+                .chain(links.waiting_on[a].iter().copied());
+            for succ in successors {
                 waiting[succ] -= 1;
                 if waiting[succ] == 0 {
                     ready.push(succ);
@@ -301,17 +338,19 @@ impl SchedulingGaProblem {
     }
 }
 
-/// The neighbours of each activity in its task.
+/// The neighbours of each activity in its task, and the activities of other
+/// tasks that wait for it.
 struct Links {
     task_pred: Vec<Option<usize>>,
     task_succ: Vec<Option<usize>>,
+    waiting_on: Vec<Vec<usize>>,
 }
 
 /// What timing a set of sequences needs, kept between timings.
 struct Scratch {
     machine_pred: Vec<Option<usize>>,
     machine_succ: Vec<Option<usize>>,
-    waiting: Vec<u8>,
+    waiting: Vec<usize>,
     ready: Vec<usize>,
     placed: Placed,
 }

@@ -23,23 +23,31 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `start_after` (a share in `[0, 1]`) of the previous step's scheduled span
   has passed, and ends no earlier than the previous step's end plus
   `finish_after_ms` -- the transport between their resources adding to both.
-  `SimpleScheduler` (and `DispatchSearch`) place by both bounds, holding back
-  a step that would end too early, and the feasibility check reports either
+  `SimpleScheduler` (and `DispatchSearch`) and the genetic algorithm's two
+  decoders and local search place by both bounds, holding back a step that
+  would end too early, and the feasibility check reports either
   bound broken as a `PrecedenceViolation`. `Problem::new` refuses an overlap
   on a task's first step (`invalid_option`), a share outside `[0, 1]` or a
   negative lag (`parameter_out_of_range`). A new public field: a struct
   literal of `Activity` needs it.
+
+### Fixed
+
+- The genetic algorithm's local search no longer lengthens a schedule whose
+  activities wait for `predecessors` in other tasks. Its timing of a swap left
+  those predecessors out, so a swap that looked shorter decoded longer (28 of
+  200 improvements on random job shops with such predecessors); it now waits
+  for them, as the decoders do, and follows them along the critical path.
 
 ### Changed
 
 - **Breaking:** a task's steps run in `sequence` order everywhere.
   `Problem::new` keeps each task's activities sorted by `sequence` and refuses
   two activities of one task with the same `sequence` (`duplicate_id`,
-  `ValidationErrorKind::DuplicateSequence`). `SimpleScheduler` and the CP
-  model used to read the order the activities were listed in, while the
-  feasibility check and the genetic algorithm read `sequence` -- a task listed
-  out of order was scheduled in one order and checked in the other, and two
-  steps with one `sequence` collided in the genetic algorithm's index.
+  `ValidationErrorKind::DuplicateSequence`). The schedulers (`SimpleScheduler`,
+  the genetic algorithm, the CP model) used to read the order the activities
+  were listed in, while the feasibility check read `sequence` -- a task listed
+  out of order was scheduled in one order and checked in the other.
 
 ## [0.29.0] - 2026-10-18
 

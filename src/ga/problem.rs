@@ -14,7 +14,7 @@ use u_metaheur::ga::GaProblem;
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
 use crate::models::{
-    tardiness_ms, ActivityDuration, Assignment, Resource, ResourceTiming, Schedule,
+    tardiness_ms, ActivityDuration, Assignment, Overlap, Resource, ResourceTiming, Schedule,
     TransitionMatrixCollection,
 };
 use crate::Problem;
@@ -135,6 +135,9 @@ pub struct SchedulingGaProblem {
     /// Each activity's own [`release_time`](crate::models::Activity::release_time)
     /// (0 without one), by activity index.
     activity_release: Vec<i64>,
+    /// Each activity's [`overlap`](crate::models::Activity::overlap) of the
+    /// previous step of its task, by activity index.
+    overlap: Vec<Option<Overlap>>,
     /// Whether any activity's time depends on its resource — when none does,
     /// the decoders read each activity's own duration without a lookup.
     timed: bool,
@@ -165,6 +168,12 @@ impl SchedulingGaProblem {
             .iter()
             .flat_map(|t| &t.activities)
             .map(|a| a.release_time.unwrap_or(0))
+            .collect();
+        let overlap: Vec<Option<Overlap>> = problem
+            .tasks()
+            .iter()
+            .flat_map(|t| &t.activities)
+            .map(|a| a.overlap)
             .collect();
         let mut task_categories = HashMap::new();
         let mut deadlines = HashMap::new();
@@ -252,6 +261,7 @@ impl SchedulingGaProblem {
             task_index,
             task_of,
             activity_release,
+            overlap,
             timed: timings.iter().any(|t| !t.is_empty()),
             timings,
             predecessors,
@@ -518,22 +528,35 @@ impl SchedulingGaProblem {
         }
     }
 
-    /// When the work of `activity`'s task reaches `resource`: the end of the
-    /// activity before it in the task (`pred`, if any) plus the move from
-    /// the resource that one ran on.
+    /// The earliest `activity`, taking `span` on `resource`, may start after
+    /// the activity before it in its task (`pred`, if any): that one's end —
+    /// or, for a step that overlaps it ([`Overlap`]), its share of that one's
+    /// span, and late enough to end no earlier than the overlap allows — plus
+    /// the move from the resource that one ran on.
+    #[allow(clippy::too_many_arguments)]
     fn arrival(
         &self,
         view: &TaskView<'_>,
         ix: &Indexed,
-        end: &[i64],
+        placed: &Placed,
         pred: Option<usize>,
+        activity: usize,
         resource: usize,
+        span: i64,
     ) -> i64 {
-        match pred {
-            None => 0,
-            Some(p) if !view.moves => end[p],
-            Some(p) => end[p] + ix.resource[p].map_or(0, |from| self.transport(from, resource)),
-        }
+        let Some(p) = pred else { return 0 };
+        let moved = if view.moves {
+            ix.resource[p].map_or(0, |from| self.transport(from, resource))
+        } else {
+            0
+        };
+        let after = match &self.overlap[activity] {
+            None => placed.end[p],
+            Some(overlap) => overlap
+                .earliest_start((placed.start[p], placed.end[p]))
+                .max(overlap.earliest_end(placed.end[p]) - span),
+        };
+        after + moved
     }
 
     /// The setup of `activity` on `resource`, after the task last run there
@@ -571,13 +594,14 @@ impl SchedulingGaProblem {
             settled[a] = true;
             let Some(r) = ix.resource[a] else { continue };
             let t = self.task_of[a];
-            let start = resource_available[r]
-                .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                .max(self.release_of(view, a))
-                .max(self.predecessors_end(a, &placed.end, &settled));
             let setup = self.setup_of(view, ix, a, r, last_task[r]);
             let duration = ix.duration[a];
-            let end = start + setup + duration.process_ms + duration.teardown_ms;
+            let span = setup + duration.process_ms + duration.teardown_ms;
+            let start = resource_available[r]
+                .max(self.arrival(view, ix, &placed, task_last[t], a, r, span))
+                .max(self.release_of(view, a))
+                .max(self.predecessors_end(a, &placed.end, &settled));
+            let end = start + span;
             placed.put(a, start, end, setup);
             resource_available[r] = end;
             task_last[t] = Some(a);
@@ -681,18 +705,19 @@ impl SchedulingGaProblem {
                     if !self.predecessors[a].iter().all(|&p| settled[p]) {
                         break;
                     }
-                    let start = resource_available[r]
-                        .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                        .max(self.release_of(view, a))
-                        .max(self.predecessors_end(a, &placed.end, &settled));
                     let setup = self.setup_of(view, ix, a, r, last_task[r]);
                     let duration = ix.duration[a];
+                    let span = setup + duration.process_ms + duration.teardown_ms;
+                    let start = resource_available[r]
+                        .max(self.arrival(view, ix, &placed, task_last[t], a, r, span))
+                        .max(self.release_of(view, a))
+                        .max(self.predecessors_end(a, &placed.end, &settled));
                     candidates.push(Candidate {
                         activity: a,
                         resource: r,
                         setup,
                         start,
-                        finish: start + setup + duration.process_ms + duration.teardown_ms,
+                        finish: start + span,
                     });
                     break;
                 }
@@ -1255,6 +1280,34 @@ mod tests {
     /// more steps is never longer than with fewer, since the first steps are
     /// the same and the best sequences seen are kept.
     #[test]
+    fn the_local_search_never_lengthens_a_schedule_with_predecessors_in_other_tasks() {
+        // Its timing used to leave them out, so a swap that looked shorter
+        // decoded longer: 28 of these 200 improvements were.
+        let mut rng = SmallRng::seed_from_u64(7);
+        for _ in 0..40 {
+            let (mut tasks, resources) = random_job_shop(&mut rng, 6, 5);
+            for (j, task) in tasks.iter_mut().enumerate().skip(1) {
+                let (k, p) = (rng.random_range(0..5), rng.random_range(0..5));
+                task.activities[k]
+                    .predecessors
+                    .push(format!("J{}_{p}", j - 1));
+            }
+            let ga = SchedulingGaProblem::new(&valid(&tasks, &resources))
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]");
+            for _ in 0..5 {
+                let start = ga.create_individual(&mut rng);
+                let mut improved = start.clone();
+                ga.improve(&mut improved);
+                assert!(
+                    ga.decode_semi_active(&improved).makespan_ms()
+                        <= ga.decode_semi_active(&start).makespan_ms()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn more_local_search_steps_never_give_a_longer_schedule() {
         let mut rng = SmallRng::seed_from_u64(23);
         for _ in 0..15 {
@@ -1576,6 +1629,58 @@ mod tests {
                 a.activity_id,
                 a.resource_id
             );
+        }
+    }
+
+    #[test]
+    fn both_decoders_and_the_local_search_keep_an_overlap_s_two_bounds() {
+        use crate::models::Overlap;
+        // J1 cuts on A (1 s), then bends on B (`bend` ms) overlapping the cut;
+        // moving A -> B takes 100 ms.
+        let step = |id: &str, seq: i32, ms: i64, machine: &str| {
+            Activity::new(id, "J1", seq)
+                .with_process_time(ms)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        let resources = vec![
+            Resource::new("A", "Machine").with_transport_to("B", 100),
+            Resource::new("B", "Machine"),
+        ];
+        for (bend, overlap, expected) in [
+            // Starts at 0.3 of the cut, plus the move.
+            (1_000, Overlap::new(0.3), (400, 1_400)),
+            // Short: held back to end after the cut (and the move).
+            (200, Overlap::new(0.3), (900, 1_100)),
+            (200, Overlap::new(0.0).with_finish_after(50), (950, 1_150)),
+        ] {
+            let tasks = vec![Task::new("J1")
+                .with_activity(step("cut", 0, 1_000, "A"))
+                .with_activity(step("bend", 1, bend, "B").with_overlap(overlap))];
+            let problem = valid(&tasks, &resources);
+            let ga = SchedulingGaProblem::new(&problem);
+            let mut chromosome = ScheduleChromosome {
+                osv: vec!["J1".into(), "J1".into()],
+                mav: vec!["A".into(), "B".into()],
+                activity_index: ga.activity_index.clone(),
+                fitness: f64::INFINITY,
+            };
+            ga.improve(&mut chromosome);
+            for schedule in [
+                ga.decode_semi_active(&chromosome),
+                ga.decode_active(&chromosome),
+            ] {
+                let a = schedule.assignment_for_activity("bend").expect("placed");
+                assert_eq!((a.start_ms, a.end_ms), expected, "bend {bend}");
+                let input = crate::scheduler::FeasibilityInput {
+                    tasks: problem.tasks(),
+                    resources: problem.resources(),
+                    constraints: &[],
+                };
+                let violations = crate::scheduler::check_schedule(&schedule, &input);
+                assert!(violations.is_empty(), "{violations:?}");
+            }
         }
     }
 

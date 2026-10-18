@@ -484,10 +484,11 @@ proptest! {
     }
 }
 
-/// Tasks of two to four steps on three machines (one with a calendar, one
-/// moving work on to another), each step after the first overlapping the one
-/// before by a random share and lag, some resumable.
-fn arb_overlapping() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
+/// Tasks of two to four steps on three machines (one moving work on to
+/// another, and with `calendar` one with a break and some steps resumable),
+/// each step after the first overlapping the one before by a random share and
+/// lag.
+fn arb_overlapping(calendar: bool) -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
     let step = (
         100..2_000i64,
         0..3usize,
@@ -495,16 +496,19 @@ fn arb_overlapping() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
         any::<bool>(),
     );
     let tasks = prop::collection::vec(prop::collection::vec(step, 2..=4usize), 1..=4usize);
-    tasks.prop_map(|specs| {
-        let resources = vec![
+    tasks.prop_map(move |specs| {
+        let mut resources = vec![
             Resource::new("M0", "Machine").with_transport_to("M1", 150),
-            Resource::new("M1", "Machine").with_calendar(
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
+        if calendar {
+            resources[1] = resources[1].clone().with_calendar(
                 Calendar::new("c")
                     .with_window(0, 3_000)
                     .with_window(3_500, 100_000),
-            ),
-            Resource::new("M2", "Machine"),
-        ];
+            );
+        }
         let tasks = specs
             .into_iter()
             .enumerate()
@@ -521,7 +525,7 @@ fn arb_overlapping() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
                     if let (Some((share, lag)), true) = (overlap, k > 0) {
                         act = act.with_overlap(Overlap::new(share).with_finish_after(lag));
                     }
-                    if resumable {
+                    if resumable && calendar {
                         act = act.resumable();
                     }
                     task = task.with_activity(act);
@@ -536,10 +540,37 @@ fn arb_overlapping() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
     #[test]
-    fn overlapping_steps_are_scheduled_within_both_bounds((tasks, resources) in arb_overlapping()) {
+    fn overlapping_steps_are_scheduled_within_both_bounds((tasks, resources) in arb_overlapping(true)) {
         let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
         prop_assert!(s.violations.is_empty(), "violations: {:?}", s.violations);
         let placed: usize = tasks.iter().map(|t| t.activities.len()).sum();
         prop_assert_eq!(s.assignments.len(), placed);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    #[test]
+    fn the_genetic_algorithm_keeps_overlapping_steps_within_both_bounds(
+        (tasks, resources) in arb_overlapping(false),
+        seed in 0..1_000u64,
+    ) {
+        use u_metaheur::ga::{GaConfig, GaRunner};
+        use u_schedule::ga::SchedulingGaProblem;
+        let problem = valid(&tasks, &resources);
+        let ga = SchedulingGaProblem::new(&problem);
+        let config = GaConfig::default()
+            .with_population_size(12)
+            .with_max_generations(6)
+            .with_seed(seed);
+        let best = GaRunner::run(&ga, &config).expect("a valid config").best;
+        for schedule in [ga.decode_semi_active(&best), ga.decode_active(&best)] {
+            let v = check_schedule(&schedule, &FeasibilityInput {
+                tasks: problem.tasks(),
+                resources: problem.resources(),
+                constraints: &[],
+            });
+            prop_assert!(v.is_empty(), "violations: {:?}", v);
+        }
     }
 }
