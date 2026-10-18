@@ -14,7 +14,7 @@
 //! # Reference
 //! Cormen et al. (2009), "Introduction to Algorithms", Ch. 22.4 (Topological Sort)
 
-use crate::models::{Resource, Task};
+use crate::models::{Resource, ResourceTiming, Task};
 use std::collections::{HashMap, HashSet};
 
 /// Validation result.
@@ -80,6 +80,17 @@ pub enum ValidationErrorKind {
         activity: String,
         /// Its total duration (ms).
         duration_ms: i64,
+    },
+    /// An activity's [`ResourceTiming::Speed`]
+    /// on a resource is not finite and `> 0` — the processing time is divided
+    /// by it.
+    SpeedOutOfRange {
+        /// The activity.
+        activity: String,
+        /// The resource the speed is given for.
+        resource: String,
+        /// The speed given.
+        speed: f64,
     },
     /// A resource's capacity is below 1: it could never hold an activity.
     CapacityOutOfRange {
@@ -168,6 +179,7 @@ impl ValidationErrorKind {
             ValidationErrorKind::ReversedCalendarPeriod { .. } => "invalid_calendar_period",
             ValidationErrorKind::WeightOutOfRange { .. }
             | ValidationErrorKind::NegativeDuration { .. }
+            | ValidationErrorKind::SpeedOutOfRange { .. }
             | ValidationErrorKind::CapacityOutOfRange { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
@@ -200,6 +212,13 @@ impl ValidationError {
             } => format!(
                 "Activity '{activity}' has a negative duration part (total {duration_ms} ms); \
                  setup, process and teardown must each be >= 0"
+            ),
+            ValidationErrorKind::SpeedOutOfRange {
+                activity,
+                resource,
+                speed,
+            } => format!(
+                "Activity '{activity}' has speed {speed} on resource '{resource}'; a speed must be finite and greater than 0"
             ),
             ValidationErrorKind::CapacityOutOfRange { resource, capacity } => format!(
                 "Resource '{resource}' has capacity {capacity}; a capacity must be at least 1"
@@ -338,6 +357,36 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
     // Check resource references
     for task in tasks {
         for act in &task.activities {
+            for (resource, timing) in &act.resource_timings {
+                if !resource_ids.contains(resource.as_str()) {
+                    errors.push(ValidationError::new(
+                        ValidationErrorKind::InvalidResourceReference {
+                            activity: act.id.clone(),
+                            resource: resource.clone(),
+                        },
+                    ));
+                }
+                match timing {
+                    ResourceTiming::Speed(speed) if !(speed.is_finite() && *speed > 0.0) => {
+                        errors.push(ValidationError::new(ValidationErrorKind::SpeedOutOfRange {
+                            activity: act.id.clone(),
+                            resource: resource.clone(),
+                            speed: *speed,
+                        }));
+                    }
+                    ResourceTiming::Duration(d)
+                        if d.setup_ms < 0 || d.process_ms < 0 || d.teardown_ms < 0 =>
+                    {
+                        errors.push(ValidationError::new(
+                            ValidationErrorKind::NegativeDuration {
+                                activity: act.id.clone(),
+                                duration_ms: d.total_ms(),
+                            },
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             for req in &act.resource_requirements {
                 for cand in &req.candidates {
                     if !resource_ids.contains(cand.as_str()) {
@@ -657,6 +706,35 @@ mod tests {
         let mut tasks = sample_tasks();
         tasks[0].weight = 1e-6;
         assert!(validate_input(&tasks, &sample_resources()).is_ok());
+    }
+
+    #[test]
+    fn a_resource_timing_is_checked() {
+        use crate::models::ActivityDuration;
+        let mut tasks = sample_tasks();
+        let resource = sample_resources()[0].id.clone();
+        let a = tasks[0].activities[0].clone();
+        tasks[0].activities[0] = a
+            .with_speed_on(&resource, 0.0)
+            .with_duration_on("NOPE", ActivityDuration::new(0, -5, 0));
+        let errors = validate_input(&tasks, &sample_resources()).unwrap_err();
+        let kinds: Vec<_> = errors.iter().map(|e| e.kind.clone()).collect();
+        let id = tasks[0].activities[0].id.clone();
+        assert!(kinds.contains(&ValidationErrorKind::SpeedOutOfRange {
+            activity: id.clone(),
+            resource,
+            speed: 0.0,
+        }));
+        assert!(
+            kinds.contains(&ValidationErrorKind::InvalidResourceReference {
+                activity: id.clone(),
+                resource: "NOPE".into(),
+            })
+        );
+        assert!(kinds.contains(&ValidationErrorKind::NegativeDuration {
+            activity: id,
+            duration_ms: -5,
+        }));
     }
 
     #[test]

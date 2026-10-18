@@ -19,7 +19,8 @@
 //! assignment under another task is an external booking -- a pinned job --
 //! that counts only against capacity and calendars), at most once per unit its
 //! requirements take, last at least its setup (as the assignment records it -- a changeover or
-//! the activity's own), processing and teardown, and start no earlier than its
+//! the activity's own), processing and teardown on the resources it runs on
+//! ([`Activity::duration_on`](crate::models::Activity::duration_on)), and start no earlier than its
 //! task's release time.
 //!
 //! Not checked (documented gap): `Constraint::TransitionCost` (needs
@@ -77,6 +78,14 @@ fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
         }
     }
     let model_tasks: HashSet<&str> = input.tasks.iter().map(|t| t.id.as_str()).collect();
+    // The resources each activity runs on: its time depends on them.
+    let mut runs_on: HashMap<&str, Vec<&str>> = HashMap::new();
+    for a in &schedule.assignments {
+        runs_on
+            .entry(a.activity_id.as_str())
+            .or_default()
+            .push(a.resource_id.as_str());
+    }
     let mut uses: HashMap<&str, i32> = HashMap::new();
     for a in &schedule.assignments {
         let Some(&(task, activity)) = by_id.get(a.activity_id.as_str()) else {
@@ -121,7 +130,8 @@ fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
                 ),
             ));
         }
-        let needed = a.setup_ms + activity.duration.process_ms + activity.duration.teardown_ms;
+        let duration = activity.duration_on(runs_on[a.activity_id.as_str()].iter().copied());
+        let needed = a.setup_ms + duration.process_ms + duration.teardown_ms;
         if a.end_ms - a.start_ms < needed {
             out.push(Violation::duration_too_short(
                 &a.activity_id,
@@ -131,8 +141,8 @@ fn check_assignments(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
                     a.resource_id,
                     a.end_ms - a.start_ms,
                     a.setup_ms,
-                    activity.duration.process_ms,
-                    activity.duration.teardown_ms
+                    duration.process_ms,
+                    duration.teardown_ms
                 ),
             ));
         }

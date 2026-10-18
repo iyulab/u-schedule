@@ -21,7 +21,8 @@ mod schedule;
 mod task;
 pub mod time_constraints;
 
-pub use activity::{Activity, ActivityDuration, ResourceRequirement};
+pub(crate) use activity::timed_duration;
+pub use activity::{Activity, ActivityDuration, ResourceRequirement, ResourceTiming};
 pub use calendar::{Calendar, TimeWindow};
 pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::Resource;

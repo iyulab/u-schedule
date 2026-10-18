@@ -6,7 +6,7 @@
 //! # Reference
 //! Cheng et al. (1996), "A Tutorial Survey of JSSP using GA"
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rand::{Rng, RngExt};
 use u_metaheur::ga::GaProblem;
@@ -14,7 +14,8 @@ use u_metaheur::ga::GaProblem;
 use super::chromosome::ScheduleChromosome;
 use super::operators::GeneticOperators;
 use crate::models::{
-    tardiness_ms, ActivityDuration, Assignment, Resource, Schedule, TransitionMatrixCollection,
+    tardiness_ms, ActivityDuration, Assignment, Resource, ResourceTiming, Schedule,
+    TransitionMatrixCollection,
 };
 use crate::Problem;
 
@@ -57,7 +58,7 @@ impl ActivityInfo {
                     id: activity.id.clone(),
                     task_id: task.id.clone(),
                     sequence: (i + 1) as i32,
-                    duration: activity.duration.clone(),
+                    duration: activity.duration,
                     candidates: activity
                         .eligible_resources(problem.resources())
                         .into_iter()
@@ -102,11 +103,6 @@ pub struct SchedulingGaProblem {
     pub release_times: HashMap<String, i64>,
     /// Weight for tardiness in fitness (default: 0.5).
     pub tardiness_weight: f64,
-    /// Per-resource processing times: `(task_id, sequence, resource_id) → ms`.
-    ///
-    /// Used for SPT (Shortest Processing Time) initialization.
-    /// If empty, SPT initialization is skipped and replaced with load-balanced.
-    pub process_times: HashMap<(String, i32, String), i64>,
     /// Genetic operators for crossover/mutation strategy selection.
     ///
     /// Default: POX crossover + Swap mutation.
@@ -133,6 +129,12 @@ pub struct SchedulingGaProblem {
     task_index: HashMap<String, usize>,
     /// The task (index in `task_ids`) of each activity.
     task_of: Vec<usize>,
+    /// Each activity's [`resource_timings`](crate::models::Activity::resource_timings),
+    /// by activity index.
+    timings: Vec<BTreeMap<String, ResourceTiming>>,
+    /// Whether any activity's time depends on its resource — when none does,
+    /// the decoders read each activity's own duration without a lookup.
+    timed: bool,
     /// `resource id → index in resources`.
     resource_index: HashMap<String, usize>,
     /// The problem itself, which the dispatching seeds are scheduled on.
@@ -144,6 +146,13 @@ impl SchedulingGaProblem {
     pub fn new(problem: &Problem) -> Self {
         let (tasks, resources) = (problem.tasks(), problem.resources());
         let activities = ActivityInfo::from_problem(problem);
+        // In the order `from_problem` lists the activities.
+        let timings: Vec<BTreeMap<String, ResourceTiming>> = problem
+            .tasks()
+            .iter()
+            .flat_map(|t| &t.activities)
+            .map(|a| a.resource_timings.clone())
+            .collect();
         let mut task_categories = HashMap::new();
         let mut deadlines = HashMap::new();
         let mut release_times = HashMap::new();
@@ -205,7 +214,6 @@ impl SchedulingGaProblem {
             deadlines,
             release_times,
             tardiness_weight: 0.5,
-            process_times: HashMap::new(),
             operators: GeneticOperators::default(),
             local_search_steps: 60,
             activity_index,
@@ -213,6 +221,8 @@ impl SchedulingGaProblem {
             task_ids,
             task_index,
             task_of,
+            timed: timings.iter().any(|t| !t.is_empty()),
+            timings,
             resource_index,
             problem: problem.clone(),
         }
@@ -314,18 +324,6 @@ impl SchedulingGaProblem {
         }
         self.tardiness_weight = weight;
         Ok(self)
-    }
-
-    /// Sets per-resource processing times for SPT initialization.
-    ///
-    /// When set, 25% of the initial population uses SPT (Shortest Processing
-    /// Time) initialization. When empty, that 25% falls back to load-balanced.
-    pub fn with_process_times(
-        mut self,
-        process_times: HashMap<(String, i32, String), i64>,
-    ) -> Self {
-        self.process_times = process_times;
-        self
     }
 
     /// Sets how many swaps the local search may make to improve each child and
@@ -444,14 +442,31 @@ impl SchedulingGaProblem {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let duration = (0..self.activities.len())
+            .map(|a| match (self.timed, chromosome.mav.get(a)) {
+                (true, Some(id)) if !id.is_empty() => self.duration_on(a, id),
+                _ => self.activities[a].duration,
+            })
+            .collect();
         // The names of the resources the problem does not list, which a
         // schedule needs; `extra` borrowed them from the chromosome, so keep
         // them as owned strings.
         Indexed {
             order,
             resource,
+            duration,
             extra: extra.into_iter().map(str::to_string).collect(),
         }
+    }
+
+    /// The time of the activity at index `activity` on the resource named
+    /// `resource` ([`Activity::duration_on`](crate::models::Activity::duration_on)).
+    fn duration_on(&self, activity: usize, resource: &str) -> ActivityDuration {
+        crate::models::timed_duration(
+            &self.activities[activity].duration,
+            &self.timings[activity],
+            [resource],
+        )
     }
 
     /// The setup of `activity` on `resource`, after the task last run there
@@ -464,7 +479,7 @@ impl SchedulingGaProblem {
         resource: usize,
         previous: Option<usize>,
     ) -> i64 {
-        let own = self.activities[activity].duration.setup_ms;
+        let own = ix.duration[activity].setup_ms;
         if self.transition_matrices.is_empty() {
             return own;
         }
@@ -491,7 +506,7 @@ impl SchedulingGaProblem {
                 .max(task_available[t])
                 .max(view.release[t]);
             let setup = self.setup_of(view, ix, a, r, last_task[r]);
-            let duration = &self.activities[a].duration;
+            let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;
             placed.put(a, start, end, setup);
             resource_available[r] = end;
@@ -541,7 +556,7 @@ impl SchedulingGaProblem {
                         .max(task_available[t])
                         .max(view.release[t]);
                     let setup = self.setup_of(view, ix, a, r, last_task[r]);
-                    let duration = &self.activities[a].duration;
+                    let duration = ix.duration[a];
                     candidates.push(Candidate {
                         activity: a,
                         resource: r,
@@ -656,6 +671,10 @@ struct Indexed {
     /// resources, or past them for one the problem does not list. `None` when
     /// the chromosome gives it none.
     resource: Vec<Option<usize>>,
+    /// Each activity's time on the resource it runs on
+    /// ([`Activity::duration_on`](crate::models::Activity::duration_on)) —
+    /// resolved once per chromosome, read by every placement.
+    duration: Vec<ActivityDuration>,
     /// The ids of the unlisted resources, in the order of their indices past
     /// the problem's.
     extra: Vec<String>,
@@ -706,11 +725,12 @@ impl GaProblem for SchedulingGaProblem {
     }
 
     fn create_individual<R: Rng>(&self, rng: &mut R) -> ScheduleChromosome {
-        // 50% random, 25% load-balanced, 25% SPT (or load-balanced if no process_times)
+        // 50% random, 25% load-balanced, 25% SPT (or load-balanced when no
+        // activity's time depends on its resource)
         let roll: f64 = rng.random_range(0.0..1.0);
         if roll < 0.5 {
             ScheduleChromosome::random(&self.activities, rng)
-        } else if roll < 0.75 || self.process_times.is_empty() {
+        } else if roll < 0.75 || !self.timed {
             let cap: HashMap<String, i64> = self
                 .resources
                 .iter()
@@ -718,7 +738,11 @@ impl GaProblem for SchedulingGaProblem {
                 .collect();
             ScheduleChromosome::with_load_balancing(&self.activities, &cap, rng)
         } else {
-            ScheduleChromosome::with_shortest_time(&self.activities, &self.process_times, rng)
+            ScheduleChromosome::with_shortest_time(
+                &self.activities,
+                |a, r| self.duration_on(a, r).process_ms,
+                rng,
+            )
         }
     }
 
@@ -1322,19 +1346,13 @@ mod tests {
 
     #[test]
     fn test_spt_initialization() {
-        let (tasks, resources) = make_test_problem();
-        let process_times: HashMap<(String, i32, String), i64> = [
-            (("T1".into(), 1, "M1".into()), 500),
-            (("T1".into(), 1, "M2".into()), 900),
-            (("T1".into(), 2, "M2".into()), 2000),
-            (("T2".into(), 1, "M1".into()), 1500),
-            (("T2".into(), 1, "M3".into()), 800),
-        ]
-        .into_iter()
-        .collect();
+        let (mut tasks, resources) = make_test_problem();
+        tasks[0].activities[0] = tasks[0].activities[0].clone().with_speed_on("M1", 2.0);
+        tasks[1].activities[0] = tasks[1].activities[0]
+            .clone()
+            .with_duration_on("M3", ActivityDuration::fixed(800));
 
-        let problem =
-            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_process_times(process_times);
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
 
         // Generate many individuals to exercise all 3 init strategies
         let mut rng = SmallRng::seed_from_u64(42);
@@ -1393,20 +1411,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ga_runner_with_process_times() {
-        let (tasks, resources) = make_test_problem();
-        let process_times: HashMap<(String, i32, String), i64> = [
-            (("T1".into(), 1, "M1".into()), 500),
-            (("T1".into(), 1, "M2".into()), 900),
-            (("T1".into(), 2, "M2".into()), 2000),
-            (("T2".into(), 1, "M1".into()), 1500),
-            (("T2".into(), 1, "M3".into()), 800),
-        ]
-        .into_iter()
-        .collect();
-
-        let problem =
-            SchedulingGaProblem::new(&valid(&tasks, &resources)).with_process_times(process_times);
+    fn test_ga_schedules_with_the_time_on_each_resource() {
+        let (mut tasks, resources) = make_test_problem();
+        // T1's first activity runs twice as fast on M1, T2's takes 800 ms on M3.
+        tasks[0].activities[0] = tasks[0].activities[0].clone().with_speed_on("M1", 2.0);
+        tasks[1].activities[0] = tasks[1].activities[0]
+            .clone()
+            .with_duration_on("M3", ActivityDuration::fixed(800));
+        let problem = SchedulingGaProblem::new(&valid(&tasks, &resources));
         let config = GaConfig::default()
             .with_population_size(20)
             .with_max_generations(10)
@@ -1414,7 +1426,23 @@ mod tests {
             .with_parallel(false);
 
         let result = GaRunner::run(&problem, &config).expect("GA should succeed");
-        assert!(result.best_fitness.is_finite());
-        assert!(result.best_fitness < f64::INFINITY);
+        let schedule = problem.decode(&result.best);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        for a in &schedule.assignments {
+            let activity = tasks
+                .iter()
+                .flat_map(|t| &t.activities)
+                .find(|x| x.id == a.activity_id)
+                .expect("assigned activity exists");
+            let want = activity.duration_on([a.resource_id.as_str()]);
+            assert_eq!(
+                a.end_ms - a.start_ms,
+                a.setup_ms + want.process_ms + want.teardown_ms,
+                "{} on {}",
+                a.activity_id,
+                a.resource_id
+            );
+        }
     }
 }

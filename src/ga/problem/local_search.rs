@@ -282,7 +282,7 @@ impl SchedulingGaProblem {
                 .max(links.task_pred[a].map_or(0, |p| placed.end[p]))
                 .max(view.release[t]);
             let setup = self.setup_of(view, ix, a, r, machine_pred[a].map(|m| self.task_of[m]));
-            let duration = &self.activities[a].duration;
+            let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;
             placed.put(a, start, end, setup);
             for succ in [machine_succ[a], links.task_succ[a]].into_iter().flatten() {

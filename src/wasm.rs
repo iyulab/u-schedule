@@ -496,6 +496,15 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             "parameter": "processing_time", "activity": activity, "min": 0.0, "max": null,
             "got": ms_to_sec(*duration_ms),
         }),
+        // A speed must be > 0: zero itself is refused, so the bound is open.
+        ValidationErrorKind::SpeedOutOfRange {
+            activity,
+            resource,
+            speed,
+        } => json!({
+            "parameter": "speed", "activity": activity, "resource": resource, "min": null,
+            "max": null, "exclusive_min": 0.0, "got": speed,
+        }),
         ValidationErrorKind::CapacityOutOfRange { resource, capacity } => json!({
             "parameter": "capacity", "resource": resource, "min": 1.0, "max": null,
             "got": capacity,

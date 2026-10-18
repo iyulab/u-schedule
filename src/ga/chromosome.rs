@@ -95,22 +95,19 @@ impl ScheduleChromosome {
 
     /// Creates a chromosome with shortest processing time assignment.
     ///
-    /// For each activity, selects the candidate resource with the lowest
-    /// processing time. The `process_times` map is keyed by
-    /// `(task_id, sequence, resource_id)`.
-    ///
-    /// If a resource is not found in the map, the activity's default
-    /// `process_ms` is used as a fallback.
+    /// For each activity, selects the candidate resource it processes fastest
+    /// on — `process_on(activity index, resource)` — the first such in
+    /// candidate order.
     ///
     /// # Reference
     /// SPT (Shortest Processing Time) heuristic — Conway et al. (1967)
     pub fn with_shortest_time<R: Rng>(
         activities: &[ActivityInfo],
-        process_times: &HashMap<(String, i32, String), i64>,
+        process_on: impl Fn(usize, &str) -> i64,
         rng: &mut R,
     ) -> Self {
         let (osv, activity_index) = Self::create_random_osv(activities, rng);
-        let mav = Self::create_shortest_time_mav(activities, process_times);
+        let mav = Self::create_shortest_time_mav(activities, process_on);
         Self {
             osv,
             mav,
@@ -215,22 +212,18 @@ impl ScheduleChromosome {
 
     fn create_shortest_time_mav(
         activities: &[ActivityInfo],
-        process_times: &HashMap<(String, i32, String), i64>,
+        process_on: impl Fn(usize, &str) -> i64,
     ) -> Vec<String> {
         activities
             .iter()
-            .map(|act| {
+            .enumerate()
+            .map(|(i, act)| {
                 if act.candidates.is_empty() {
                     return String::new();
                 }
                 act.candidates
                     .iter()
-                    .min_by_key(|c| {
-                        process_times
-                            .get(&(act.task_id.clone(), act.sequence, (*c).clone()))
-                            .copied()
-                            .unwrap_or(act.duration.process_ms)
-                    })
+                    .min_by_key(|c| process_on(i, c))
                     .expect("candidates checked non-empty above")
                     .clone()
             })
@@ -793,41 +786,48 @@ mod tests {
     #[test]
     fn test_with_shortest_time() {
         let acts = sample_activities();
-        let mut rng = SmallRng::seed_from_u64(42);
-
-        // M1 is faster for T1/seq1, M3 is faster for T2/seq1
-        let process_times: HashMap<(String, i32, String), i64> = [
-            (("T1".into(), 1, "M1".into()), 500),
-            (("T1".into(), 1, "M2".into()), 900),
-            (("T1".into(), 2, "M2".into()), 2000), // Only candidate
-            (("T2".into(), 1, "M1".into()), 1500),
-            (("T2".into(), 1, "M3".into()), 800),
+        // M1 is faster for T1/seq1, M3 for T2/seq1
+        let times: HashMap<(usize, &str), i64> = [
+            ((0, "M1"), 500),
+            ((0, "M2"), 900),
+            ((2, "M1"), 1500),
+            ((2, "M3"), 800),
         ]
         .into_iter()
         .collect();
+        let mut rng = SmallRng::seed_from_u64(42);
 
-        let ch = ScheduleChromosome::with_shortest_time(&acts, &process_times, &mut rng);
+        let ch = ScheduleChromosome::with_shortest_time(
+            &acts,
+            |a, r| {
+                times
+                    .get(&(a, r))
+                    .copied()
+                    .unwrap_or(acts[a].duration.process_ms)
+            },
+            &mut rng,
+        );
 
         assert!(ch.is_valid(&acts));
-        assert_eq!(ch.resource_for("T1", 1), Some("M1")); // M1 is faster (500 < 900)
+        assert_eq!(ch.resource_for("T1", 1), Some("M1"));
         assert_eq!(ch.resource_for("T1", 2), Some("M2")); // Only candidate
-        assert_eq!(ch.resource_for("T2", 1), Some("M3")); // M3 is faster (800 < 1500)
+        assert_eq!(ch.resource_for("T2", 1), Some("M3"));
     }
 
     #[test]
-    fn test_with_shortest_time_fallback() {
+    fn test_with_shortest_time_on_equal_times_takes_the_first_candidate() {
         let acts = sample_activities();
         let mut rng = SmallRng::seed_from_u64(42);
 
-        // Partial map — T1/seq1 has no entries → falls back to process_ms
-        let process_times: HashMap<(String, i32, String), i64> = HashMap::new();
+        let ch = ScheduleChromosome::with_shortest_time(
+            &acts,
+            |a, _| acts[a].duration.process_ms,
+            &mut rng,
+        );
 
-        let ch = ScheduleChromosome::with_shortest_time(&acts, &process_times, &mut rng);
-
-        // Should still be valid (falls back to default process_ms for all)
         assert!(ch.is_valid(&acts));
-        assert_eq!(ch.osv.len(), 3);
-        assert_eq!(ch.mav.len(), 3);
+        assert_eq!(ch.resource_for("T1", 1), Some("M1"));
+        assert_eq!(ch.resource_for("T2", 1), Some("M1"));
     }
 
     #[test]

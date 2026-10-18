@@ -78,8 +78,9 @@ impl<'a> ScheduleCpBuilder<'a> {
             let release = task.release_time.unwrap_or(0);
 
             for activity in &task.activities {
-                // Setup, processing and teardown: the activity's whole span.
-                let duration = activity.duration.total_ms();
+                // Setup, processing and teardown: the activity's whole span,
+                // on the resource the solution is reported on.
+                let duration = self.duration_of(activity).total_ms();
                 let interval = IntervalVar::new(
                     &activity.id,
                     release,               // start_min
@@ -187,7 +188,7 @@ impl<'a> ScheduleCpBuilder<'a> {
                                 interval_sol.end,
                             )
                             .with_sequence(step as i32 + 1)
-                            .with_setup(activity.duration.setup_ms),
+                            .with_setup(self.duration_of(activity).setup_ms),
                         );
                     }
                 }
@@ -195,6 +196,14 @@ impl<'a> ScheduleCpBuilder<'a> {
         }
 
         schedule
+    }
+
+    /// The activity's time on the resource a solution reports it on — the
+    /// first eligible one (this formulation does not choose among
+    /// alternatives).
+    fn duration_of(&self, activity: &crate::models::Activity) -> crate::models::ActivityDuration {
+        let eligible = activity.eligible_resources(self.problem.resources());
+        activity.duration_on(eligible.first().copied())
     }
 
     /// Collects activity IDs per resource (from each activity's eligible

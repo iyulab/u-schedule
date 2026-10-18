@@ -10,11 +10,19 @@
 //! - **Process**: Core work time
 //! - **Teardown**: Cleanup/cooldown time
 //!
+//! The time may depend on the resources an activity runs on
+//! ([`ResourceTiming`]): a resource that works at a speed (processing time
+//! divided by it — Pinedo's uniform machines `Q`, and a worker's efficiency in
+//! dual-resource-constrained scheduling), or one with a time of its own for this
+//! activity (unrelated machines `R`, `p_ij`). [`Activity::duration_on`] is the
+//! one rule every scheduler and the feasibility check read.
+//!
 //! # Reference
-//! Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems", Ch. 2
+//! Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems", Ch. 2;
+//! Treleven & Elvers (1985), dual-resource-constrained job shops.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::Resource;
 
@@ -31,8 +39,12 @@ pub struct Activity {
     pub task_id: String,
     /// Position within the task (0-indexed).
     pub sequence: i32,
-    /// Time required to complete this activity.
+    /// Time required to complete this activity — on a resource without a
+    /// [`ResourceTiming`] of its own.
     pub duration: ActivityDuration,
+    /// How the time changes on particular resources, by resource id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_timings: BTreeMap<String, ResourceTiming>,
     /// Resources needed (type + quantity + candidates).
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
@@ -49,6 +61,7 @@ impl Activity {
             task_id: task_id.into(),
             sequence,
             duration: ActivityDuration::default(),
+            resource_timings: BTreeMap::new(),
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
             attributes: HashMap::new(),
@@ -65,6 +78,45 @@ impl Activity {
     pub fn with_process_time(mut self, process_ms: i64) -> Self {
         self.duration = ActivityDuration::fixed(process_ms);
         self
+    }
+
+    /// On `resource_id` the processing runs at `speed` (processing time ÷
+    /// `speed`; setup and teardown unchanged). `speed` must be finite and
+    /// positive — [`Problem::new`](crate::Problem::new) refuses others.
+    pub fn with_speed_on(mut self, resource_id: impl Into<String>, speed: f64) -> Self {
+        self.resource_timings
+            .insert(resource_id.into(), ResourceTiming::Speed(speed));
+        self
+    }
+
+    /// On `resource_id` the activity takes `duration`, whatever the other
+    /// resources it runs on.
+    pub fn with_duration_on(
+        mut self,
+        resource_id: impl Into<String>,
+        duration: ActivityDuration,
+    ) -> Self {
+        self.resource_timings
+            .insert(resource_id.into(), ResourceTiming::Duration(duration));
+        self
+    }
+
+    /// The activity's time on `resources` (every resource it runs on, one id
+    /// per unit):
+    ///
+    /// - a resource with a [`ResourceTiming::Duration`] sets the whole time —
+    ///   with several, the one of greatest total;
+    /// - otherwise processing is [`duration`](Self::duration)'s divided by the
+    ///   product of the resources' [`ResourceTiming::Speed`]s, rounded to the
+    ///   nearest ms; setup and teardown are unchanged.
+    ///
+    /// Setup here is the activity's own — a resource with a transition
+    /// matrix replaces it with its changeover.
+    pub fn duration_on<'a>(
+        &self,
+        resources: impl IntoIterator<Item = &'a str>,
+    ) -> ActivityDuration {
+        timed_duration(&self.duration, &self.resource_timings, resources)
     }
 
     /// Adds a resource requirement.
@@ -91,6 +143,51 @@ impl Activity {
     }
 }
 
+/// [`Activity::duration_on`]'s rule, for whatever holds an activity's base
+/// duration and timings.
+pub(crate) fn timed_duration<'a>(
+    base: &ActivityDuration,
+    timings: &BTreeMap<String, ResourceTiming>,
+    resources: impl IntoIterator<Item = &'a str>,
+) -> ActivityDuration {
+    if timings.is_empty() {
+        return *base;
+    }
+    let mut speed = 1.0;
+    let mut fixed: Option<&ActivityDuration> = None;
+    for id in resources {
+        match timings.get(id) {
+            Some(ResourceTiming::Speed(s)) => speed *= s,
+            Some(ResourceTiming::Duration(d))
+                if fixed.is_none_or(|f| d.total_ms() > f.total_ms()) =>
+            {
+                fixed = Some(d);
+            }
+            Some(ResourceTiming::Duration(_)) | None => {}
+        }
+    }
+    if let Some(d) = fixed {
+        return *d;
+    }
+    if speed == 1.0 {
+        return *base;
+    }
+    ActivityDuration {
+        process_ms: (base.process_ms as f64 / speed).round() as i64,
+        ..*base
+    }
+}
+
+/// How an activity's time changes on one resource.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceTiming {
+    /// Processing runs at this speed: time ÷ speed (2.0 is twice as fast).
+    Speed(f64),
+    /// The activity takes this long here.
+    Duration(ActivityDuration),
+}
+
 /// Time components of an activity.
 ///
 /// # Components
@@ -98,7 +195,7 @@ impl Activity {
 ///   May be overridden by `TransitionMatrix` for sequence-dependent setups.
 /// - **Process**: Core work time (the actual operation).
 /// - **Teardown**: Cleanup after processing (e.g., cooling, inspection).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ActivityDuration {
     /// Setup/preparation time (ms).
     pub setup_ms: i64,

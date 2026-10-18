@@ -8,6 +8,37 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- Processing time that depends on the resource: `Activity::with_speed_on`
+  (processing ÷ speed on that resource) and `Activity::with_duration_on` (a
+  duration of its own there), held in `Activity::resource_timings`
+  (`ResourceTiming::Speed` / `ResourceTiming::Duration`).
+  `Activity::duration_on(resources)` is the rule every scheduler reads: the
+  speeds of the resources an activity runs on multiply, a resource with a
+  duration of its own sets the whole time, the result is rounded to the
+  nearest millisecond. `SimpleScheduler` keeps its non-delay choice — the
+  earliest start, then the faster resource at the same start; the GA decoders
+  and local search, the CP builder and the feasibility check all use it.
+  `Problem::new` refuses a speed that is not finite and `> 0`
+  (`SpeedOutOfRange` — `parameter_out_of_range`), a negative duration and a
+  timing for an unknown resource.
+
+### Fixed
+
+- The GA scheduled every activity with its own duration on every resource:
+  per-resource processing times (`with_process_times`) only chose the
+  resources of a quarter of the first population, so a schedule's times
+  disagreed with the ones the problem declared.
+
+### Removed
+
+- **Breaking:** `SchedulingGaProblem::process_times` and
+  `with_process_times` — give the times on the activities
+  (`with_speed_on` / `with_duration_on`), where every scheduler reads them.
+  `ScheduleChromosome::with_shortest_time` takes the processing time as a
+  function of (activity index, resource) instead of a map.
+
 ## [0.25.0] - 2026-10-18
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

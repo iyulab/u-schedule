@@ -175,6 +175,48 @@ let placed = schedule.assignment_for_activity("J1-op1").expect("placed");
 assert_eq!(placed.resource_id, "M2");
 ```
 
+### Time that depends on the resource
+
+An activity's `duration` is its time on a resource with nothing of its own.
+On a particular resource it can instead run at a **speed** — processing time
+÷ speed, setup and teardown unchanged (a faster machine, a worker's
+efficiency: Pinedo's uniform machines `Q`) — or take a **duration** of its own
+there (unrelated machines `R`, `p_ij`):
+
+- on several resources at once (a machine and its operator), the speeds
+  multiply; a resource with a duration of its own sets the whole time;
+- the time is rounded to the nearest millisecond.
+
+`Activity::duration_on(resources)` is the one rule `SimpleScheduler`, the GA
+decoders and local search, the CP builder and the feasibility checker read.
+`SimpleScheduler` stays non-delay — the earliest start wins, and at the same
+start the resource that processes faster. A speed that is not finite and
+`> 0`, a negative duration, or a timing for a resource the problem does not
+have is refused by `Problem::new`.
+
+```rust
+use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+let job = |id: &str| {
+    Task::new(id).with_activity(
+        Activity::new(format!("{id}-1"), id, 0)
+            .with_process_time(60_000)
+            .with_requirement(ResourceRequirement::new("Machine"))
+            .with_speed_on("FAST", 2.0) // 30 s there
+            .with_duration_on("OLD", ActivityDuration::fixed(90_000)),
+    )
+};
+let resources = vec![Resource::new("OLD", "Machine"), Resource::new("FAST", "Machine")];
+let problem = Problem::new(vec![job("A"), job("B")], resources).expect("valid input");
+let schedule = SimpleScheduler::new().schedule(&problem, 0);
+let a = schedule.assignment_for_activity("A-1").expect("placed");
+let b = schedule.assignment_for_activity("B-1").expect("placed");
+assert_eq!((a.resource_id.as_str(), a.end_ms), ("FAST", 30_000)); // free at 0 and faster
+assert_eq!((b.resource_id.as_str(), b.end_ms), ("OLD", 90_000)); // free at 0: not left idle
+```
+
 ## Build & Test
 
 ```bash

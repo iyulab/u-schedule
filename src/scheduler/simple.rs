@@ -387,42 +387,47 @@ impl SimpleScheduler {
         resources: &[Resource],
         ready: i64,
     ) -> Option<Placement> {
-        let process = activity.duration.process_ms;
-        let teardown = activity.duration.teardown_ms;
-        let setup_for = |resource_id: &str| -> i64 {
+        // The setup a resource charges for this activity, given the activity's
+        // own setup on the resources it runs on.
+        let setup_for = |resource_id: &str, own_setup_ms: i64| -> i64 {
             self.transition_matrices.setup_ms(
                 resource_id,
                 last_category.get(resource_id).map(String::as_str),
                 &task.category,
-                activity.duration.setup_ms,
+                own_setup_ms,
             )
         };
 
-        // Phase 1: 고정점 — 모든 requirement가 t에서 시작 가능한 최소 t
+        // Phase 1: 고정점 — 모든 requirement가 t에서 시작 가능한 최소 t.
+        // Each candidate is judged on its own time there; at the same start
+        // the one that processes faster is taken (non-delay first, then the
+        // shorter processing).
         let mut t = ready;
-        let mut selections: Vec<(String, i64)> = Vec::new();
+        let mut selections: Vec<String> = Vec::new();
         for _ in 0..MAX_FIXED_POINT_ITERS {
             selections.clear();
             let mut t_next = t;
             for req in &activity.resource_requirements {
-                let mut fits: Vec<(i64, &str, i64)> = req
+                let mut fits: Vec<(i64, i64, &str)> = req
                     .eligible(resources)
                     .map(|r| r.id.as_str())
                     .filter_map(|rid| {
-                        let setup = setup_for(rid);
+                        let d = activity.duration_on([rid]);
+                        let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
                         timelines
                             .get(rid)?
-                            .earliest_fit(t, setup + process + teardown)
-                            .map(|fit| (fit, rid, setup))
+                            .earliest_fit(t, span)
+                            .map(|fit| (fit, d.process_ms, rid))
                     })
                     .collect();
-                fits.sort_by_key(|&(fit, _, _)| fit); // 동시각이면 자원 선언 순서
+                // 동시각이면 짧은 처리, 그다음 자원 선언 순서 (stable sort)
+                fits.sort_by_key(|&(fit, process, _)| (fit, process));
                 if (fits.len() as i32) < req.quantity {
                     return None; // 후보 부족 — 영원히 충족 불가
                 }
-                for &(fit, rid, setup) in fits.iter().take(req.quantity as usize) {
+                for &(fit, _, rid) in fits.iter().take(req.quantity as usize) {
                     t_next = t_next.max(fit);
-                    selections.push((rid.to_string(), setup));
+                    selections.push(rid.to_string());
                 }
             }
             if t_next == t {
@@ -431,9 +436,18 @@ impl SimpleScheduler {
             t = t_next;
         }
 
-        // Phase 2: 공통 duration D(최대 setup 기준)로 전 자원 동시 fit 재검증
+        // Phase 2: the time on the chosen resources together, with a common
+        // span D (the largest setup), re-checked on every resource.
+        let d = activity.duration_on(selections.iter().map(String::as_str));
+        let selections: Vec<(String, i64)> = selections
+            .into_iter()
+            .map(|rid| {
+                let setup = setup_for(&rid, d.setup_ms);
+                (rid, setup)
+            })
+            .collect();
         let max_setup = selections.iter().map(|&(_, s)| s).max().unwrap_or(0);
-        let d = max_setup + process + teardown;
+        let d = max_setup + d.process_ms + d.teardown_ms;
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
             for (rid, _) in &selections {
@@ -585,6 +599,112 @@ mod tests {
     /// A checked problem, for tests whose input is valid by construction.
     fn valid(tasks: &[Task], resources: &[Resource]) -> crate::Problem {
         crate::Problem::new(tasks.to_vec(), resources.to_vec()).expect("a valid problem")
+    }
+
+    /// A one-activity task on any of `machines`, 60 s of processing that runs
+    /// at `speeds` on them.
+    fn sped_task(id: &str, machines: &[(&str, f64)]) -> Task {
+        let mut activity = Activity::new(format!("{id}-1"), id, 0)
+            .with_process_time(60_000)
+            .with_requirement(
+                ResourceRequirement::new("Machine")
+                    .with_candidates(machines.iter().map(|(m, _)| m.to_string()).collect()),
+            );
+        for &(m, speed) in machines {
+            activity = activity.with_speed_on(m, speed);
+        }
+        Task::new(id).with_activity(activity)
+    }
+
+    #[test]
+    fn test_speed_divides_processing_and_breaks_a_tie_at_the_same_start() {
+        let machines = [("SLOW", 0.5), ("FAST", 2.0)];
+        let tasks: Vec<Task> = ["A", "B", "C"]
+            .iter()
+            .map(|id| sped_task(id, &machines))
+            .collect();
+        let resources = vec![
+            Resource::new("SLOW", "Machine"),
+            Resource::new("FAST", "Machine"),
+        ];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        let at = |a: &str| schedule.assignment_for_activity(a).expect("placed");
+        // Both free at 0: the faster takes the first; the slow one is not left
+        // idle (non-delay) and takes the second; the third waits for FAST.
+        assert_eq!(
+            (at("A-1").resource_id.as_str(), at("A-1").end_ms),
+            ("FAST", 30_000)
+        );
+        assert_eq!(
+            (at("B-1").resource_id.as_str(), at("B-1").end_ms),
+            ("SLOW", 120_000)
+        );
+        assert_eq!(
+            (
+                at("C-1").resource_id.as_str(),
+                at("C-1").start_ms,
+                at("C-1").end_ms
+            ),
+            ("FAST", 30_000, 60_000)
+        );
+    }
+
+    #[test]
+    fn test_a_duration_of_its_own_on_a_worker_outweighs_the_machine_speed() {
+        let activity = Activity::new("A-1", "A", 0)
+            .with_duration(ActivityDuration::new(1_000, 60_000, 0))
+            .with_requirement(ResourceRequirement::new("Machine"))
+            .with_requirement(ResourceRequirement::new("Worker"))
+            .with_speed_on("M", 2.0)
+            .with_speed_on("ALICE", 1.5)
+            .with_duration_on("BOB", ActivityDuration::new(0, 50_000, 0));
+        assert_eq!(activity.duration_on(["M", "ALICE"]).process_ms, 20_000); // 60 s ÷ 3
+        assert_eq!(activity.duration_on(["M", "ALICE"]).setup_ms, 1_000); // setup unchanged
+        assert_eq!(
+            activity.duration_on(["M", "BOB"]),
+            ActivityDuration::new(0, 50_000, 0)
+        );
+        assert_eq!(activity.duration_on(["X"]), activity.duration);
+
+        // Scheduled: the machine's speed does not apply under BOB's own time.
+        let mut activity = activity;
+        activity.resource_timings.remove("ALICE");
+        let tasks = vec![Task::new("A").with_activity(activity)];
+        let resources = vec![
+            Resource::new("M", "Machine"),
+            Resource::new("BOB", "Worker"),
+        ];
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        for a in &schedule.assignments {
+            assert_eq!((a.start_ms, a.end_ms), (0, 50_000), "{}", a.resource_id);
+        }
+    }
+
+    #[test]
+    fn test_feasibility_reads_the_time_on_the_resources_used() {
+        let tasks = vec![sped_task("A", &[("FAST", 2.0)])];
+        let resources = vec![Resource::new("FAST", "Machine")];
+        let input = super::super::feasibility::FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let mut schedule = Schedule::new();
+        schedule.add_assignment(Assignment::new("A-1", "A", "FAST", 0, 30_000));
+        assert!(super::super::feasibility::check_schedule(&schedule, &input).is_empty());
+        let mut short = Schedule::new();
+        short.add_assignment(Assignment::new("A-1", "A", "FAST", 0, 29_999));
+        let found = super::super::feasibility::check_schedule(&short, &input);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.violation_type == crate::models::ViolationType::DurationTooShort),
+            "{found:?}"
+        );
     }
 
     fn make_resource(id: &str) -> Resource {
