@@ -270,6 +270,40 @@ let a = SimpleScheduler::new().schedule(&problem, 11 * H).assignments.remove(0);
 assert_eq!((a.start_ms, a.end_ms), (11 * H, 15 * H)); // 11–12, lunch, 13–15
 ```
 
+An activity can have a calendar of its own — `Activity::with_calendar` — that
+it runs within on top of its resources' calendars. An activity that holds **no
+resource** (a cure, a wait for a carrier) still takes its time: it starts when
+its task reaches it, within its own calendar if it has one, and the task's
+next activity starts after it. It competes for nothing, holds nothing, and is
+reported in `Schedule::time_only` (a `TimeOnlySpan` each) rather than as an
+assignment; `makespan_ms` and `task_completion_time` count it.
+
+```rust
+use u_schedule::models::{Activity, Calendar, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+const H: i64 = 3_600_000;
+let machine = |id: &str, step: i32| {
+    Activity::new(id, "J", step)
+        .with_process_time(H)
+        .with_requirement(ResourceRequirement::new("Machine"))
+};
+let cure = Activity::new("J-2", "J", 1)
+    .with_process_time(3 * H)
+    .with_calendar(Calendar::new("plant").with_window(8 * H, 20 * H))
+    .resumable();
+let task = Task::new("J")
+    .with_activity(machine("J-1", 0))
+    .with_activity(cure)
+    .with_activity(machine("J-3", 2));
+let problem = Problem::new(vec![task], vec![Resource::new("M", "Machine")]).expect("valid input");
+let schedule = SimpleScheduler::new().schedule(&problem, 6 * H);
+let span = schedule.time_only_for_activity("J-2").unwrap();
+assert_eq!((span.start_ms, span.end_ms), (8 * H, 11 * H)); // waits for the plant
+assert_eq!(schedule.assignment_for_activity("J-3").unwrap().start_ms, 11 * H);
+```
+
 ### Resources held together
 
 A resource can name **companions** it holds whenever an activity runs on it —
@@ -326,10 +360,11 @@ let schedule = SimpleScheduler::new().schedule(&problem, 0);
 assert_eq!(schedule.assignment_for_activity("J1-2").unwrap().start_ms, 6_000);
 ```
 
-`SimpleScheduler` and the feasibility check read calendars and companions; the
-GA decoders and the CP builder do not, so on calendared resources their schedules are
-checked, not built, against working time (breaches appear in
-`Schedule::violations`).
+`SimpleScheduler` and the feasibility check read calendars, activity
+calendars, activities without resources and companions; the GA decoders and the CP
+builder do not, so on calendared resources their schedules are checked, not
+built, against working time, and an activity without resources has no time
+in them (breaches appear in `Schedule::violations`).
 
 ## Build & Test
 
@@ -630,7 +665,7 @@ try {
 | `invalid_resource_reference` | `activity`, `resource`, `companion`, `to` | A job-shop operation's `machine_times` naming a machine that is not one of its `machines` (`activity` is the step, `J1_2`; `resource` the machine), or a `transport_times` pair whose `from` or `to` no operation runs on, or that moves a machine to itself (`resource` is `from`). Also a step naming a machine the problem does not have, or a machine whose companion is unknown or itself — not produced by today's inputs (the machines are the ones the operations name, with no companions) |
 | `invalid_predecessor` | `activity`, `predecessor` | A step that waits on a step the problem does not have (not produced by today's inputs) |
 | `cyclic_dependency` | `activity` | Steps that wait on each other in a cycle (not produced by today's inputs: a job's steps run in their listed order) |
-| `invalid_calendar_period` | `parameter`, `resource`, `index`, `start`, `end` | A machine calendar period that ends before it starts (not produced by today's inputs: they carry no calendars) |
+| `invalid_calendar_period` | `parameter`, `resource`, `activity`, `index`, `start`, `end` | A machine's (`resource`) or a step's own (`activity`) calendar period that ends before it starts (not produced by today's inputs: they carry no calendars) |
 | `internal` | — | A fault in this package rather than in the request — please report it |
 
 `codes()` returns this table and the `check_jobshop` violations below as data —

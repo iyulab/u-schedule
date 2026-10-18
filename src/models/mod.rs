@@ -26,6 +26,6 @@ pub use activity::{Activity, ActivityDuration, ResourceRequirement, ResourceTimi
 pub use calendar::{joint_available_ms, joint_work_end, Calendar, TimeWindow};
 pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::{transport_between, Resource};
-pub use schedule::{Assignment, Schedule, Violation, ViolationType};
+pub use schedule::{Assignment, Schedule, TimeOnlySpan, Violation, ViolationType};
 pub use task::{tardiness_ms, Task};
 pub use time_constraints::{DurationDistribution, PertEstimate};

@@ -17,6 +17,10 @@ use std::collections::HashMap;
 pub struct Schedule {
     /// Activity assignments (activity → resource × time).
     pub assignments: Vec<Assignment>,
+    /// The activities that hold no resource, each with the time it takes
+    /// (a cure, a wait — its task's next activity starts after it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_only: Vec<TimeOnlySpan>,
     /// Constraint violations detected in this schedule.
     pub violations: Vec<Violation>,
 }
@@ -47,6 +51,46 @@ pub struct Assignment {
     pub end_ms: i64,
     /// Setup time portion (ms). Included in [start_ms, start_ms + setup_ms).
     pub setup_ms: i64,
+}
+
+/// When an activity that holds no resource runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeOnlySpan {
+    /// The activity.
+    pub activity_id: String,
+    /// Which step of its task it is, counting from 1 (as
+    /// [`Assignment::sequence`]).
+    pub sequence: Option<i32>,
+    /// Its task.
+    pub task_id: String,
+    /// Start time (ms).
+    pub start_ms: i64,
+    /// End time (ms).
+    pub end_ms: i64,
+}
+
+impl TimeOnlySpan {
+    /// The span of `activity_id` of `task_id` over `[start_ms, end_ms)`.
+    pub fn new(
+        activity_id: impl Into<String>,
+        task_id: impl Into<String>,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Self {
+        Self {
+            activity_id: activity_id.into(),
+            sequence: None,
+            task_id: task_id.into(),
+            start_ms,
+            end_ms,
+        }
+    }
+
+    /// Records which step of its task the activity is, counting from 1.
+    pub fn with_sequence(mut self, sequence: i32) -> Self {
+        self.sequence = Some(sequence);
+        self
+    }
 }
 
 /// A constraint violation.
@@ -279,9 +323,19 @@ impl Schedule {
         self.violations.is_empty()
     }
 
-    /// Makespan: latest end time across all assignments (ms).
+    /// Makespan: latest end across all assignments and time-only spans (ms).
     pub fn makespan_ms(&self) -> i64 {
-        self.assignments.iter().map(|a| a.end_ms).max().unwrap_or(0)
+        self.assignments
+            .iter()
+            .map(|a| a.end_ms)
+            .chain(self.time_only.iter().map(|s| s.end_ms))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The time-only span of an activity ([`time_only`](Self::time_only)).
+    pub fn time_only_for_activity(&self, activity_id: &str) -> Option<&TimeOnlySpan> {
+        self.time_only.iter().find(|s| s.activity_id == activity_id)
     }
 
     /// Finds the first assignment for a given activity.
@@ -355,11 +409,18 @@ impl Schedule {
             .collect()
     }
 
-    /// Completion time for a task (latest end of its assignments).
+    /// Completion time for a task (latest end of its assignments and
+    /// time-only spans).
     pub fn task_completion_time(&self, task_id: &str) -> Option<i64> {
         self.assignments_for_task(task_id)
             .iter()
             .map(|a| a.end_ms)
+            .chain(
+                self.time_only
+                    .iter()
+                    .filter(|s| s.task_id == task_id)
+                    .map(|s| s.end_ms),
+            )
             .max()
     }
 

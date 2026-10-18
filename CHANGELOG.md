@@ -8,6 +8,34 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- An activity's own calendar: `Activity::with_calendar` (held in
+  `Activity::calendar`). `SimpleScheduler` runs the activity only within it,
+  on top of its resources' calendars — a resumable one pauses outside it too.
+  The feasibility check reports work outside it as a `TimeWindowViolation`,
+  and `Problem::new` refuses a reversed period in it as
+  `ValidationErrorKind::ReversedActivityCalendarPeriod` (code
+  `invalid_calendar_period`, with `activity` in place of `resource`).
+- `Schedule::time_only` — one `TimeOnlySpan` (activity, step, task, start,
+  end) for each activity that holds no resource — and
+  `Schedule::time_only_for_activity`.
+
+### Changed
+
+- **Breaking**: an activity with no resource requirements takes its time in
+  `SimpleScheduler`. It starts when its task reaches it (and not before its
+  release), within its own calendar if it has one, and the task's next
+  activity starts after it; it is reported in `Schedule::time_only`. Before,
+  it was skipped: it took no time, and the activity after it could start
+  where it should have been running. `makespan_ms` and
+  `task_completion_time` count these spans.
+- The feasibility check holds activities without resources to the same
+  rules — one span, at least its time long (resumable: in its own working
+  time), not before its release, in order with its task — and reports one
+  with no span as a `TimeWindowViolation`. The GA decoders and the CP builder
+  still leave such an activity out, so their schedules now say so.
+
 ## [0.27.0] - 2026-10-18
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

@@ -20,6 +20,11 @@
 //!    competitors, and planned resource utilization.
 //! 4. The pick is booked, and the step repeats until no activity is left.
 //!
+//! An activity that holds no resource takes its time as soon as its task
+//! reaches it — within its own [calendar](crate::models::Activity::calendar),
+//! if it has one — and is reported in [`Schedule::time_only`]; it competes
+//! for nothing.
+//!
 //! A resource never idles while work it can start waits — no slot is held
 //! for a task that arrives later, however much the rule prefers it. On
 //! Taillard's job-shop instances this beats holding slots (active,
@@ -42,7 +47,8 @@ use super::timeline::ResourceTimeline;
 use crate::dispatching::policy::SharedPolicy;
 use crate::dispatching::{rules, Decision, RuleEngine, RulePolicy, SchedulingContext};
 use crate::models::{
-    transport_between, Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection,
+    transport_between, Activity, Assignment, Resource, Schedule, Task, TimeOnlySpan,
+    TransitionMatrixCollection,
 };
 use crate::Problem;
 
@@ -266,6 +272,13 @@ impl SimpleScheduler {
             .map(|r| (r.id.clone(), ResourceTimeline::new(r)))
             .collect();
         let mut last_category: HashMap<String, String> = HashMap::new();
+        // The working time of each activity with a calendar of its own, as a
+        // timeline nothing books.
+        let own: HashMap<&str, ResourceTimeline> = tasks
+            .iter()
+            .flat_map(|t| &t.activities)
+            .filter_map(|a| Some((a.id.as_str(), own_timeline(a)?)))
+            .collect();
 
         // Fixed-assignment seeding: index pins by activity, pre-book their
         // resources, and emit them verbatim. Pins are opaque reservations —
@@ -338,13 +351,28 @@ impl SimpleScheduler {
                         continue;
                     }
                     if activity.resource_requirements.is_empty() {
-                        cursor[i] += 1; // 자원 무요구 activity는 배정하지 않음 (기존 의미 유지)
+                        // It holds nothing, so nothing competes for it: it
+                        // runs when the task reaches it. The work stays where
+                        // it was (`came_from`). Never placed: the feasibility
+                        // check reports it.
+                        let from = activity.release_time.map_or(ready[i], |r| ready[i].max(r));
+                        if let Some((start, end)) =
+                            time_only_span(activity, own.get(activity.id.as_str()), from)
+                        {
+                            schedule.time_only.push(
+                                TimeOnlySpan::new(&activity.id, &task.id, start, end)
+                                    .with_sequence(cursor[i] as i32 + 1),
+                            );
+                            ready[i] = end;
+                        }
+                        cursor[i] += 1;
                         continue;
                     }
                     match self.place_activity(
                         activity,
                         task,
                         &timelines,
+                        own.get(activity.id.as_str()),
                         &last_category,
                         resources,
                         ready[i],
@@ -502,6 +530,7 @@ impl SimpleScheduler {
         activity: &Activity,
         task: &Task,
         timelines: &HashMap<String, ResourceTimeline>,
+        own: Option<&ResourceTimeline>,
         last_category: &HashMap<String, String>,
         resources: &[Resource],
         ready: i64,
@@ -608,7 +637,7 @@ impl SimpleScheduler {
         let mut selections = selections;
         selections.extend(companions.iter().map(|c| (c.clone(), 0, 1)));
         if activity.resumable {
-            return Self::place_resumable(timelines, selections, companions, t, d);
+            return Self::place_resumable(timelines, own, selections, companions, t, d);
         }
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
@@ -617,6 +646,10 @@ impl SimpleScheduler {
                 // None: 캘린더가 D를 영원히 못 담음
                 let fit = tl.earliest_fit(t, d, *usage)?;
                 t_next = t_next.max(fit);
+            }
+            // Within the activity's own working time.
+            if let Some(own) = own {
+                t_next = t_next.max(own.earliest_fit(t, d, 1)?);
             }
             if t_next == t {
                 return Some(Placement {
@@ -637,6 +670,7 @@ impl SimpleScheduler {
     /// ([`Activity::resumable`]).
     fn place_resumable(
         timelines: &HashMap<String, ResourceTimeline>,
+        own: Option<&ResourceTimeline>,
         selections: Vec<(String, i64, i32)>,
         companions: Vec<String>,
         t: i64,
@@ -651,13 +685,18 @@ impl SimpleScheduler {
                 )
             })
             .collect();
+        // The activity's own working time joins its resources'.
         let calendars: Vec<&crate::models::Calendar> = selected
             .iter()
-            .filter_map(|(tl, _)| tl.calendar())
+            .map(|(tl, _)| *tl)
+            .chain(own)
+            .filter_map(ResourceTimeline::calendar)
             .collect();
         let mut candidates: Vec<i64> = selected
             .iter()
-            .flat_map(|(tl, _)| tl.start_candidates(t))
+            .map(|(tl, _)| *tl)
+            .chain(own)
+            .flat_map(|tl| tl.start_candidates(t))
             .collect();
         candidates.sort_unstable();
         candidates.dedup();
@@ -694,6 +733,31 @@ impl SimpleScheduler {
         };
         super::feasibility::annotate_schedule(&mut schedule, &input);
         schedule
+    }
+}
+
+/// The working time of `activity`'s own calendar as a timeline nothing books,
+/// if it has one.
+fn own_timeline(activity: &Activity) -> Option<ResourceTimeline> {
+    let calendar = activity.calendar.clone()?;
+    Some(ResourceTimeline::new(
+        &Resource::new(&activity.id, "").with_calendar(calendar),
+    ))
+}
+
+/// When `activity`, which holds no resource, runs from `from` on: its whole
+/// time at once, within its own working time (`own`) — pausing outside it
+/// when the activity is resumable. `None` if that time never holds it.
+fn time_only_span(
+    activity: &Activity,
+    own: Option<&ResourceTimeline>,
+    from: i64,
+) -> Option<(i64, i64)> {
+    let work = activity.duration.total_ms();
+    match own {
+        None => Some((from, from + work)),
+        Some(own) if activity.resumable => own.earliest_resumable(from, work, 1),
+        Some(own) => own.earliest_fit(from, work, 1).map(|t| (t, t + work)),
     }
 }
 
@@ -1271,6 +1335,69 @@ mod tests {
         let j2 = s.assignment_for_activity("J2_O1").unwrap();
         assert_eq!(j2.start_ms, 10_000);
         assert_eq!(j2.end_ms, 13_000);
+    }
+
+    /// Machine work, a cure that holds nothing, then machine work again.
+    fn cured(cure: Activity) -> Vec<Task> {
+        let on_m = |id: &str, seq: i32| {
+            Activity::new(id, "J", seq)
+                .with_process_time(HOUR)
+                .with_requirement(ResourceRequirement::new("Machine"))
+        };
+        vec![Task::new("J")
+            .with_activity(on_m("J-1", 0))
+            .with_activity(cure)
+            .with_activity(on_m("J-3", 2))]
+    }
+
+    #[test]
+    fn an_activity_without_resources_takes_its_time_before_the_next() {
+        let tasks = cured(Activity::new("J-2", "J", 1).with_process_time(3 * HOUR));
+        let resources = vec![Resource::new("M", "Machine")];
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        let cure = s
+            .time_only_for_activity("J-2")
+            .expect("the cure has a span");
+        assert_eq!((cure.start_ms, cure.end_ms), (HOUR, 4 * HOUR));
+        assert_eq!(cure.sequence, Some(2));
+        assert_eq!(s.assignment_for_activity("J-3").unwrap().start_ms, 4 * HOUR);
+        assert_eq!(s.makespan_ms(), 5 * HOUR);
+        assert!(s.assignment_for_activity("J-2").is_none());
+    }
+
+    #[test]
+    fn an_activity_without_resources_runs_in_its_own_calendar() {
+        // 1 h of machine work from 0, then a 6 h cure in day shifts: it waits
+        // for 08:00 and, resumable, pauses over lunch.
+        let cure = Activity::new("J-2", "J", 1)
+            .with_process_time(6 * HOUR)
+            .with_calendar(day_shifts("plant", 2));
+        let resources = vec![Resource::new("M", "Machine")];
+        // Not resumable: it needs one 6 h stretch, and the shifts are 4 h —
+        // never placed, and said so.
+        let s = SimpleScheduler::new().schedule(&valid(&cured(cure.clone()), &resources), 0);
+        assert!(s.time_only_for_activity("J-2").is_none());
+        assert!(s.violations.iter().any(|v| v.entity_id == "J-2"
+            && v.violation_type == crate::models::ViolationType::TimeWindowViolation));
+        let s = SimpleScheduler::new().schedule(&valid(&cured(cure.resumable()), &resources), 0);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        let span = s.time_only_for_activity("J-2").unwrap();
+        assert_eq!((span.start_ms, span.end_ms), (8 * HOUR, 15 * HOUR));
+    }
+
+    #[test]
+    fn an_activity_calendar_holds_resourced_work_to_its_windows() {
+        let tasks = vec![Task::new("J").with_activity(
+            Activity::new("J-1", "J", 0)
+                .with_process_time(HOUR)
+                .with_requirement(ResourceRequirement::new("Machine"))
+                .with_calendar(crate::models::Calendar::new("w").with_window(5 * HOUR, 9 * HOUR)),
+        )];
+        let resources = vec![Resource::new("M", "Machine")];
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        assert_eq!(s.assignment_for_activity("J-1").unwrap().start_ms, 5 * HOUR);
     }
 
     #[test]

@@ -140,9 +140,15 @@ impl Code {
             }
             Code::CyclicDependency => &["activity", "errors"],
             Code::InvalidPredecessor => &["activity", "predecessor", "errors"],
-            Code::InvalidCalendarPeriod => {
-                &["parameter", "resource", "index", "start", "end", "errors"]
-            }
+            Code::InvalidCalendarPeriod => &[
+                "parameter",
+                "resource",
+                "activity",
+                "index",
+                "start",
+                "end",
+                "errors",
+            ],
         }
     }
 
@@ -542,6 +548,16 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             end_ms,
         } => json!({
             "parameter": format!("calendar.{}", period.name()), "resource": resource,
+            "index": index, "start": ms_to_sec(*start_ms), "end": ms_to_sec(*end_ms),
+        }),
+        ValidationErrorKind::ReversedActivityCalendarPeriod {
+            activity,
+            period,
+            index,
+            start_ms,
+            end_ms,
+        } => json!({
+            "parameter": format!("calendar.{}", period.name()), "activity": activity,
             "index": index, "start": ms_to_sec(*start_ms), "end": ms_to_sec(*end_ms),
         }),
     }

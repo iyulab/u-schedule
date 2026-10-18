@@ -25,6 +25,14 @@
 //! in its task ends, plus the time the work takes to move between the
 //! resources they run on ([`Resource::transport_ms`]).
 //!
+//! An activity with a calendar of its own
+//! ([`Activity::calendar`](crate::models::Activity::calendar)) runs within it, on
+//! top of its resources' calendars. An activity that holds no resource has one
+//! [`TimeOnlySpan`](crate::models::TimeOnlySpan) in
+//! [`Schedule::time_only`], at least its whole time long (resumable: that much
+//! of its own working time), starting no earlier than its and its task's
+//! release.
+//!
 //! Not checked (documented gap): `Constraint::TransitionCost` (needs
 //! sequence semantics), and so whether an assignment's recorded setup is the
 //! one the resource's transitions call for.
@@ -72,6 +80,7 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
     let res_by_id: HashMap<&str, &Resource> =
         input.resources.iter().map(|r| (r.id.as_str(), r)).collect();
     check_assignments(schedule, input, &res_by_id, &mut v);
+    check_time_only(schedule, input, &mut v);
     check_requirements(schedule, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
     check_calendars(schedule, input, &res_by_id, &mut v);
@@ -202,6 +211,101 @@ fn check_assignments(
                     format!(
                         "activity '{}' starts at {} before its task's release {release}",
                         a.activity_id, a.start_ms
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// Each activity that holds no resource has one time-only span, at least its
+/// time long (in its own working time, if it has a calendar), from its
+/// releases on; a span for any other activity is unknown.
+fn check_time_only(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+    let mut by_id: HashMap<&str, (&Task, &Activity)> = HashMap::new();
+    for task in input.tasks {
+        for activity in &task.activities {
+            by_id.insert(activity.id.as_str(), (task, activity));
+        }
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    for span in &schedule.time_only {
+        let id = span.activity_id.as_str();
+        let known = by_id
+            .get(id)
+            .filter(|(task, a)| a.resource_requirements.is_empty() && task.id == span.task_id);
+        let Some(&(task, activity)) = known else {
+            out.push(Violation::unknown_activity(
+                id,
+                format!(
+                    "time-only span of '{id}' under task '{}' names no activity of that task that holds no resource",
+                    span.task_id
+                ),
+            ));
+            continue;
+        };
+        if !seen.insert(id) {
+            out.push(Violation::unknown_activity(
+                id,
+                format!("activity '{id}' has more than one time-only span"),
+            ));
+            continue;
+        }
+        let work = activity.duration.total_ms();
+        let calendars: Vec<&crate::models::Calendar> = activity.calendar.iter().collect();
+        let worked = if activity.resumable {
+            crate::models::joint_available_ms(&calendars, span.start_ms, span.end_ms)
+        } else {
+            span.end_ms - span.start_ms
+        };
+        if worked < work {
+            out.push(Violation::duration_too_short(
+                id,
+                format!(
+                    "time-only activity '{id}' [{}..{}) has {worked} ms of its time; it needs {work}",
+                    span.start_ms, span.end_ms
+                ),
+            ));
+        }
+        let in_own = match &activity.calendar {
+            None => true,
+            Some(_) if activity.resumable => {
+                crate::models::joint_work_end(&calendars, span.start_ms, 0).is_some()
+            }
+            Some(cal) => cal.interval_fits(span.start_ms, span.end_ms),
+        };
+        if !in_own {
+            out.push(Violation::time_window(
+                id,
+                format!(
+                    "time-only activity '{id}' [{}..{}) is outside its calendar",
+                    span.start_ms, span.end_ms
+                ),
+            ));
+        }
+        for (release, whose) in [
+            (activity.release_time, "its"),
+            (task.release_time, "its task's"),
+        ] {
+            if let Some(release) = release.filter(|&r| span.start_ms < r) {
+                out.push(Violation::early_start(
+                    id,
+                    format!(
+                        "activity '{id}' starts at {} before {whose} release {release}",
+                        span.start_ms
+                    ),
+                ));
+            }
+        }
+    }
+    for task in input.tasks {
+        for activity in &task.activities {
+            if activity.resource_requirements.is_empty() && !seen.contains(activity.id.as_str()) {
+                out.push(Violation::time_window(
+                    &activity.id,
+                    format!(
+                        "activity '{}' holds no resource and has no time in the schedule — its calendar never holds its time",
+                        activity.id
                     ),
                 ));
             }
@@ -396,6 +500,7 @@ fn check_calendars(
                 let calendars: Vec<&crate::models::Calendar> = runs_on
                     .iter()
                     .filter_map(|r| res_by_id.get(r).and_then(|res| res.calendar.as_ref()))
+                    .chain(&activity.calendar)
                     .collect();
                 let held = companions_among(&runs_on, res_by_id);
                 let d = activity.duration_on(runs_on.iter().copied().filter(|r| !held.contains(r)));
@@ -417,7 +522,7 @@ fn check_calendars(
                     ));
                 }
             }
-            _ => {
+            other => {
                 if let Some(cal) = &res.calendar {
                     if !cal.interval_fits(a.start_ms, a.end_ms) {
                         out.push(Violation::resource_unavailable(
@@ -429,13 +534,28 @@ fn check_calendars(
                         ));
                     }
                 }
+                if let Some(own) = other.and_then(|activity| activity.calendar.as_ref()) {
+                    if !own.interval_fits(a.start_ms, a.end_ms) {
+                        out.push(Violation::time_window(
+                            &a.activity_id,
+                            format!(
+                                "assignment '{}' [{}..{}) on '{}' is outside the activity's calendar",
+                                a.activity_id, a.start_ms, a.end_ms, a.resource_id
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }
 }
 
-/// Activity span in the schedule: (min start, max end) across its assignments.
+/// Activity span in the schedule: (min start, max end) across its
+/// assignments, or its time-only span.
 fn activity_span(schedule: &Schedule, activity_id: &str) -> Option<(i64, i64)> {
+    if let Some(span) = schedule.time_only_for_activity(activity_id) {
+        return Some((span.start_ms, span.end_ms));
+    }
     let assigns = schedule.assignments_for_activity_all(activity_id);
     let start = assigns.iter().map(|a| a.start_ms).min()?;
     let end = assigns
@@ -918,6 +1038,56 @@ mod tests {
         assert!(v
             .iter()
             .any(|x| x.violation_type == ViolationType::PrecedenceViolation));
+    }
+
+    #[test]
+    fn a_time_only_span_is_checked_like_an_assignment() {
+        use crate::models::TimeOnlySpan;
+        let task = Task::new("J1")
+            .with_activity(machine_activity("O1", "J1", vec!["M1".into()]))
+            .with_activity({
+                let mut cure = Activity::new("CURE", "J1", 1).with_process_time(2000);
+                cure.calendar = Some(crate::models::Calendar::new("c").with_window(0, 10_000));
+                cure
+            });
+        let resources = vec![Resource::new("M1", "Machine")];
+        let check = |s: &Schedule| {
+            check_schedule(
+                s,
+                &FeasibilityInput {
+                    tasks: std::slice::from_ref(&task),
+                    resources: &resources,
+                    constraints: &[],
+                },
+            )
+        };
+        let mut s = Schedule::new();
+        s.add_assignment(Assignment::new("O1", "J1", "M1", 0, 1000));
+        // No span: the cure is not scheduled.
+        assert!(check(&s).iter().any(
+            |x| x.entity_id == "CURE" && x.violation_type == ViolationType::TimeWindowViolation
+        ));
+        // Before the machine work ends, too short and past its calendar.
+        s.time_only.push(TimeOnlySpan::new("CURE", "J1", 500, 1000));
+        let kinds: Vec<ViolationType> = check(&s).into_iter().map(|x| x.violation_type).collect();
+        assert!(
+            kinds.contains(&ViolationType::PrecedenceViolation),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&ViolationType::DurationTooShort),
+            "{kinds:?}"
+        );
+        s.time_only[0] = TimeOnlySpan::new("CURE", "J1", 9000, 11_000);
+        let kinds: Vec<ViolationType> = check(&s).into_iter().map(|x| x.violation_type).collect();
+        assert_eq!(kinds, [ViolationType::TimeWindowViolation]);
+        s.time_only[0] = TimeOnlySpan::new("CURE", "J1", 1000, 3000);
+        assert!(check(&s).is_empty());
+        // A span of an activity that holds a resource names nothing.
+        s.time_only.push(TimeOnlySpan::new("O1", "J1", 0, 1000));
+        assert!(check(&s)
+            .iter()
+            .any(|x| x.violation_type == ViolationType::UnknownActivity));
     }
 
     #[test]

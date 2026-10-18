@@ -24,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use super::Resource;
+use super::{Calendar, Resource};
 
 /// An activity (operation) to be scheduled.
 ///
@@ -56,6 +56,12 @@ pub struct Activity {
     /// the job).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_time: Option<i64>,
+    /// When the activity itself may run, on top of its resources' calendars
+    /// — the working time of an activity that holds no resource (a cure, a
+    /// wait for a carrier), or a window of its own. `None`: any time its
+    /// resources work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<Calendar>,
     /// Resources needed (type + quantity + candidates).
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
@@ -75,6 +81,7 @@ impl Activity {
             resource_timings: BTreeMap::new(),
             resumable: false,
             release_time: None,
+            calendar: None,
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
             attributes: HashMap::new(),
@@ -143,6 +150,13 @@ impl Activity {
     /// resume after ([`resumable`](Self::resumable)).
     pub fn resumable(mut self) -> Self {
         self.resumable = true;
+        self
+    }
+
+    /// Runs the activity only within `calendar`'s working time
+    /// ([`calendar`](Self::calendar)).
+    pub fn with_calendar(mut self, calendar: Calendar) -> Self {
+        self.calendar = Some(calendar);
         self
     }
 
