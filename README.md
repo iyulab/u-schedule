@@ -444,6 +444,7 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
     }
   ],
   "num_machines": 3,
+  "transport_times": [{ "from": "M1", "to": "M3", "time": 0.5 }],
   "ga_config": {
     "population_size": 100, "max_generations": 200,
     "mutation_rate": 0.1, "seed": 42,
@@ -457,6 +458,13 @@ An operation runs on one of its `machines` (or its one `machine`) for
 `processing_time` seconds — or, on a machine named in `machine_times`, for
 that machine's own time (a flexible job shop's per-machine times; each key one
 of the operation's machines, each time ≥ 0).
+
+`transport_times` (optional) is the time a job's work takes to move between
+machines: when a job's next operation runs on `to`, it starts no earlier than
+the previous one's end on `from` plus `time` seconds. A pair not listed takes
+none; each pair is given once, between two different machines the operations
+name, with a time ≥ 0. `check_jobshop` reads the same field and reports a step
+that starts before its work arrives as `precedence_violation`.
 
 **Output:**
 ```json
@@ -571,16 +579,16 @@ try {
 
 | `code` | Fields | Meaning |
 |---|---|---|
-| `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs) | Two jobs share an `id` (at positions `first` and `second`, from 0), or two tasks, activities or resources do |
+| `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs and transport times) | Two jobs share an `id` (at positions `first` and `second`, from 0), a `transport_times` pair is given twice (`entity` `transport_time`, `id` `"M1->M2"`), or two tasks, activities or resources do |
 | `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
-| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, a job-shop `num_machines` below the number of machines the operations name, a job's `processing_time` below 0 or `weight` not above 0, a job-shop `machine_times` value below 0 (`parameter` `machine_times`, `activity`, `resource`), or `config.atc_k` not above 0. A count or seed is checked as the whole number it is, so a negative one is refused like a too-small one: `config.num_machines: -1` is `{ min: 1, max: null, got: -1 }`, as `0` is. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
+| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, a job-shop `num_machines` below the number of machines the operations name, a job's `processing_time` below 0 or `weight` not above 0, a job-shop `machine_times` value below 0 (`parameter` `machine_times`, `activity`, `resource`), a `transport_times` time below 0 (`parameter` `transport_times`, `resource` and `to` the pair), or `config.atc_k` not above 0. A count or seed is checked as the whole number it is, so a negative one is refused like a too-small one: `config.num_machines: -1` is `{ min: 1, max: null, got: -1 }`, as `0` is. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_input` | `parameter` (`"operations"`), `task` | A job with no operations |
 | `invalid_option` | `parameter` (and `rule` for `config.atc_k`) | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population), or `config.atc_k` given with a `rule` other than `ATC` — `rule` names the chosen one; a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), a count or seed that is not a whole number (`config.num_machines: 2.5` — `parameter` is the field), or a JSON string |
-| `invalid_resource_reference` | `activity`, `resource`, `companion` | A job-shop operation's `machine_times` naming a machine that is not one of its `machines` (`activity` is the step, `J1_2`; `resource` the machine). Also a step naming a machine the problem does not have, or a machine whose companion is unknown or itself — not produced by today's inputs (the machines are the ones the operations name, with no companions) |
+| `invalid_resource_reference` | `activity`, `resource`, `companion`, `to` | A job-shop operation's `machine_times` naming a machine that is not one of its `machines` (`activity` is the step, `J1_2`; `resource` the machine), or a `transport_times` pair whose `from` or `to` no operation runs on, or that moves a machine to itself (`resource` is `from`). Also a step naming a machine the problem does not have, or a machine whose companion is unknown or itself — not produced by today's inputs (the machines are the ones the operations name, with no companions) |
 | `invalid_predecessor` | `activity`, `predecessor` | A step that waits on a step the problem does not have (not produced by today's inputs) |
 | `cyclic_dependency` | `activity` | Steps that wait on each other in a cycle (not produced by today's inputs: a job's steps run in their listed order) |
 | `invalid_calendar_period` | `parameter`, `resource`, `index`, `start`, `end` | A machine calendar period that ends before it starts (not produced by today's inputs: they carry no calendars) |

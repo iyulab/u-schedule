@@ -21,6 +21,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   `Problem::new` refuses a transport time to an unknown resource or to itself
   (`InvalidTransportTarget` — `invalid_resource_reference`) and a negative one
   (`NegativeTransport` — `parameter_out_of_range`).
+- WebAssembly `solve_jobshop` / `check_jobshop`: `transport_times`
+  (`[{ from, to, time }]`, seconds) — a pair given twice is refused as
+  `duplicate_id` (`entity` `transport_time`), an unknown machine or a machine
+  to itself as `invalid_resource_reference` (new field `to`), a negative time
+  as `parameter_out_of_range`.
 
 ### Changed
 

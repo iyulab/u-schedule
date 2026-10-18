@@ -1430,6 +1430,21 @@ struct JobShopInput {
     #[serde(default)]
     #[tsify(optional)]
     ga_config: JobShopGaConfig,
+    /// Time a job's work takes to move from one machine to another: when its
+    /// next operation runs on `to`, it starts no earlier than the previous
+    /// one's end on `from` plus `time`. A pair not listed takes none.
+    #[serde(default)]
+    #[tsify(optional)]
+    transport_times: Vec<JobShopTransport>,
+}
+
+/// The time to move work from machine `from` to machine `to` (seconds).
+#[derive(Deserialize, tsify::Tsify)]
+#[serde(deny_unknown_fields)]
+struct JobShopTransport {
+    from: String,
+    to: String,
+    time: f64,
 }
 
 // ── output schema ───────────────────────────────────────────────────────────
@@ -1661,10 +1676,37 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
     }
 
     // ── Build Resources ──
-    let resources: Vec<Resource> = machine_ids
+    let mut resources: Vec<Resource> = machine_ids
         .iter()
         .map(|id| Resource::new(id, "Machine"))
         .collect();
+    let mut first_at: std::collections::HashMap<(&str, &str), usize> =
+        std::collections::HashMap::new();
+    for (position, t) in input.transport_times.iter().enumerate() {
+        if let Some(first) = first_at.insert((t.from.as_str(), t.to.as_str()), position) {
+            let id = format!("{}->{}", t.from, t.to);
+            return Err(WireError::new(
+                Code::DuplicateId,
+                format!(
+                    "transport_times: {id} is given twice, at positions {first} and {position} (counting from 0)"
+                ),
+                json!({ "entity": "transport_time", "id": id, "first": first, "second": position }),
+            ));
+        }
+        let Some(from) = resources.iter_mut().find(|r| r.id == t.from) else {
+            return Err(WireError::new(
+                Code::InvalidResourceReference,
+                format!(
+                    "transport_times[{position}]: from names '{}', which no operation runs on",
+                    t.from
+                ),
+                json!({ "resource": t.from, "to": t.to }),
+            ));
+        };
+        // An unknown `to`, the machine itself or a negative time: the
+        // problem check refuses them.
+        from.transport_ms.insert(t.to.clone(), sec_to_ms(t.time));
+    }
 
     Ok(Problem::new(tasks, resources)?)
 }
@@ -2807,6 +2849,7 @@ mod tests {
             release_time: None,
         };
         let input = |jobs: Vec<JobShopJob>| JobShopInput {
+            transport_times: Vec::new(),
             jobs,
             num_machines: None,
             ga_config: JobShopGaConfig::default(),
@@ -2952,6 +2995,7 @@ mod tests {
             machine_times: Default::default(),
         };
         JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![
                 JobShopJob {
                     id: "J1".into(),
@@ -3161,6 +3205,7 @@ mod tests {
     #[test]
     fn a_jobshop_answer_says_why_the_search_stopped() {
         let input = |jobs: usize, max_generations: i128| JobShopInput {
+            transport_times: Vec::new(),
             jobs: (0..jobs)
                 .map(|j| JobShopJob {
                     id: format!("J{j}"),
@@ -3204,6 +3249,7 @@ mod tests {
     fn test_jobshop_basic() {
         // Classic 2-job, 2-machine job-shop instance
         let input = JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![
                 JobShopJob {
                     id: "J1".to_string(),
@@ -3293,6 +3339,7 @@ mod tests {
             release_time: None,
         };
         let input = JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![
                 job("J1", vec![op("M1", 3.0), op("M2", 2.0)], Some(2.0)),
                 job("J2", vec![op("M2", 4.0), op("M1", 1.0)], None),
@@ -3337,6 +3384,7 @@ mod tests {
     fn test_jobshop_flexible() {
         // Flexible job-shop: operations can go on multiple machines
         let input = JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![JobShopJob {
                 id: "J1".to_string(),
                 operations: vec![JobShopOperation {
@@ -3372,6 +3420,7 @@ mod tests {
         use u_metaheur::ga::{GaConfig, GaRunner};
 
         let input = JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![
                 JobShopJob {
                     id: "J1".into(),
@@ -3609,6 +3658,7 @@ mod tests {
     fn test_jobshop_edge_case_single_job_single_op() {
         // Minimal valid jobshop: 1 job, 1 operation, 1 machine
         let input = JobShopInput {
+            transport_times: Vec::new(),
             jobs: vec![JobShopJob {
                 id: "J1".to_string(),
                 operations: vec![JobShopOperation {
@@ -3742,6 +3792,83 @@ mod dto_strictness_tests {
                 &json!("M1"),
                 &json!(0.0)
             )
+        );
+    }
+
+    #[test]
+    fn jobshop_transport_times_hold_the_next_operation_back() {
+        // J1 runs M1 then M2; the work takes 2 s to move between them.
+        let problem = |transport: serde_json::Value| {
+            serde_json::from_value::<super::JobShopInput>(json!({
+                "jobs": [{ "id": "J1", "operations": [
+                    { "machine": "M1", "processing_time": 1.0 },
+                    { "machine": "M2", "processing_time": 1.0 }
+                ] }],
+                "transport_times": transport,
+                "ga_config": { "population_size": 10, "max_generations": 5, "seed": 3 }
+            }))
+            .expect("valid shape")
+        };
+        let out = super::jobshop(&problem(json!([{ "from": "M1", "to": "M2", "time": 2.0 }])))
+            .expect("solved");
+        assert_eq!(out.makespan, 4.0, "{:?}", out.schedule);
+
+        // A schedule that ignores the move breaks the step order.
+        let checked: super::JobShopCheckInput = serde_json::from_value(json!({
+            "problem": {
+                "jobs": [{ "id": "J1", "operations": [
+                    { "machine": "M1", "processing_time": 1.0 },
+                    { "machine": "M2", "processing_time": 1.0 }
+                ] }],
+                "transport_times": [{ "from": "M1", "to": "M2", "time": 2.0 }]
+            },
+            "solution": { "schedule": [
+                { "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 1.0 },
+                { "job_id": "J1", "operation": 2, "machine": "M2", "start": 1.0, "end": 2.0 }
+            ] }
+        }))
+        .expect("valid shape");
+        let report = serde_json::to_value(super::check_jobshop_input(&checked).expect("checked"))
+            .expect("serializes");
+        assert_eq!(
+            report["violations"][0]["code"],
+            json!("precedence_violation"),
+            "{report}"
+        );
+
+        let refused = |transport: serde_json::Value| {
+            super::jobshop(&problem(transport))
+                .expect_err("refused")
+                .fields
+        };
+        let unknown = refused(json!([{ "from": "M9", "to": "M2", "time": 1.0 }]));
+        assert_eq!(
+            (&unknown["code"], &unknown["resource"], &unknown["to"]),
+            (
+                &json!("invalid_resource_reference"),
+                &json!("M9"),
+                &json!("M2")
+            )
+        );
+        let unknown_to = refused(json!([{ "from": "M1", "to": "M9", "time": 1.0 }]));
+        assert_eq!(unknown_to["code"], json!("invalid_resource_reference"));
+        assert_eq!(unknown_to["to"], json!("M9"));
+        let negative = refused(json!([{ "from": "M1", "to": "M2", "time": -1.0 }]));
+        assert_eq!(
+            (&negative["code"], &negative["parameter"], &negative["got"]),
+            (
+                &json!("parameter_out_of_range"),
+                &json!("transport_times"),
+                &json!(-1.0)
+            )
+        );
+        let twice = refused(json!([
+            { "from": "M1", "to": "M2", "time": 1.0 },
+            { "from": "M1", "to": "M2", "time": 2.0 }
+        ]));
+        assert_eq!(
+            (&twice["code"], &twice["entity"], &twice["second"]),
+            (&json!("duplicate_id"), &json!("transport_time"), &json!(1))
         );
     }
 
