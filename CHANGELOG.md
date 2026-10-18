@@ -32,6 +32,21 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   on a task's first step (`invalid_option`), a share outside `[0, 1]` or a
   negative lag (`parameter_out_of_range`). A new public field: a struct
   literal of `Activity` needs it.
+- **Breaking:** `Activity::split` (`models::Split { max_parts, min_part_ms,
+  part_overhead_ms }`) lets an activity's processing be split into parts --
+  on several resources at once, or at different times -- and
+  `Assignment::part` (`models::Part { index, work_ms }`) says which part an
+  assignment is and how much of the processing it does. `Activity::part`
+  is the part as an activity of its own: its share of the processing, each
+  resource's own time in the same proportion, and after the first part the
+  split's overhead (not replaced by a changeover, not divided by a speed).
+  The feasibility check judges each part on its own (requirements, time,
+  calendars) and the parts together: at most `max_parts`, each a different
+  one, doing exactly the activity's processing, each at least `min_part_ms`
+  when there are several, none beside a whole placement. `Problem::new`
+  refuses `max_parts` below 1 and a negative `min_part_ms` or
+  `part_overhead_ms` (`parameter_out_of_range`). Splitting is allowed, not
+  required: a whole placement still passes.
 - `solve_jobshop` and `check_jobshop` (WebAssembly): an operation's
   `overlap: { start_after, finish_after? }` (seconds) -- it starts once
   `start_after` of the job's previous operation has passed and ends no

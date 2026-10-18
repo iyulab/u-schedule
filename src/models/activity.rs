@@ -71,6 +71,11 @@ pub struct Activity {
     /// that step ends. `None`: it starts once the previous step ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<Overlap>,
+    /// Whether the processing may be split into parts that run apart — on
+    /// different resources at once, or at different times. `None`: it runs
+    /// whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<Split>,
     /// Domain-specific metadata.
     pub attributes: HashMap<String, String>,
 }
@@ -90,8 +95,51 @@ impl Activity {
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
             overlap: None,
+            split: None,
             attributes: HashMap::new(),
         }
+    }
+
+    /// Lets the processing be split into parts ([`split`](Self::split)).
+    pub fn with_split(mut self, split: Split) -> Self {
+        self.split = Some(split);
+        self
+    }
+
+    /// The activity as one of its parts: `part.work_ms` of its processing
+    /// (the time it takes without a [`ResourceTiming`]), each resource's own
+    /// time for it in the same proportion, and — after the first part — its
+    /// split's [`part_overhead_ms`](Split::part_overhead_ms) on top, carried
+    /// with the teardown (which no changeover replaces and no speed divides).
+    /// What a scheduler places and the feasibility check judges for a part;
+    /// the part runs whole.
+    pub fn part(&self, part: Part) -> Activity {
+        let whole = self.duration.process_ms;
+        let share = |ms: i64| -> i64 {
+            if whole == 0 {
+                return ms;
+            }
+            // ms · work / whole, rounded to the nearest ms.
+            let scaled =
+                (2 * ms as i128 * part.work_ms as i128 + whole as i128) / (2 * whole as i128);
+            scaled as i64
+        };
+        let mut piece = self.clone();
+        piece.split = None;
+        piece.overlap = None;
+        piece.duration.process_ms = part.work_ms;
+        let overhead = match self.split {
+            Some(split) if part.index > 0 => split.part_overhead_ms,
+            _ => 0,
+        };
+        piece.duration.teardown_ms += overhead;
+        for timing in piece.resource_timings.values_mut() {
+            if let ResourceTiming::Duration(d) = timing {
+                d.process_ms = share(d.process_ms);
+                d.teardown_ms += overhead;
+            }
+        }
+        piece
     }
 
     /// Lets the activity overlap the previous step of its task
@@ -356,6 +404,66 @@ impl Overlap {
     }
 }
 
+/// How an activity's processing may be split into parts (lot splitting): each
+/// part does some of the work, as an activity of its own on the activity's
+/// requirements — on another resource at the same time, or later. The
+/// activity ends when its last part does.
+///
+/// # Reference
+/// Serafini (1996), "Scheduling jobs on several machines with the job
+/// splitting property"; Xing & Zhang (2000), parallel machine scheduling
+/// with splitting jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Split {
+    /// The most parts the work may be split into (`>= 1`).
+    pub max_parts: i32,
+    /// The least work a part may do when there are several (ms of
+    /// processing, `>= 0`).
+    #[serde(default)]
+    pub min_part_ms: i64,
+    /// The extra time of each part after the first (ms, `>= 0`): handling
+    /// the split, on top of the part's setup — a resource's changeover
+    /// replaces the setup, not this — and not divided by any speed.
+    #[serde(default)]
+    pub part_overhead_ms: i64,
+}
+
+impl Split {
+    /// Up to `max_parts` parts, of any size, with no extra time.
+    pub fn new(max_parts: i32) -> Self {
+        Self {
+            max_parts,
+            min_part_ms: 0,
+            part_overhead_ms: 0,
+        }
+    }
+
+    /// A part does at least `min_part_ms` of the work
+    /// ([`min_part_ms`](Self::min_part_ms)).
+    pub fn with_min_part(mut self, min_part_ms: i64) -> Self {
+        self.min_part_ms = min_part_ms;
+        self
+    }
+
+    /// Each part after the first takes `part_overhead_ms` longer
+    /// ([`part_overhead_ms`](Self::part_overhead_ms)).
+    pub fn with_part_overhead(mut self, part_overhead_ms: i64) -> Self {
+        self.part_overhead_ms = part_overhead_ms;
+        self
+    }
+}
+
+/// One part of a [split](Split) activity: which one, counting from 0, and how
+/// much of the processing it does (ms — the activity's own processing time,
+/// before any resource's speed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Part {
+    /// Which part, counting from 0.
+    pub index: i32,
+    /// The processing it does (ms).
+    pub work_ms: i64,
+}
+
 /// A resource requirement for an activity.
 ///
 /// Specifies what type and quantity of resources are needed,
@@ -482,6 +590,35 @@ mod tests {
         assert_eq!(overlap.earliest_end(90), 100);
         // The whole span with no lag is end-to-start.
         assert_eq!(Overlap::new(1.0).earliest_start((5, 50)), 50);
+    }
+
+    #[test]
+    fn a_part_takes_its_share_of_the_time_on_every_resource_and_later_parts_an_overhead() {
+        let act = Activity::new("O1", "J1", 0)
+            .with_duration(ActivityDuration::new(100, 900, 50))
+            .with_speed_on("fast", 3.0)
+            .with_duration_on("slow", ActivityDuration::new(100, 1_800, 50))
+            .with_split(Split::new(3).with_part_overhead(40));
+        let first = act.part(Part {
+            index: 0,
+            work_ms: 300,
+        });
+        assert_eq!(
+            first.duration_on(["M"]),
+            ActivityDuration::new(100, 300, 50)
+        );
+        assert_eq!(first.duration_on(["fast"]).process_ms, 100);
+        assert_eq!(first.duration_on(["slow"]).process_ms, 600);
+        let second = act.part(Part {
+            index: 1,
+            work_ms: 600,
+        });
+        assert_eq!(
+            second.duration_on(["M"]),
+            ActivityDuration::new(100, 600, 90)
+        );
+        assert_eq!(second.duration_on(["slow"]).process_ms, 1_200);
+        assert!(second.split.is_none());
     }
 
     #[test]

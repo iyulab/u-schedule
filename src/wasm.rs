@@ -522,6 +522,15 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
             "parameter": "overlap.finish_after", "activity": activity, "min": 0.0, "max": null,
             "got": ms_to_sec(*finish_after_ms),
         }),
+        ValidationErrorKind::SplitOutOfRange {
+            activity,
+            parameter,
+            min,
+            got,
+        } => json!({
+            "parameter": format!("split.{parameter}"), "activity": activity, "min": *min as f64,
+            "max": null, "got": *got as f64,
+        }),
         ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
         ValidationErrorKind::EmptyTask { task } => {
             json!({ "parameter": "operations", "task": task })
@@ -2535,6 +2544,12 @@ mod tests {
             ValidationErrorKind::NegativeOverlapLag {
                 activity: String::new(),
                 finish_after_ms: -1,
+            },
+            ValidationErrorKind::SplitOutOfRange {
+                activity: String::new(),
+                parameter: "max_parts",
+                min: 1,
+                got: 0,
             },
         ];
         for kind in &kinds {

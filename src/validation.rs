@@ -103,6 +103,18 @@ pub enum ValidationErrorKind {
         /// The lag given (ms).
         finish_after_ms: i64,
     },
+    /// A [`Split`](crate::models::Split) setting below its least:
+    /// `max_parts` below 1, `min_part_ms` or `part_overhead_ms` below 0.
+    SplitOutOfRange {
+        /// The activity.
+        activity: String,
+        /// Which setting: `max_parts`, `min_part_ms` or `part_overhead_ms`.
+        parameter: &'static str,
+        /// Its least value.
+        min: i64,
+        /// The value given.
+        got: i64,
+    },
     /// The precedence graph contains a cycle.
     CyclicDependency {
         /// An activity on the cycle.
@@ -272,6 +284,7 @@ impl ValidationErrorKind {
             | ValidationErrorKind::NegativeTransport { .. }
             | ValidationErrorKind::OverlapShareOutOfRange { .. }
             | ValidationErrorKind::NegativeOverlapLag { .. }
+            | ValidationErrorKind::SplitOutOfRange { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
@@ -331,6 +344,12 @@ impl ValidationError {
             } => format!(
                 "Activity '{activity}' ends {finish_after_ms} ms after the previous step; the lag must be >= 0"
             ),
+            ValidationErrorKind::SplitOutOfRange {
+                activity,
+                parameter,
+                min,
+                got,
+            } => format!("Activity '{activity}' splits with {parameter} {got}; it must be >= {min}"),
             ValidationErrorKind::CyclicDependency { activity } => {
                 format!("Circular dependency detected involving activity '{activity}'")
             }
@@ -433,6 +452,8 @@ fn reversed_periods(
 /// 15. No two activities of a task share a `sequence`
 /// 16. Every overlap is on a step after the first, with `start_after` in
 ///     `[0, 1]` and `finish_after_ms >= 0`
+/// 17. Every split has `max_parts >= 1`, `min_part_ms >= 0` and
+///     `part_overhead_ms >= 0`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -507,6 +528,25 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
                         sequence: act.sequence,
                     },
                 ));
+            }
+        }
+        for act in &task.activities {
+            let Some(split) = &act.split else {
+                continue;
+            };
+            for (parameter, min, got) in [
+                ("max_parts", 1, i64::from(split.max_parts)),
+                ("min_part_ms", 0, split.min_part_ms),
+                ("part_overhead_ms", 0, split.part_overhead_ms),
+            ] {
+                if got < min {
+                    errors.push(ValidationError::new(ValidationErrorKind::SplitOutOfRange {
+                        activity: act.id.clone(),
+                        parameter,
+                        min,
+                        got,
+                    }));
+                }
             }
         }
         let first = task.activities.iter().map(|a| a.sequence).min();

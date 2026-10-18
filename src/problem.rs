@@ -163,6 +163,34 @@ mod tests {
     }
 
     #[test]
+    fn a_split_takes_at_least_one_part_and_no_negative_sizes() {
+        use crate::models::Split;
+        use crate::validation::ValidationErrorKind as K;
+        let tasks = vec![Task::new("J").with_activity(
+            Activity::new("a", "J", 1)
+                .with_process_time(10)
+                .with_split(Split::new(0).with_min_part(-1).with_part_overhead(-2)),
+        )];
+        let errors = Problem::new(tasks, vec![]).expect_err("three faults");
+        let got: Vec<(&str, i64)> = errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                K::SplitOutOfRange { parameter, got, .. } => Some((*parameter, *got)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("max_parts", 0),
+                ("min_part_ms", -1),
+                ("part_overhead_ms", -2)
+            ]
+        );
+        assert_eq!(errors[0].kind.code(), "parameter_out_of_range");
+    }
+
+    #[test]
     fn every_error_is_reported_not_only_the_first() {
         let tasks = vec![Task::new("empty"), Task::new("empty")];
         let errors = Problem::new(tasks, vec![]).expect_err("invalid");

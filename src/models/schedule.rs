@@ -51,6 +51,10 @@ pub struct Assignment {
     pub end_ms: i64,
     /// Setup time portion (ms). Included in [start_ms, start_ms + setup_ms).
     pub setup_ms: i64,
+    /// Which part of a [split](crate::models::Split) activity this is, and
+    /// how much of its processing it does. `None`: the activity runs whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<crate::models::Part>,
 }
 
 /// When an activity that holds no resource runs.
@@ -153,7 +157,15 @@ impl Assignment {
             start_ms,
             end_ms,
             setup_ms: 0,
+            part: None,
         }
+    }
+
+    /// Records which part of a split activity this is
+    /// ([`part`](Self::part)).
+    pub fn with_part(mut self, part: crate::models::Part) -> Self {
+        self.part = Some(part);
+        self
     }
 
     /// Records which step of its task this activity is, counting from 1.

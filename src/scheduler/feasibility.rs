@@ -25,6 +25,15 @@
 //! in its task ends, plus the time the work takes to move between the
 //! resources they run on ([`Resource::transport_ms`]).
 //!
+//! A [split](crate::models::Split) activity's assignments each carry the
+//! [`Part`] they belong to, and every part is judged as
+//! the activity would be on its own ([`Activity::part`]) — its requirements
+//! filled at once, its time on its resources, its calendars. Its parts are at
+//! most `max_parts`, each a different one, doing together exactly the
+//! activity's processing, each at least `min_part_ms` of it when there are
+//! several. A part on an activity that is not split, or an activity placed
+//! both whole and in parts, is an unknown activity.
+//!
 //! An activity with a calendar of its own
 //! ([`Activity::calendar`](crate::models::Activity::calendar)) runs within it, on
 //! top of its resources' calendars. An activity that holds no resource has one
@@ -40,9 +49,27 @@
 //! # Reference
 //! Brucker (2007), "Scheduling Algorithms", Ch. 2 — constraint taxonomy.
 
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::models::{transport_between, Activity, Constraint, Resource, Schedule, Task, Violation};
+use crate::models::{
+    transport_between, Activity, Assignment, Constraint, Part, Resource, Schedule, Task, Violation,
+};
+
+/// One piece of an activity in a schedule: the activity, or one of its parts.
+type PieceKey<'a> = (&'a str, Option<i32>);
+
+fn piece_key(a: &Assignment) -> PieceKey<'_> {
+    (a.activity_id.as_str(), a.part.map(|p| p.index))
+}
+
+/// What a piece is judged as: the activity whole, or the part it is.
+fn piece_of(activity: &Activity, part: Option<Part>) -> Cow<'_, Activity> {
+    match part {
+        Some(part) if activity.split.is_some() => Cow::Owned(activity.part(part)),
+        _ => Cow::Borrowed(activity),
+    }
+}
 
 /// The resources among `assigned` (one activity's) held only as a companion
 /// of another of them ([`Resource::companions`]).
@@ -81,6 +108,7 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
         input.resources.iter().map(|r| (r.id.as_str(), r)).collect();
     check_assignments(schedule, input, &res_by_id, &mut v);
     check_time_only(schedule, input, &mut v);
+    check_parts(schedule, input, &mut v);
     check_requirements(schedule, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
     check_calendars(schedule, input, &res_by_id, &mut v);
@@ -114,23 +142,24 @@ fn check_assignments(
         }
     }
     let model_tasks: HashSet<&str> = input.tasks.iter().map(|t| t.id.as_str()).collect();
-    // The resources each activity runs on (its time depends on them), and
-    // those it only holds as companions (they take no unit and no time).
-    let mut runs_on: HashMap<&str, Vec<&str>> = HashMap::new();
+    // The resources each piece of an activity runs on (its time depends on
+    // them), and those it only holds as companions (they take no unit and no
+    // time).
+    let mut runs_on: HashMap<PieceKey, Vec<&str>> = HashMap::new();
     for a in &schedule.assignments {
         runs_on
-            .entry(a.activity_id.as_str())
+            .entry(piece_key(a))
             .or_default()
             .push(a.resource_id.as_str());
     }
-    let held: HashMap<&str, HashSet<&str>> = runs_on
+    let held: HashMap<PieceKey, HashSet<&str>> = runs_on
         .iter()
-        .map(|(&act, assigned)| (act, companions_among(assigned, res_by_id)))
+        .map(|(&piece, assigned)| (piece, companions_among(assigned, res_by_id)))
         .collect();
-    for (act, assigned) in runs_on.iter_mut() {
-        assigned.retain(|r| !held[act].contains(r));
+    for (piece, assigned) in runs_on.iter_mut() {
+        assigned.retain(|r| !held[piece].contains(r));
     }
-    let mut uses: HashMap<&str, i32> = HashMap::new();
+    let mut uses: HashMap<PieceKey, i32> = HashMap::new();
     for a in &schedule.assignments {
         let Some(&(task, activity)) = by_id.get(a.activity_id.as_str()) else {
             // An assignment under a task the model does not have is an
@@ -154,6 +183,17 @@ fn check_assignments(
             ));
             continue;
         }
+        if a.part.is_some() && activity.split.is_none() {
+            out.push(Violation::unknown_activity(
+                &a.activity_id,
+                format!(
+                    "activity '{}' is placed in parts, but it is not split",
+                    a.activity_id
+                ),
+            ));
+            continue;
+        }
+        let key = piece_key(a);
         // More assignments than the activity's requirements take units: a
         // repeated placement, which the greedy attribution would let pass.
         let units: i32 = activity
@@ -161,10 +201,10 @@ fn check_assignments(
             .iter()
             .map(|r| r.quantity)
             .sum();
-        if held[a.activity_id.as_str()].contains(a.resource_id.as_str()) {
+        if held[&key].contains(a.resource_id.as_str()) {
             continue; // a companion: no unit, no time of its own
         }
-        let used = uses.entry(a.activity_id.as_str()).or_default();
+        let used = uses.entry(key).or_default();
         *used += 1;
         if *used > units.max(1) {
             out.push(Violation::unknown_activity(
@@ -177,7 +217,7 @@ fn check_assignments(
                 ),
             ));
         }
-        let duration = activity.duration_on(runs_on[a.activity_id.as_str()].iter().copied());
+        let duration = piece_of(activity, a.part).duration_on(runs_on[&key].iter().copied());
         let needed = a.setup_ms + duration.process_ms + duration.teardown_ms;
         if a.end_ms - a.start_ms < needed {
             out.push(Violation::duration_too_short(
@@ -213,6 +253,101 @@ fn check_assignments(
                         a.activity_id, a.start_ms
                     ),
                 ));
+            }
+        }
+    }
+}
+
+/// The parts of each split activity: at most `max_parts`, each a different
+/// one, doing together exactly its processing, each at least `min_part_ms` of
+/// it when there are several — and none beside a whole placement.
+fn check_parts(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+    for task in input.tasks {
+        for activity in &task.activities {
+            let Some(split) = &activity.split else {
+                continue;
+            };
+            let assigns = schedule.assignments_for_activity_all(&activity.id);
+            let mut parts: BTreeMap<i32, i64> = BTreeMap::new();
+            let mut whole = false;
+            for a in &assigns {
+                match a.part {
+                    None => whole = true,
+                    Some(part) => {
+                        if parts
+                            .insert(part.index, part.work_ms)
+                            .is_some_and(|w| w != part.work_ms)
+                        {
+                            out.push(Violation::unknown_activity(
+                                &activity.id,
+                                format!(
+                                    "part {} of '{}' is given two different amounts of work",
+                                    part.index, activity.id
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            if parts.is_empty() {
+                continue;
+            }
+            if whole {
+                out.push(Violation::unknown_activity(
+                    &activity.id,
+                    format!(
+                        "activity '{}' is placed both whole and in parts",
+                        activity.id
+                    ),
+                ));
+            }
+            let outside = parts
+                .keys()
+                .filter(|&&i| i < 0 || i >= split.max_parts)
+                .count();
+            if parts.len() > split.max_parts as usize || outside > 0 {
+                out.push(Violation::unknown_activity(
+                    &activity.id,
+                    format!(
+                        "activity '{}' has parts {:?}; it splits into at most {} (0 to {})",
+                        activity.id,
+                        parts.keys().collect::<Vec<_>>(),
+                        split.max_parts,
+                        split.max_parts - 1
+                    ),
+                ));
+            }
+            let work: i64 = parts.values().sum();
+            let needed = activity.duration.process_ms;
+            if work < needed {
+                out.push(Violation::duration_too_short(
+                    &activity.id,
+                    format!(
+                        "the parts of '{}' do {work} ms of its {needed} ms of processing",
+                        activity.id
+                    ),
+                ));
+            } else if work > needed {
+                out.push(Violation::unknown_activity(
+                    &activity.id,
+                    format!(
+                        "the parts of '{}' do {work} ms; it has {needed} ms of processing",
+                        activity.id
+                    ),
+                ));
+            }
+            if parts.len() > 1 {
+                for (index, &w) in &parts {
+                    if w < split.min_part_ms {
+                        out.push(Violation::duration_too_short(
+                            &activity.id,
+                            format!(
+                                "part {index} of '{}' does {w} ms; a part does at least {} ms",
+                                activity.id, split.min_part_ms
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -324,86 +459,108 @@ fn check_requirements(
             if activity.resource_requirements.is_empty() {
                 continue;
             }
-            let assigns = schedule.assignments_for_activity_all(&activity.id);
-            // 동시 점유: 모든 assignment 구간 동일
-            if let Some(first) = assigns.first() {
-                if assigns
-                    .iter()
-                    .any(|a| a.start_ms != first.start_ms || a.end_ms != first.end_ms)
-                {
+            // Each piece (the activity, or each of its parts) fills the
+            // requirements on its own.
+            let mut pieces: BTreeMap<Option<i32>, Vec<&Assignment>> = BTreeMap::new();
+            for a in schedule.assignments_for_activity_all(&activity.id) {
+                pieces.entry(a.part.map(|p| p.index)).or_default().push(a);
+            }
+            if pieces.is_empty() {
+                pieces.insert(None, Vec::new());
+            }
+            for assigns in pieces.values() {
+                check_piece_requirements(activity, assigns, input, res_by_id, out);
+            }
+        }
+    }
+}
+
+/// One piece of `activity` — its assignments `assigns` — holds its resources
+/// at once and fills every requirement.
+fn check_piece_requirements(
+    activity: &Activity,
+    assigns: &[&Assignment],
+    input: &FeasibilityInput,
+    res_by_id: &HashMap<&str, &Resource>,
+    out: &mut Vec<Violation>,
+) {
+    // 동시 점유: 모든 assignment 구간 동일
+    if let Some(first) = assigns.first() {
+        if assigns
+            .iter()
+            .any(|a| a.start_ms != first.start_ms || a.end_ms != first.end_ms)
+        {
+            out.push(Violation::requirement_unfilled(
+                &activity.id,
+                format!(
+                    "activity '{}' assignments are not simultaneous",
+                    activity.id
+                ),
+            ));
+        }
+    }
+    // greedy 귀속: 요구별로 미귀속 자원 claim — companions are held,
+    // not claimed; each resource that is claimed holds its own.
+    let assigned: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
+    let held = companions_among(&assigned, res_by_id);
+    for &r in assigned.iter().filter(|r| !held.contains(*r)) {
+        if let Some(res) = res_by_id.get(r) {
+            for c in &res.companions {
+                if !assigned.contains(&c.as_str()) {
                     out.push(Violation::requirement_unfilled(
                         &activity.id,
                         format!(
-                            "activity '{}' assignments are not simultaneous",
+                            "activity '{}' runs on '{r}' without its companion '{c}'",
                             activity.id
                         ),
                     ));
                 }
             }
-            // greedy 귀속: 요구별로 미귀속 자원 claim — companions are held,
-            // not claimed; each resource that is claimed holds its own.
-            let assigned: Vec<&str> = assigns.iter().map(|a| a.resource_id.as_str()).collect();
-            let held = companions_among(&assigned, res_by_id);
-            for &r in assigned.iter().filter(|r| !held.contains(*r)) {
-                if let Some(res) = res_by_id.get(r) {
-                    for c in &res.companions {
-                        if !assigned.contains(&c.as_str()) {
-                            out.push(Violation::requirement_unfilled(
-                                &activity.id,
+        }
+    }
+    let mut unclaimed: Vec<&str> = assigned
+        .iter()
+        .copied()
+        .filter(|r| !held.contains(r))
+        .collect();
+    for req in &activity.resource_requirements {
+        let candidates: HashSet<&str> = input
+            .resources
+            .iter()
+            .filter(|r| req.is_candidate(r))
+            .map(|r| r.id.as_str())
+            .collect();
+        let mut claimed = 0;
+        let mut i = 0;
+        while i < unclaimed.len() && claimed < req.quantity {
+            if candidates.contains(unclaimed[i]) {
+                let rid = unclaimed.remove(i);
+                claimed += 1;
+                if let Some(res) = res_by_id.get(rid) {
+                    for skill in &req.required_skills {
+                        if !res.has_skill(skill) {
+                            out.push(Violation::skill_mismatch(
+                                rid,
                                 format!(
-                                    "activity '{}' runs on '{r}' without its companion '{c}'",
+                                    "resource '{rid}' lacks skill '{skill}' for activity '{}'",
                                     activity.id
                                 ),
                             ));
                         }
                     }
                 }
+            } else {
+                i += 1;
             }
-            let mut unclaimed: Vec<&str> = assigned
-                .iter()
-                .copied()
-                .filter(|r| !held.contains(r))
-                .collect();
-            for req in &activity.resource_requirements {
-                let candidates: HashSet<&str> = input
-                    .resources
-                    .iter()
-                    .filter(|r| req.is_candidate(r))
-                    .map(|r| r.id.as_str())
-                    .collect();
-                let mut claimed = 0;
-                let mut i = 0;
-                while i < unclaimed.len() && claimed < req.quantity {
-                    if candidates.contains(unclaimed[i]) {
-                        let rid = unclaimed.remove(i);
-                        claimed += 1;
-                        if let Some(res) = res_by_id.get(rid) {
-                            for skill in &req.required_skills {
-                                if !res.has_skill(skill) {
-                                    out.push(Violation::skill_mismatch(
-                                        rid,
-                                        format!(
-                                            "resource '{rid}' lacks skill '{skill}' for activity '{}'",
-                                            activity.id
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    } else {
-                        i += 1;
-                    }
-                }
-                if claimed < req.quantity {
-                    out.push(Violation::requirement_unfilled(
-                        &activity.id,
-                        format!(
-                            "activity '{}' requirement '{}' filled {claimed}/{} units",
-                            activity.id, req.resource_type, req.quantity
-                        ),
-                    ));
-                }
-            }
+        }
+        if claimed < req.quantity {
+            out.push(Violation::requirement_unfilled(
+                &activity.id,
+                format!(
+                    "activity '{}' requirement '{}' filled {claimed}/{} units",
+                    activity.id, req.resource_type, req.quantity
+                ),
+            ));
         }
     }
 }
@@ -495,6 +652,7 @@ fn check_calendars(
                 let runs_on: Vec<&str> = schedule
                     .assignments_for_activity_all(&activity.id)
                     .iter()
+                    .filter(|x| x.part.map(|p| p.index) == a.part.map(|p| p.index))
                     .map(|x| x.resource_id.as_str())
                     .collect();
                 let calendars: Vec<&crate::models::Calendar> = runs_on
@@ -503,7 +661,8 @@ fn check_calendars(
                     .chain(&activity.calendar)
                     .collect();
                 let held = companions_among(&runs_on, res_by_id);
-                let d = activity.duration_on(runs_on.iter().copied().filter(|r| !held.contains(r)));
+                let d = piece_of(activity, a.part)
+                    .duration_on(runs_on.iter().copied().filter(|r| !held.contains(r)));
                 let needed = a.setup_ms + d.process_ms + d.teardown_ms;
                 let starts_in_work =
                     crate::models::joint_work_end(&calendars, a.start_ms, 0).is_some();
@@ -1246,6 +1405,90 @@ mod tests {
             early_end[0].message.contains("ends at 105"),
             "{early_end:?}"
         );
+    }
+
+    fn split_task(split: crate::models::Split) -> Vec<Task> {
+        vec![Task::new("J").with_activity(
+            Activity::new("cut", "J", 1)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("M"))
+                .with_split(split),
+        )]
+    }
+
+    fn parts(spans: &[(i32, i64, &str, i64, i64)]) -> Schedule {
+        let mut s = Schedule::new();
+        for &(index, work_ms, machine, start, end) in spans {
+            s.add_assignment(
+                Assignment::new("cut", "J", machine, start, end)
+                    .with_part(crate::models::Part { index, work_ms }),
+            );
+        }
+        s
+    }
+
+    fn kinds_of(tasks: &[Task], schedule: &Schedule) -> Vec<ViolationType> {
+        let resources = vec![
+            Resource::new("M1", "M"),
+            Resource::new("M2", "M"),
+            Resource::new("M3", "M"),
+        ];
+        let input = FeasibilityInput {
+            tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        check_schedule(schedule, &input)
+            .into_iter()
+            .map(|v| v.violation_type)
+            .collect()
+    }
+
+    #[test]
+    fn the_parts_of_a_split_activity_are_each_judged_and_do_its_work_together() {
+        use crate::models::Split;
+        let tasks = split_task(Split::new(3).with_min_part(200).with_part_overhead(50));
+        // 600 on M1 from 0; 400 on M2 at once, with the part overhead.
+        let clean = parts(&[(0, 600, "M1", 0, 600), (1, 400, "M2", 0, 450)]);
+        assert!(kinds_of(&tasks, &clean).is_empty());
+        // The second part without its overhead is too short.
+        let short = parts(&[(0, 600, "M1", 0, 600), (1, 400, "M2", 0, 400)]);
+        assert_eq!(kinds_of(&tasks, &short), [ViolationType::DurationTooShort]);
+        // Together short of the work; a part below the least; too many parts.
+        let missing = parts(&[(0, 600, "M1", 0, 600), (1, 300, "M2", 0, 350)]);
+        assert_eq!(
+            kinds_of(&tasks, &missing),
+            [ViolationType::DurationTooShort]
+        );
+        let small = parts(&[(0, 900, "M1", 0, 900), (1, 100, "M2", 0, 150)]);
+        assert_eq!(kinds_of(&tasks, &small), [ViolationType::DurationTooShort]);
+        let many = parts(&[
+            (0, 250, "M1", 0, 250),
+            (1, 250, "M2", 0, 300),
+            (2, 250, "M3", 0, 300),
+            (3, 250, "M1", 300, 600),
+        ]);
+        assert_eq!(kinds_of(&tasks, &many), [ViolationType::UnknownActivity]);
+        // Whole and in parts at once.
+        let mut both = parts(&[(0, 600, "M1", 0, 600), (1, 400, "M2", 0, 450)]);
+        both.add_assignment(Assignment::new("cut", "J", "M3", 0, 1_000));
+        assert!(kinds_of(&tasks, &both).contains(&ViolationType::UnknownActivity));
+        // Whole is fine too: splitting is allowed, not required.
+        let mut whole = Schedule::new();
+        whole.add_assignment(Assignment::new("cut", "J", "M1", 0, 1_000));
+        assert!(kinds_of(&tasks, &whole).is_empty());
+    }
+
+    #[test]
+    fn a_part_of_an_activity_that_is_not_split_is_unknown() {
+        let tasks = vec![Task::new("J").with_activity(
+            Activity::new("cut", "J", 1)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("M")),
+        )];
+        let s = parts(&[(0, 500, "M1", 0, 500), (1, 500, "M2", 0, 500)]);
+        let kinds = kinds_of(&tasks, &s);
+        assert!(kinds.contains(&ViolationType::UnknownActivity), "{kinds:?}");
     }
 
     #[test]
