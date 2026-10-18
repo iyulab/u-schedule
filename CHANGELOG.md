@@ -20,6 +20,16 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 - `Schedule::time_only` — one `TimeOnlySpan` (activity, step, task, start,
   end) for each activity that holds no resource — and
   `Schedule::time_only_for_activity`.
+- `scheduler::DispatchSearch`: a biased random-key genetic algorithm over the
+  order `SimpleScheduler` takes the tasks in. Each task gets a key, and a
+  chromosome is decoded by the scheduler with the keys as its rule, so every
+  schedule it considers keeps what the dispatcher keeps (calendars, several
+  requirements at once, usages, companions, transport times, releases).
+  `search` returns a `DispatchSearchResult` — the better of the best keyed
+  schedule and the scheduler's own, its cost (makespan and total tardiness
+  weighted by `with_tardiness_weight`), the scheduler's own cost, the
+  generations and the stop reason. The population starts from the tasks in
+  priority order.
 
 ### Changed
 

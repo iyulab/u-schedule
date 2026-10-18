@@ -19,10 +19,12 @@
 
 pub mod feasibility;
 mod kpi;
+mod search;
 mod simple;
 pub mod timeline;
 
 pub use feasibility::{annotate_schedule, check_schedule, FeasibilityInput};
 pub use kpi::ScheduleKpi;
+pub use search::{DispatchSearch, DispatchSearchResult};
 pub use simple::{ScheduleRequest, SimpleScheduler};
 pub use timeline::ResourceTimeline;

@@ -104,6 +104,44 @@ The GA module uses dual-vector encoding for job-shop scheduling:
 `SchedulingGaProblem::decode` turns a chromosome into a schedule — the shorter, by the fitness the
 search minimizes, of `decode_semi_active` (each activity as early as its machine and its job allow,
 in the OSV's order) and `decode_active` (the Giffler–Thompson active schedule that order prioritizes).
+It holds one machine per operation and reads no calendars.
+
+### Searching the dispatching order
+
+`DispatchSearch` searches the order `SimpleScheduler` takes the tasks in, with a biased random-key
+genetic algorithm (u-metaheur's BRKGA): each task gets a key, and a chromosome is decoded by the
+scheduler with the keys as its rule — the lower key wins each decision. Every schedule it considers
+is one the dispatcher builds, so it keeps everything the dispatcher keeps: calendars, several
+requirements at once, usages, companions, transport times, releases. It returns the better of the
+best keyed schedule and the scheduler's own (Hartmann 1998; Gonçalves, Resende & Mendes 2011).
+
+```rust
+use u_metaheur::brkga::BrkgaConfig;
+use u_schedule::models::{Activity, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::{DispatchSearch, SimpleScheduler};
+use u_schedule::Problem;
+
+let on = |id: &str, task: &str, ms: i64| {
+    Activity::new(id, task, 0)
+        .with_process_time(ms)
+        .with_requirement(ResourceRequirement::new("Machine"))
+};
+let problem = Problem::new(
+    vec![
+        Task::new("LONG").with_activity(on("L", "LONG", 10_000)),
+        Task::new("URGENT").with_activity(on("U", "URGENT", 1_000)).with_deadline(1_000),
+    ],
+    vec![Resource::new("M", "Machine")],
+)
+.expect("valid input");
+let config = BrkgaConfig::new(2).with_population_size(20).with_max_generations(20).with_seed(7);
+let found = DispatchSearch::new(SimpleScheduler::new(), config)
+    .with_tardiness_weight(1.0)
+    .search(&problem, 0)
+    .expect("a valid configuration");
+assert_eq!(found.dispatching_cost, 10_000.0); // in input order, URGENT ends 10 s late
+assert_eq!(found.cost, 0.0);
+```
 
 ## Quick Start
 
