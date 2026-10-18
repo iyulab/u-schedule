@@ -231,10 +231,10 @@ impl SchedulingGaProblem {
             let after_v = seq[r].get(i + 2).copied();
             let head_v = ends(links.task_pred[v])
                 .max(ends(before_u))
-                .max(view.release[self.task_of[v]]);
+                .max(self.release_of(view, v));
             let head_u = ends(links.task_pred[u])
                 .max(head_v + span(v))
-                .max(view.release[self.task_of[u]]);
+                .max(self.release_of(view, u));
             let tail_u = after(links.task_succ[u]).max(after(after_v));
             let tail_v = after(links.task_succ[v]).max(span(u) + tail_u);
             (head_v + span(v) + tail_v).max(head_u + span(u) + tail_u)
@@ -282,11 +282,10 @@ impl SchedulingGaProblem {
         placed.order.clear();
         while let Some(a) = ready.pop() {
             let r = ix.resource[a].expect("a sequenced activity has a resource");
-            let t = self.task_of[a];
             let start = machine_pred[a]
                 .map_or(0, |m| placed.end[m])
                 .max(self.arrival(view, ix, &placed.end, links.task_pred[a], r))
-                .max(view.release[t]);
+                .max(self.release_of(view, a));
             let setup = self.setup_of(view, ix, a, r, machine_pred[a].map(|m| self.task_of[m]));
             let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;

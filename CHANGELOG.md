@@ -45,10 +45,17 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   start of the horizon and another once tasks run late, say, with the
   conditions the caller's. It and `with_rule_engine` replace each other.
 
+- A release for one activity: `Activity::with_release_time` (held in
+  `Activity::release_time`) — it starts no earlier than that, on top of its
+  task's release. Every scheduler reads it; the feasibility check reports an
+  earlier start as `EarlyStart`. WebAssembly `solve_jobshop` /
+  `check_jobshop`: `operations[].release_time` (seconds).
+
 ### Changed
 
 - **Breaking:** `Resource` has a `transport_ms` field, `ResourceRequirement` a
-  `usage` field, and `ValidationErrorKind` the variants
+  `usage` field, `Activity` a `release_time` field, and `ValidationErrorKind`
+  the variants
   `InvalidTransportTarget`, `NegativeTransport` and `UsageOutOfRange` — a
   struct literal or an exhaustive `match` must name them.
 - **Breaking:** `ResourceTimeline::fits`, `earliest_fit`, `earliest_resumable`,

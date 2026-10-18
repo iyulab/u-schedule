@@ -1309,6 +1309,12 @@ struct JobShopOperation {
     #[tsify(optional)]
     #[tsify(type = "Record<string, number>")]
     machine_times: std::collections::BTreeMap<String, f64>,
+    /// The earliest this operation may start (seconds), on top of its job's
+    /// `release_time`.
+    #[serde(default)]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
+    release_time: Option<f64>,
 }
 
 impl JobShopOperation {
@@ -1668,6 +1674,9 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
                 }
                 activity =
                     activity.with_duration_on(machine, ActivityDuration::fixed(sec_to_ms(seconds)));
+            }
+            if let Some(release) = op.release_time {
+                activity = activity.with_release_time(sec_to_ms(release));
             }
             let activity = activity
                 .with_requirement(ResourceRequirement::new("Machine").with_candidates(candidates));
@@ -2844,6 +2853,7 @@ mod tests {
             machines: vec![],
             processing_time: 1.0,
             machine_times: Default::default(),
+            release_time: None,
         };
         let job = |id: &str, ops: Vec<JobShopOperation>| JobShopJob {
             id: id.to_string(),
@@ -2996,6 +3006,7 @@ mod tests {
             },
             processing_time: t,
             machine_times: Default::default(),
+            release_time: None,
         };
         JobShopInput {
             transport_times: Vec::new(),
@@ -3218,12 +3229,14 @@ mod tests {
                             machines: vec![],
                             processing_time: 3.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".to_string()),
                             machines: vec![],
                             processing_time: 2.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                     ],
                     due_date: None,
@@ -3262,12 +3275,14 @@ mod tests {
                             machines: vec![],
                             processing_time: 3.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".to_string()),
                             machines: vec![],
                             processing_time: 2.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                     ],
                     due_date: None,
@@ -3281,12 +3296,14 @@ mod tests {
                             machines: vec![],
                             processing_time: 4.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M1".to_string()),
                             machines: vec![],
                             processing_time: 1.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                     ],
                     due_date: None,
@@ -3334,6 +3351,7 @@ mod tests {
             machines: vec![],
             processing_time: pt,
             machine_times: Default::default(),
+            release_time: None,
         };
         let job = |id: &str, ops: Vec<JobShopOperation>, due: Option<f64>| JobShopJob {
             id: id.to_string(),
@@ -3395,6 +3413,7 @@ mod tests {
                     machines: vec!["M1".to_string(), "M2".to_string()],
                     processing_time: 5.0,
                     machine_times: Default::default(),
+                    release_time: None,
                 }],
                 due_date: None,
                 release_time: None,
@@ -3433,18 +3452,21 @@ mod tests {
                             machines: Vec::new(),
                             processing_time: 3.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".into()),
                             machines: Vec::new(),
                             processing_time: 2.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M3".into()),
                             machines: Vec::new(),
                             processing_time: 4.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                     ],
                     due_date: Some(20.0),
@@ -3458,18 +3480,21 @@ mod tests {
                             machines: Vec::new(),
                             processing_time: 3.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M3".into()),
                             machines: Vec::new(),
                             processing_time: 2.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                         JobShopOperation {
                             machine: Some("M1".into()),
                             machines: Vec::new(),
                             processing_time: 5.0,
                             machine_times: Default::default(),
+                            release_time: None,
                         },
                     ],
                     due_date: Some(18.0),
@@ -3669,6 +3694,7 @@ mod tests {
                     machines: vec![],
                     processing_time: 5.0,
                     machine_times: Default::default(),
+                    release_time: None,
                 }],
                 due_date: None,
                 release_time: None,
@@ -3795,6 +3821,44 @@ mod dto_strictness_tests {
                 &json!("M1"),
                 &json!(0.0)
             )
+        );
+    }
+
+    #[test]
+    fn jobshop_an_operation_release_holds_it_back() {
+        let input: super::JobShopInput = serde_json::from_value(json!({
+            "jobs": [{ "id": "J1", "operations": [
+                { "machine": "M1", "processing_time": 1.0 },
+                { "machine": "M2", "processing_time": 1.0, "release_time": 5.0 }
+            ] }],
+            "ga_config": { "population_size": 10, "max_generations": 5, "seed": 3 }
+        }))
+        .expect("valid shape");
+        let out = super::jobshop(&input).expect("solved");
+        let second = out
+            .schedule
+            .iter()
+            .find(|a| a.operation == 2)
+            .expect("placed");
+        assert_eq!((second.start, out.makespan), (5.0, 6.0));
+
+        let checked: super::JobShopCheckInput = serde_json::from_value(json!({
+            "problem": { "jobs": [{ "id": "J1", "operations": [
+                { "machine": "M1", "processing_time": 1.0 },
+                { "machine": "M2", "processing_time": 1.0, "release_time": 5.0 }
+            ] }] },
+            "solution": { "schedule": [
+                { "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 1.0 },
+                { "job_id": "J1", "operation": 2, "machine": "M2", "start": 1.0, "end": 2.0 }
+            ] }
+        }))
+        .expect("valid shape");
+        let report = serde_json::to_value(super::check_jobshop_input(&checked).expect("checked"))
+            .expect("serializes");
+        assert_eq!(
+            report["violations"][0]["code"],
+            json!("early_start"),
+            "{report}"
         );
     }
 

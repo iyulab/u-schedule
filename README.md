@@ -472,7 +472,8 @@ GA-based job-shop scheduling with multi-machine routing and precedence constrain
       "id": "J1",
       "operations": [
         { "machine": "M1", "processing_time": 3.0 },
-        { "machines": ["M2", "M3"], "processing_time": 2.0, "machine_times": { "M3": 1.5 } }
+        { "machines": ["M2", "M3"], "processing_time": 2.0, "machine_times": { "M3": 1.5 },
+          "release_time": 4.0 }
       ],
       "due_date": 15.0
     }
@@ -492,6 +493,10 @@ An operation runs on one of its `machines` (or its one `machine`) for
 `processing_time` seconds — or, on a machine named in `machine_times`, for
 that machine's own time (a flexible job shop's per-machine times; each key one
 of the operation's machines, each time ≥ 0).
+
+An operation's `release_time` (optional, seconds) holds it back on top of its
+job's: it starts no earlier than that (`check_jobshop` reports an earlier
+start as `early_start`).
 
 `transport_times` (optional) is the time a job's work takes to move between
 machines: when a job's next operation runs on `to`, it starts no earlier than

@@ -83,6 +83,7 @@ impl<'a> ScheduleCpBuilder<'a> {
                 // Setup, processing and teardown: the activity's whole span,
                 // on the resource the solution is reported on.
                 let duration = self.duration_of(activity).total_ms();
+                let release = activity.release_time.map_or(release, |r| release.max(r));
                 let interval = IntervalVar::new(
                     &activity.id,
                     release,               // start_min
@@ -383,5 +384,33 @@ mod tests {
         let first = schedule.assignment_for_activity("J-1").expect("placed");
         let next = schedule.assignment_for_activity("J-2").expect("placed");
         assert!(next.start_ms >= first.end_ms + 5_000);
+    }
+
+    #[test]
+    fn an_activity_release_bounds_its_start() {
+        let problem = crate::Problem::new(
+            vec![Task::new("J").with_activity(
+                Activity::new("J-1", "J", 0)
+                    .with_process_time(1_000)
+                    .with_release_time(4_000)
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec!["A".into()]),
+                    ),
+            )],
+            vec![Resource::new("A", "Machine")],
+        )
+        .expect("valid");
+        let (schedule, _) = ScheduleCpBuilder::new(&problem).solve(
+            &SimpleCpSolver::new(),
+            &SolverConfig::default(),
+            100_000,
+        );
+        assert!(
+            schedule
+                .assignment_for_activity("J-1")
+                .expect("placed")
+                .start_ms
+                >= 4_000
+        );
     }
 }

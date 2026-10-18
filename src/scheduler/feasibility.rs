@@ -184,6 +184,17 @@ fn check_assignments(
                 ),
             ));
         }
+        if let Some(release) = activity.release_time {
+            if a.start_ms < release {
+                out.push(Violation::early_start(
+                    &a.activity_id,
+                    format!(
+                        "activity '{}' starts at {} before its release {release}",
+                        a.activity_id, a.start_ms
+                    ),
+                ));
+            }
+        }
         if let Some(release) = task.release_time {
             if a.start_ms < release {
                 out.push(Violation::early_start(
@@ -1044,5 +1055,36 @@ mod tests {
         assert_eq!(together.len(), 1, "{together:?}");
         assert_eq!(together[0].violation_type, ViolationType::CapacityExceeded);
         assert!(at(1_000).is_empty());
+    }
+
+    /// J1: 1 s on A, then 1 s on B released at 5 s.
+    fn released_second() -> Task {
+        let on = |id: &str, seq: i32, machine: &str| {
+            Activity::new(id, "J1", seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        Task::new("J1")
+            .with_activity(on("J1-1", 0, "A"))
+            .with_activity(on("J1-2", 1, "B").with_release_time(5_000))
+    }
+
+    #[test]
+    fn starting_before_the_activity_release_is_an_early_start() {
+        let tasks = [released_second()];
+        let resources = [Resource::new("A", "Machine"), Resource::new("B", "Machine")];
+        let input = FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let mut s = Schedule::new();
+        s.add_assignment(Assignment::new("J1-1", "J1", "A", 0, 1_000));
+        s.add_assignment(Assignment::new("J1-2", "J1", "B", 1_000, 2_000));
+        let v = check_schedule(&s, &input);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].violation_type, ViolationType::EarlyStart);
     }
 }

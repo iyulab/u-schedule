@@ -51,6 +51,11 @@ pub struct Activity {
     /// stretch of working time.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resumable: bool,
+    /// The earliest the activity may start (ms) — a release of its own, on
+    /// top of its task's (an operation whose material arrives later than
+    /// the job).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_time: Option<i64>,
     /// Resources needed (type + quantity + candidates).
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
@@ -69,10 +74,18 @@ impl Activity {
             duration: ActivityDuration::default(),
             resource_timings: BTreeMap::new(),
             resumable: false,
+            release_time: None,
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
             attributes: HashMap::new(),
         }
+    }
+
+    /// Starts the activity no earlier than `release_ms`
+    /// ([`release_time`](Self::release_time)).
+    pub fn with_release_time(mut self, release_ms: i64) -> Self {
+        self.release_time = Some(release_ms);
+        self
     }
 
     /// Sets the duration.

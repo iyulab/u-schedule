@@ -448,6 +448,7 @@ impl SimpleScheduler {
         ready: i64,
         came_from: &[String],
     ) -> Option<Placement> {
+        let ready = activity.release_time.map_or(ready, |r| ready.max(r));
         let lookup = |id: &str| resources.iter().find(|r| r.id == id);
         let moves = came_from
             .iter()
@@ -1800,5 +1801,27 @@ mod tests {
             *seen.lock().expect("not poisoned"),
             [(3, 3), (2, 2), (1, 1)]
         );
+    }
+
+    /// J1: 1 s on A, then 1 s on B released at 5 s.
+    fn released_second() -> Task {
+        let on = |id: &str, seq: i32, machine: &str| {
+            Activity::new(id, "J1", seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        Task::new("J1")
+            .with_activity(on("J1-1", 0, "A"))
+            .with_activity(on("J1-2", 1, "B").with_release_time(5_000))
+    }
+
+    #[test]
+    fn an_activity_starts_no_earlier_than_its_own_release() {
+        let resources = machines(&["A", "B"]);
+        let s = SimpleScheduler::new().schedule(&valid(&[released_second()], &resources), 0);
+        assert_eq!((start_of(&s, "J1-1"), start_of(&s, "J1-2")), (0, 5_000));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
     }
 }

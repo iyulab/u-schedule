@@ -132,6 +132,9 @@ pub struct SchedulingGaProblem {
     /// Each activity's [`resource_timings`](crate::models::Activity::resource_timings),
     /// by activity index.
     timings: Vec<BTreeMap<String, ResourceTiming>>,
+    /// Each activity's own [`release_time`](crate::models::Activity::release_time)
+    /// (0 without one), by activity index.
+    activity_release: Vec<i64>,
     /// Whether any activity's time depends on its resource — when none does,
     /// the decoders read each activity's own duration without a lookup.
     timed: bool,
@@ -152,6 +155,12 @@ impl SchedulingGaProblem {
             .iter()
             .flat_map(|t| &t.activities)
             .map(|a| a.resource_timings.clone())
+            .collect();
+        let activity_release: Vec<i64> = problem
+            .tasks()
+            .iter()
+            .flat_map(|t| &t.activities)
+            .map(|a| a.release_time.unwrap_or(0))
             .collect();
         let mut task_categories = HashMap::new();
         let mut deadlines = HashMap::new();
@@ -221,6 +230,7 @@ impl SchedulingGaProblem {
             task_ids,
             task_index,
             task_of,
+            activity_release,
             timed: timings.iter().any(|t| !t.is_empty()),
             timings,
             resource_index,
@@ -470,6 +480,12 @@ impl SchedulingGaProblem {
         )
     }
 
+    /// The earliest `activity` may start: its task's release, or its own if
+    /// later.
+    fn release_of(&self, view: &TaskView<'_>, activity: usize) -> i64 {
+        view.release[self.task_of[activity]].max(self.activity_release[activity])
+    }
+
     /// The time work takes to move from the resource at index `from` to the
     /// one at `to` ([`Resource::transport_ms`]); a resource the problem does
     /// not list moves nothing.
@@ -533,7 +549,7 @@ impl SchedulingGaProblem {
             let t = self.task_of[a];
             let start = resource_available[r]
                 .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                .max(view.release[t]);
+                .max(self.release_of(view, a));
             let setup = self.setup_of(view, ix, a, r, last_task[r]);
             let duration = ix.duration[a];
             let end = start + setup + duration.process_ms + duration.teardown_ms;
@@ -583,7 +599,7 @@ impl SchedulingGaProblem {
                     };
                     let start = resource_available[r]
                         .max(self.arrival(view, ix, &placed.end, task_last[t], r))
-                        .max(view.release[t]);
+                        .max(self.release_of(view, a));
                     let setup = self.setup_of(view, ix, a, r, last_task[r]);
                     let duration = ix.duration[a];
                     candidates.push(Candidate {
@@ -1549,5 +1565,44 @@ mod tests {
         };
         let violations = crate::scheduler::check_schedule(&schedule, &input);
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// J1: 1 s on A, then 1 s on B released at 5 s.
+    fn released_second() -> Task {
+        let on = |id: &str, seq: i32, machine: &str| {
+            Activity::new(id, "J1", seq)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        Task::new("J1")
+            .with_activity(on("J1-1", 0, "A"))
+            .with_activity(on("J1-2", 1, "B").with_release_time(5_000))
+    }
+
+    #[test]
+    fn both_decoders_keep_an_activity_release() {
+        let problem = valid(
+            &[released_second()],
+            &[Resource::new("A", "Machine"), Resource::new("B", "Machine")],
+        );
+        let ga = SchedulingGaProblem::new(&problem);
+        let chromosome = ScheduleChromosome {
+            osv: vec!["J1".into(), "J1".into()],
+            mav: vec!["A".into(), "B".into()],
+            activity_index: ga.activity_index.clone(),
+            fitness: f64::INFINITY,
+        };
+        for schedule in [
+            ga.decode_semi_active(&chromosome),
+            ga.decode_active(&chromosome),
+        ] {
+            let start = schedule
+                .assignment_for_activity("J1-2")
+                .expect("placed")
+                .start_ms;
+            assert_eq!(start, 5_000);
+        }
     }
 }
