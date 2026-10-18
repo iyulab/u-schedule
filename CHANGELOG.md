@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-18
+
+Depends on u-numflow 0.14 and u-metaheur 0.14.
+
 ### Added
 
 - Processing time that depends on the resource: `Activity::with_speed_on`
