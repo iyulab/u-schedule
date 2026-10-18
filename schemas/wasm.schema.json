@@ -863,6 +863,121 @@
       ],
       "type": "object"
     },
+    "SearchConfig": {
+      "additionalProperties": false,
+      "description": "How `search_schedule` searches: the random-key population, its budget,\nthe seed and the weight of tardiness against makespan in the cost.",
+      "properties": {
+        "max_generations": {
+          "default": 100,
+          "description": "Generations at most, at least 1 (default 100).",
+          "format": "int128",
+          "type": "integer"
+        },
+        "population_size": {
+          "default": 40,
+          "description": "Keys per generation, at least 3 (default 40).",
+          "format": "int128",
+          "type": "integer"
+        },
+        "seed": {
+          "default": null,
+          "description": "From 0 to 2^64 - 1: the same request and seed give the same schedule\nwhen the search ends on its own budget. Absent: fresh entropy.",
+          "format": "int128",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stagnation_limit": {
+          "default": 30,
+          "description": "Generations without a better schedule before the search stops, at\nleast 1 (default 30).",
+          "format": "int128",
+          "type": "integer"
+        },
+        "tardiness_weight": {
+          "default": 0.0,
+          "description": "In `[0, 1]`: the cost is `(1 - w)` × makespan + `w` × total tardiness\n(default 0, makespan only).",
+          "format": "double",
+          "type": "number"
+        },
+        "time_limit_ms": {
+          "default": null,
+          "description": "Wall-clock budget in milliseconds, at least 1. Absent: none.",
+          "format": "int128",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SearchOutput": {
+      "description": "What `search_schedule` found: the schedule (as `run_schedule` reports\none), its cost and the cost of the rule's own schedule, and how the search\nended.",
+      "properties": {
+        "cost": {
+          "description": "The schedule's cost in seconds: `(1 - w)` × makespan + `w` × total\ntardiness.",
+          "format": "double",
+          "type": "number"
+        },
+        "dispatching_cost": {
+          "description": "The cost of the schedule `config.rule` gives by itself -- `cost` is\nnever above it.",
+          "format": "double",
+          "type": "number"
+        },
+        "generations": {
+          "description": "Generations the search ran (0 for fewer than two jobs).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "machine_utilization": {
+          "description": "Busy time and utilization (busy time over makespan) of every machine,\none entry per `config.num_machines` -- one machine included.",
+          "items": {
+            "$ref": "#/$defs/MachineUtilization"
+          },
+          "type": "array"
+        },
+        "makespan": {
+          "format": "double",
+          "type": "number"
+        },
+        "schedule": {
+          "items": {
+            "$ref": "#/$defs/OutputJob"
+          },
+          "type": "array"
+        },
+        "stop_reason": {
+          "description": "Why the search stopped: `\"iteration_limit\"` (it ran `max_generations`),\n`\"no_improvement\"` (`stagnation_limit` generations without a better\nschedule), `\"time_limit\"`, or `\"completed\"` for fewer than two jobs.",
+          "enum": [
+            "completed",
+            "optimal",
+            "target_reached",
+            "iteration_limit",
+            "no_improvement",
+            "time_limit",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        "total_tardiness": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schedule",
+        "makespan",
+        "total_tardiness",
+        "machine_utilization",
+        "cost",
+        "dispatching_cost",
+        "generations",
+        "stop_reason"
+      ],
+      "type": "object"
+    },
     "available_rules.input": {
       "additionalProperties": false,
       "description": "The arguments of available_rules(), by name; the WebAssembly function takes them in that order.",
@@ -907,6 +1022,32 @@
     },
     "run_schedule.output": {
       "$ref": "#/$defs/ScheduleOutput"
+    },
+    "search_schedule.input": {
+      "additionalProperties": false,
+      "description": "The arguments of search_schedule(jobs, search), by name; the WebAssembly function takes them in that order.",
+      "properties": {
+        "jobs": {
+          "$ref": "#/$defs/ScheduleInput"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "search_schedule.output": {
+      "$ref": "#/$defs/SearchOutput"
     },
     "solve_jobshop.input": {
       "additionalProperties": false,

@@ -525,6 +525,42 @@ console.log(rules.filter((r) => r.reads.includes('atc_k')).map((r) => r.name)); 
 Every rule `run_schedule` takes, once each (`"SRO"` is accepted as another spelling of
 `"S/RO"`), with the `config` settings it reads (`{ name, reads }`).
 
+#### `search_schedule(input, search?) -> SearchOutput`
+
+Searches the order `run_schedule` dispatches in. A biased random-key genetic
+algorithm gives each job a key, and each set of keys is decoded by the same
+dispatcher with the keys deciding (the lower key first) — so every schedule it
+considers is one `run_schedule` could build, and the answer is the better of
+the best keyed schedule and `config.rule`'s own: never worse than `run_schedule`
+on the same input ([Searching the dispatching order](#searching-the-dispatching-order)).
+
+```js
+import { search_schedule } from '@iyulab/u-schedule';
+
+const found = search_schedule(
+  {
+    jobs: [
+      { id: 'long', processing_time: 10, due_date: 30 },
+      { id: 'urgent', processing_time: 1, due_date: 1 },
+    ],
+    config: { rule: 'FCFS' },
+  },
+  { seed: 7, tardiness_weight: 1 },
+);
+console.log(found.dispatching_cost, found.cost); // 10 0 -- FCFS runs the urgent job second
+```
+
+`input` is `run_schedule`'s. `search` (optional) takes `population_size` (at least 3,
+default 40), `max_generations` (at least 1, default 100), `stagnation_limit`
+(generations without a better schedule before stopping, at least 1, default 30),
+`seed` (a whole number 0 to 2^64 − 1 — the same input and seed give the same
+schedule when no `time_limit_ms` is set; absent: fresh entropy), `time_limit_ms`
+(at least 1) and `tardiness_weight` (`w` in `[0, 1]`, default 0). The output is
+`run_schedule`'s plus `cost` — `(1 − w)` × makespan + `w` × total tardiness, in
+seconds — `dispatching_cost` (the same for `config.rule` alone; `cost` is never
+above it), `generations` and `stop_reason` (`"iteration_limit"`,
+`"no_improvement"`, `"time_limit"`, or `"completed"` for fewer than two jobs).
+
 #### `codes() -> Codes`
 
 Every refusal `code` this package's functions throw, with the fields that can come
@@ -693,11 +729,11 @@ try {
 |---|---|---|
 | `duplicate_id` | `entity`, `id` (and `first`, `second` for jobs and transport times) | Two jobs share an `id` (at positions `first` and `second`, from 0), a `transport_times` pair is given twice (`entity` `transport_time`, `id` `"M1->M2"`), or two tasks, activities or resources do |
 | `unknown_option` | `parameter`, `got`, `expected` | A `rule`, `ga_config.crossover` or `ga_config.mutation` that names none of the supported values |
-| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, `config.num_machines` below 1, a job-shop `num_machines` below the number of machines the operations name, a job's `processing_time` below 0 or `weight` not above 0, a job-shop `machine_times` value below 0 (`parameter` `machine_times`, `activity`, `resource`), a `transport_times` time below 0 (`parameter` `transport_times`, `resource` and `to` the pair), or `config.atc_k` not above 0. A count or seed is checked as the whole number it is, so a negative one is refused like a too-small one: `config.num_machines: -1` is `{ min: 1, max: null, got: -1 }`, as `0` is. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
+| `parameter_out_of_range` | `parameter`, `min`, `max`, `exclusive_min`, `exclusive_max`, `got` (and `index`, `id` for a job) | A `ga_config` value outside the table above, a `search` value outside its range (`search.population_size` below 3, `search.tardiness_weight` outside `[0, 1]`, …), `config.num_machines` below 1, a job-shop `num_machines` below the number of machines the operations name, a job's `processing_time` below 0 or `weight` not above 0, a job-shop `machine_times` value below 0 (`parameter` `machine_times`, `activity`, `resource`), a `transport_times` time below 0 (`parameter` `transport_times`, `resource` and `to` the pair), or `config.atc_k` not above 0. A count or seed is checked as the whole number it is, so a negative one is refused like a too-small one: `config.num_machines: -1` is `{ min: 1, max: null, got: -1 }`, as `0` is. `min` / `max` are the closed (included) bounds and are always present — `null` on a side that is open or unbounded; `exclusive_min` / `exclusive_max` are the open (excluded) bounds, present only when that end is open: a `processing_time` of -1 is refused with `min: 0`, a `weight` of 0 with `min: null, exclusive_min: 0` |
 | `missing_machine` | `job`, `operation` | A job-shop operation with neither `machine` nor `machines` |
 | `no_machines` | — | A job-shop request whose operations name no machine at all |
 | `empty_input` | `parameter` (`"operations"`), `task` | A job with no operations |
-| `invalid_option` | `parameter` (and `rule` for `config.atc_k`) | GA settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population), or `config.atc_k` given with a `rule` other than `ATC` — `rule` names the chosen one; a single setting outside its range is `parameter_out_of_range` |
+| `invalid_option` | `parameter` (and `rule` for `config.atc_k`) | GA or search settings the runner refuses only in combination (`ga_config.elite_ratio` leaving no elite in the population), or `config.atc_k` given with a `rule` other than `ATC` — `rule` names the chosen one; a single setting outside its range is `parameter_out_of_range` |
 | `value_not_finite` | `parameter`, `index` | A NaN or ±Infinity anywhere in an argument — `parameter` is the path to it (`config.nodes[1]`), `index` its position in that array, or `null` |
 | `malformed_input` | `parameter` | An argument of the wrong shape or type (a missing or unknown key), a count or seed that is not a whole number (`config.num_machines: 2.5` — `parameter` is the field), or a JSON string |
 | `invalid_resource_reference` | `activity`, `resource`, `companion`, `to` | A job-shop operation's `machine_times` naming a machine that is not one of its `machines` (`activity` is the step, `J1_2`; `resource` the machine), or a `transport_times` pair whose `from` or `to` no operation runs on, or that moves a machine to itself (`resource` is `from`). Also a step naming a machine the problem does not have, or a machine whose companion is unknown or itself — not produced by today's inputs (the machines are the ones the operations name, with no companions) |

@@ -307,13 +307,14 @@ impl Bounds {
     }
 }
 
-/// GA settings the runner refused, named by the `ga_config` field it checked:
+/// Search settings the runner refused, named by the field of `object`
+/// (`ga_config`, `search`) it checked:
 /// a number outside its range is `parameter_out_of_range` with the bounds as
 /// the runner reported them (open ends as `exclusive_min` / `exclusive_max`),
 /// a setting wrong only beside the others is `invalid_option`.
-fn ga_settings_refused(e: ConfigError) -> WireError {
-    let parameter = format!("ga_config.{}", e.parameter());
-    let message = format!("ga_config.{e}");
+fn settings_refused(object: &str, e: ConfigError) -> WireError {
+    let parameter = format!("{object}.{}", e.parameter());
+    let message = format!("{object}.{e}");
     match e {
         ConfigError::OutOfRange {
             min,
@@ -1205,14 +1206,26 @@ fn dispatch(
     engine: RuleEngine,
     num_machines: usize,
 ) -> Result<Vec<OutputJob>, WireError> {
-    let machines: Vec<Resource> = (0..num_machines)
-        .map(|m| Resource::new(format!("M{m}"), MACHINE))
-        .collect();
-    let problem =
-        Problem::new(tasks, machines).map_err(|e| WireError::internal(format!("{e:?}")))?;
+    let problem = machines_problem(tasks, num_machines)?;
     let schedule = crate::scheduler::SimpleScheduler::new()
         .with_rule_engine(engine)
         .schedule(&problem, 0);
+    output_jobs(&problem, &schedule)
+}
+
+/// The problem of `tasks` on `num_machines` identical machines `M0`, `M1`, …
+fn machines_problem(tasks: Vec<Task>, num_machines: usize) -> Result<Problem, WireError> {
+    let machines: Vec<Resource> = (0..num_machines)
+        .map(|m| Resource::new(format!("M{m}"), MACHINE))
+        .collect();
+    Problem::new(tasks, machines).map_err(|e| WireError::internal(format!("{e:?}")))
+}
+
+/// A schedule of a [`machines_problem`] as the jobs `run_schedule` reports.
+fn output_jobs(
+    problem: &Problem,
+    schedule: &crate::models::Schedule,
+) -> Result<Vec<OutputJob>, WireError> {
     schedule
         .assignments
         .iter()
@@ -1298,17 +1311,188 @@ fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
     let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
 
     let schedule = dispatch(tasks, engine, num_machines)?;
+    Ok(schedule_output(schedule, num_machines))
+}
 
+/// The jobs of a schedule with its makespan, total tardiness and machine
+/// utilization.
+fn schedule_output(schedule: Vec<OutputJob>, num_machines: usize) -> ScheduleOutput {
     let makespan = schedule.iter().map(|j| j.end).fold(0.0_f64, f64::max);
     let total_tardiness: f64 = schedule.iter().map(|j| j.tardiness).sum();
-
     let machine_utilization = compute_utilization(&schedule, num_machines, makespan);
-
-    Ok(ScheduleOutput {
+    ScheduleOutput {
         schedule,
         makespan,
         total_tardiness,
         machine_utilization,
+    }
+}
+
+// ── public API: search_schedule ─────────────────────────────────────────────
+
+/// How `search_schedule` searches: the random-key population, its budget,
+/// the seed and the weight of tardiness against makespan in the cost.
+#[derive(Debug, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct SearchConfig {
+    /// Keys per generation, at least 3 (default 40).
+    #[serde(default = "default_search_population", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    population_size: i128,
+    /// Generations at most, at least 1 (default 100).
+    #[serde(default = "default_search_generations", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    max_generations: i128,
+    /// Generations without a better schedule before the search stops, at
+    /// least 1 (default 30).
+    #[serde(default = "default_search_stagnation", deserialize_with = "whole")]
+    #[tsify(optional, type = "number")]
+    stagnation_limit: i128,
+    /// From 0 to 2^64 - 1: the same request and seed give the same schedule
+    /// when the search ends on its own budget. Absent: fresh entropy.
+    #[serde(default, deserialize_with = "optional_whole")]
+    #[tsify(optional, type = "number | null")]
+    seed: Option<i128>,
+    /// Wall-clock budget in milliseconds, at least 1. Absent: none.
+    #[serde(default, deserialize_with = "optional_whole")]
+    #[tsify(optional, type = "number | null")]
+    time_limit_ms: Option<i128>,
+    /// In `[0, 1]`: the cost is `(1 - w)` × makespan + `w` × total tardiness
+    /// (default 0, makespan only).
+    #[serde(default)]
+    #[tsify(optional)]
+    tardiness_weight: f64,
+}
+
+fn default_search_population() -> i128 {
+    40
+}
+
+fn default_search_generations() -> i128 {
+    100
+}
+
+fn default_search_stagnation() -> i128 {
+    30
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            population_size: default_search_population(),
+            max_generations: default_search_generations(),
+            stagnation_limit: default_search_stagnation(),
+            seed: None,
+            time_limit_ms: None,
+            tardiness_weight: 0.0,
+        }
+    }
+}
+
+/// What `search_schedule` found: the schedule (as `run_schedule` reports
+/// one), its cost and the cost of the rule's own schedule, and how the search
+/// ended.
+#[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct SearchOutput {
+    #[serde(flatten)]
+    result: ScheduleOutput,
+    /// The schedule's cost in seconds: `(1 - w)` × makespan + `w` × total
+    /// tardiness.
+    cost: f64,
+    /// The cost of the schedule `config.rule` gives by itself -- `cost` is
+    /// never above it.
+    dispatching_cost: f64,
+    /// Generations the search ran (0 for fewer than two jobs).
+    generations: usize,
+    /// Why the search stopped: `"iteration_limit"` (it ran `max_generations`),
+    /// `"no_improvement"` (`stagnation_limit` generations without a better
+    /// schedule), `"time_limit"`, or `"completed"` for fewer than two jobs.
+    #[tsify(
+        type = "\"completed\" | \"optimal\" | \"target_reached\" | \"iteration_limit\" | \"no_improvement\" | \"time_limit\" | \"cancelled\""
+    )]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::stop_reason"))]
+    stop_reason: StopReason,
+}
+
+/// Search the order dispatching takes the jobs in: a biased random-key
+/// genetic algorithm gives each job a key, and each set of keys is decoded by
+/// the dispatcher with the keys deciding (the lower key first). Every
+/// schedule it considers is one `run_schedule` could build, and the answer is
+/// the better of the best keyed one and `config.rule`'s own -- never worse
+/// than `run_schedule` on the same `jobs`.
+///
+/// # Arguments
+/// `jobs` -- as `run_schedule` takes it; `config.rule` is the schedule the
+/// search starts from and is measured against. `search` -- optional
+/// `SearchConfig`.
+///
+/// # Returns
+/// A JS object matching `SearchOutput`. A refusal throws an `Error` carrying
+/// `code` (see the README's *Errors*).
+#[wasm_bindgen(unchecked_return_type = "SearchOutput")]
+pub fn search_schedule(
+    #[wasm_bindgen(unchecked_param_type = "ScheduleInput")] jobs: JsValue,
+    #[wasm_bindgen(unchecked_optional_param_type = "SearchConfig | null")] search: Option<JsValue>,
+) -> Result<JsValue, JsValue> {
+    let input: ScheduleInput = from_js(jobs, "jobs")?;
+    let config: SearchConfig = match search {
+        Some(s) if !s.is_null() && !s.is_undefined() => from_js(s, "search")?,
+        _ => SearchConfig::default(),
+    };
+    to_js(&search_jobs(&input, &config).map_err(js_err)?)
+}
+
+/// The whole of `search_schedule` past the JS boundary.
+fn search_jobs(input: &ScheduleInput, search: &SearchConfig) -> Result<SearchOutput, WireError> {
+    let num_machines = count("config.num_machines", input.config.num_machines, 1)?;
+    let engine = build_engine(&input.config.rule, &input.config)?;
+    let mut brkga = u_metaheur::brkga::BrkgaConfig::new(1)
+        .with_population_size(count("search.population_size", search.population_size, 3)?)
+        .with_max_generations(count("search.max_generations", search.max_generations, 1)?)
+        .with_stagnation_limit(count(
+            "search.stagnation_limit",
+            search.stagnation_limit,
+            1,
+        )?);
+    if let Some(seed) = search.seed {
+        brkga = brkga.with_seed(whole_in::<u64>("search.seed", seed, 0, u64::MAX.into())?);
+    }
+    if let Some(limit) = search.time_limit_ms {
+        brkga = brkga.with_time_limit_ms(count("search.time_limit_ms", limit, 1)? as u64);
+    }
+    if !(0.0..=1.0).contains(&search.tardiness_weight) {
+        return Err(WireError::out_of_range(
+            "search.tardiness_weight",
+            0.0..=1.0,
+            search.tardiness_weight,
+        ));
+    }
+    if input.jobs.is_empty() {
+        return Ok(SearchOutput {
+            result: schedule_output(vec![], num_machines),
+            cost: 0.0,
+            dispatching_cost: 0.0,
+            generations: 0,
+            stop_reason: StopReason::Completed,
+        });
+    }
+    refuse_repeated_ids(input.jobs.iter().map(|j| j.id.as_str()))?;
+    refuse_job_values(&input.jobs)?;
+    let tasks: Vec<Task> = input.jobs.iter().map(build_task).collect();
+    let problem = machines_problem(tasks, num_machines)?;
+    let scheduler = crate::scheduler::SimpleScheduler::new().with_rule_engine(engine);
+    let found = crate::scheduler::DispatchSearch::new(scheduler, brkga)
+        .with_tardiness_weight(search.tardiness_weight)
+        .search(&problem, 0)
+        .map_err(|e| settings_refused("search", e))?;
+    Ok(SearchOutput {
+        result: schedule_output(output_jobs(&problem, &found.schedule)?, num_machines),
+        cost: found.cost / 1_000.0,
+        dispatching_cost: found.dispatching_cost / 1_000.0,
+        generations: found.generations,
+        stop_reason: found.stop_reason,
     })
 }
 
@@ -1875,10 +2059,13 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
     }
 
     // Defence-in-depth: call GaConfig's own validation as well.
-    config.validate().map_err(ga_settings_refused)?;
+    config
+        .validate()
+        .map_err(|e| settings_refused("ga_config", e))?;
 
     // ── Run GA ──
-    let result = GaRunner::run(&ga_problem, &config).map_err(ga_settings_refused)?;
+    let result =
+        GaRunner::run(&ga_problem, &config).map_err(|e| settings_refused("ga_config", e))?;
 
     // ── Decode best solution ──
     let best_schedule = ga_problem.decode(&result.best);
@@ -2870,7 +3057,7 @@ mod tests {
             .with_population_size(1)
             .validate()
             .expect_err("a population of one");
-        let err = ga_settings_refused(range);
+        let err = settings_refused("ga_config", range);
         assert_eq!(
             err.fields,
             json!({ "code": "parameter_out_of_range", "parameter": "ga_config.population_size",
@@ -2883,7 +3070,7 @@ mod tests {
             .with_reaction_factor(0.0)
             .validate()
             .expect_err("a reaction factor of zero");
-        let err = ga_settings_refused(open);
+        let err = settings_refused("ga_config", open);
         assert_eq!(
             err.fields,
             json!({ "code": "parameter_out_of_range", "parameter": "ga_config.reaction_factor",
@@ -2895,7 +3082,7 @@ mod tests {
             .with_elite_ratio(0.1)
             .validate()
             .expect_err("no elite in a population of two");
-        let err = ga_settings_refused(together);
+        let err = settings_refused("ga_config", together);
         assert_eq!(
             err.fields,
             json!({ "code": "invalid_option", "parameter": "ga_config.elite_ratio" })
@@ -4254,7 +4441,7 @@ mod engine_card_tests {
     //! schemas it points at are generated from the types they read and return.
 
     use super::*;
-    use crate::engine_card::{arg, Schemas};
+    use crate::engine_card::{arg, optional, Schemas};
 
     fn schemas() -> Schemas {
         let s = Schemas::new();
@@ -4274,6 +4461,14 @@ mod engine_card_tests {
             s.of::<JobShopCheckOutput>(),
         );
         s.op("available_rules", vec![], s.of::<Vec<RuleInfo>>());
+        s.op(
+            "search_schedule",
+            vec![
+                arg("jobs", s.of::<ScheduleInput>()),
+                optional("search", s.of::<Option<SearchConfig>>()),
+            ],
+            s.of::<SearchOutput>(),
+        );
         s
     }
 
@@ -4335,5 +4530,106 @@ mod engine_card_tests {
         let solve =
             || serde_json::to_value(jobshop(&problem).expect("solves")).expect("serializes");
         assert_eq!(solve(), solve());
+
+        let seeded = SearchConfig {
+            population_size: 8,
+            max_generations: 10,
+            seed: Some(3),
+            ..SearchConfig::default()
+        };
+        let search = || {
+            serde_json::to_value(search_jobs(&jobs, &seeded).expect("searches"))
+                .expect("serializes")
+        };
+        assert_eq!(search(), search());
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    //! `search_schedule` searches the order `run_schedule` dispatches in.
+
+    use super::*;
+
+    fn jobs() -> ScheduleInput {
+        serde_json::from_value(serde_json::json!({
+            "jobs": [
+                { "id": "long", "processing_time": 10.0, "due_date": 30.0 },
+                { "id": "mid", "processing_time": 6.0, "due_date": 8.0 },
+                { "id": "urgent", "processing_time": 1.0, "due_date": 1.0 },
+                { "id": "late", "processing_time": 4.0, "due_date": 40.0 }
+            ],
+            "config": { "rule": "FCFS" }
+        }))
+        .expect("a valid request")
+    }
+
+    fn seeded(tardiness_weight: f64) -> SearchConfig {
+        SearchConfig {
+            population_size: 12,
+            max_generations: 20,
+            seed: Some(5),
+            tardiness_weight,
+            ..SearchConfig::default()
+        }
+    }
+
+    /// The answer is never worse than the rule alone, and the rule's own
+    /// schedule is what `run_schedule` gives.
+    #[test]
+    fn the_search_is_never_worse_than_the_rule() {
+        let input = jobs();
+        let rule = schedule_jobs(&input).expect("dispatches");
+        let found = search_jobs(&input, &seeded(1.0)).expect("searches");
+        assert_eq!(found.dispatching_cost, rule.total_tardiness);
+        assert!(found.cost <= found.dispatching_cost);
+        // FCFS runs the urgent job third; the search finds an order with less
+        // tardiness.
+        assert!(found.cost < found.dispatching_cost, "{found:?}");
+        assert_eq!(found.result.total_tardiness, found.cost);
+        assert!(found.generations > 0);
+    }
+
+    #[test]
+    fn search_settings_are_checked() {
+        let input = jobs();
+        let refused = |search: SearchConfig| search_jobs(&input, &search).expect_err("refused");
+        let e = refused(SearchConfig {
+            tardiness_weight: 1.5,
+            ..SearchConfig::default()
+        });
+        assert_eq!(e.fields["code"], "parameter_out_of_range");
+        assert_eq!(e.fields["parameter"], "search.tardiness_weight");
+        let e = refused(SearchConfig {
+            population_size: 2,
+            ..SearchConfig::default()
+        });
+        assert_eq!(e.fields["parameter"], "search.population_size");
+        assert_eq!(e.fields["min"], 3.0);
+        let e = refused(SearchConfig {
+            time_limit_ms: Some(0),
+            ..SearchConfig::default()
+        });
+        assert_eq!(e.fields["parameter"], "search.time_limit_ms");
+    }
+
+    /// One job leaves nothing to search: the rule's schedule, no generations.
+    #[test]
+    fn a_single_job_is_not_searched() {
+        let input: ScheduleInput = serde_json::from_value(serde_json::json!({
+            "jobs": [{ "id": "only", "processing_time": 2.0 }]
+        }))
+        .expect("a valid request");
+        let found = search_jobs(&input, &SearchConfig::default()).expect("searches");
+        assert_eq!(found.generations, 0);
+        assert_eq!(found.stop_reason, StopReason::Completed);
+        assert_eq!(found.cost, 2.0);
+    }
+
+    #[test]
+    fn an_unknown_search_setting_is_refused() {
+        let e = serde_json::from_value::<SearchConfig>(serde_json::json!({ "generations": 5 }))
+            .expect_err("unknown key");
+        assert!(e.to_string().contains("generations"), "{e}");
     }
 }

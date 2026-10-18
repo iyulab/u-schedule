@@ -8,6 +8,16 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `search_schedule(input, search?)` (WebAssembly): searches the order
+  `run_schedule` dispatches in -- a biased random-key genetic algorithm whose
+  keys the dispatcher decodes -- and returns the better of the best keyed
+  schedule and `config.rule`'s own, never worse than `run_schedule`, with its
+  cost, the rule's cost, the generations run and why it stopped. `search`
+  takes the population, the generation and stagnation budgets, a seed, a time
+  limit and the weight of tardiness against makespan.
+
 ## [0.29.0] - 2026-10-18
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

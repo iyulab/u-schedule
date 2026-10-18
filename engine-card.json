@@ -163,6 +163,69 @@
       }
     },
     {
+      "id": "search_schedule",
+      "summary": "A better order for the same dispatching: a biased random-key genetic algorithm gives each job a key and the dispatcher decodes each set of keys (the lower key first), so every schedule considered is one run_schedule could build; returns the better of the best keyed schedule and config.rule's own -- never worse than run_schedule -- with its cost ((1 - w) makespan + w total tardiness), the rule's cost, the generations run and why it stopped.",
+      "input": {
+        "schema": "schemas/wasm.schema.json#/$defs/search_schedule.input",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "output": {
+        "schema": "schemas/wasm.schema.json#/$defs/search_schedule.output",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "contract_test": "src/wasm.rs::engine_card_tests::every_export_is_a_card_operation_with_its_arguments",
+      "hints": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": false,
+        "open_world": false
+      },
+      "effects": {
+        "filesystem": "none",
+        "network": "none",
+        "clock": "deadline",
+        "randomness": "unseeded",
+        "note": "The search draws from search.seed when it is given and from fresh entropy when it is not, and stops at search.time_limit_ms when one is given."
+      },
+      "determinism": {
+        "kind": "nondeterministic",
+        "note": "The worst case, a search without search.seed.",
+        "cases": [
+          {
+            "when": "search.seed given and no search.time_limit_ms",
+            "kind": "seeded",
+            "randomness": "seeded",
+            "clock": "none",
+            "test": "src/wasm.rs::engine_card_tests::the_same_request_gives_the_same_answer"
+          },
+          {
+            "when": "search.seed given, with search.time_limit_ms",
+            "kind": "time_bounded",
+            "randomness": "seeded",
+            "clock": "deadline",
+            "note": "How many generations run before the deadline depends on machine speed; with the same seed they are the same generations."
+          }
+        ]
+      },
+      "output_provenance": {
+        "fields": [
+          "stop_reason",
+          "generations",
+          "dispatching_cost"
+        ],
+        "note": "Whether the search ran its generations, stalled or hit the deadline, and how much it gained over the rule alone."
+      },
+      "validation": {
+        "status": "none",
+        "limits": [
+          "Schedule quality has not been compared against best-known solutions of standard instances."
+        ]
+      },
+      "performance": {
+        "status": "none"
+      }
+    },
+    {
       "id": "available_rules",
       "summary": "The dispatching rules run_schedule takes and, for each, the config settings it reads; a request giving any other setting with that rule is refused.",
       "input": {
