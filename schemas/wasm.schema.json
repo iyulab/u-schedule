@@ -295,6 +295,17 @@
           },
           "type": "array"
         },
+        "overlap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobShopOverlap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How this operation overlaps the job's previous one (transfer batches):\nit may start once `start_after` of the previous operation's span has\npassed and ends no earlier than `finish_after` seconds after it. Not\non a job's first operation."
+        },
         "processing_time": {
           "description": "Processing time in seconds.",
           "format": "double",
@@ -378,6 +389,27 @@
         "generations",
         "fitness_history",
         "stop_reason"
+      ],
+      "type": "object"
+    },
+    "JobShopOverlap": {
+      "additionalProperties": false,
+      "description": "[`Overlap`](crate::models::Overlap) on the wire, in seconds.",
+      "properties": {
+        "finish_after": {
+          "default": 0.0,
+          "description": "The least time from the previous operation's end to this one's\n(seconds, `>= 0`, default 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "start_after": {
+          "description": "The share of the previous operation's span that must have passed\nbefore this one starts, in `[0, 1]`.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start_after"
       ],
       "type": "object"
     },

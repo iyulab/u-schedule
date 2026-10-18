@@ -32,6 +32,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   on a task's first step (`invalid_option`), a share outside `[0, 1]` or a
   negative lag (`parameter_out_of_range`). A new public field: a struct
   literal of `Activity` needs it.
+- `solve_jobshop` and `check_jobshop` (WebAssembly): an operation's
+  `overlap: { start_after, finish_after? }` (seconds) -- it starts once
+  `start_after` of the job's previous operation has passed and ends no
+  earlier than `finish_after` after it. Refused on a job's first operation
+  (`invalid_option`, `parameter: "overlap"`) and out of range
+  (`parameter_out_of_range`, `parameter: "overlap.start_after"` /
+  `"overlap.finish_after"`, `activity` the step).
 
 ### Fixed
 

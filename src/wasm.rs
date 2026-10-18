@@ -1551,6 +1551,28 @@ struct JobShopOperation {
     #[tsify(optional)]
     #[tsify(type = "number | null")]
     release_time: Option<f64>,
+    /// How this operation overlaps the job's previous one (transfer batches):
+    /// it may start once `start_after` of the previous operation's span has
+    /// passed and ends no earlier than `finish_after` seconds after it. Not
+    /// on a job's first operation.
+    #[serde(default)]
+    #[tsify(optional)]
+    overlap: Option<JobShopOverlap>,
+}
+
+/// [`Overlap`](crate::models::Overlap) on the wire, in seconds.
+#[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct JobShopOverlap {
+    /// The share of the previous operation's span that must have passed
+    /// before this one starts, in `[0, 1]`.
+    start_after: f64,
+    /// The least time from the previous operation's end to this one's
+    /// (seconds, `>= 0`, default 0).
+    #[serde(default)]
+    #[tsify(optional)]
+    finish_after: f64,
 }
 
 impl JobShopOperation {
@@ -1933,6 +1955,12 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
             }
             if let Some(release) = op.release_time {
                 activity = activity.with_release_time(sec_to_ms(release));
+            }
+            if let Some(overlap) = &op.overlap {
+                activity = activity.with_overlap(
+                    crate::models::Overlap::new(overlap.start_after)
+                        .with_finish_after(sec_to_ms(overlap.finish_after)),
+                );
             }
             let activity = activity
                 .with_requirement(ResourceRequirement::new("Machine").with_candidates(candidates));
@@ -3133,6 +3161,7 @@ mod tests {
             processing_time: 1.0,
             machine_times: Default::default(),
             release_time: None,
+            overlap: None,
         };
         let job = |id: &str, ops: Vec<JobShopOperation>| JobShopJob {
             id: id.to_string(),
@@ -3286,6 +3315,7 @@ mod tests {
             processing_time: t,
             machine_times: Default::default(),
             release_time: None,
+            overlap: None,
         };
         JobShopInput {
             transport_times: Vec::new(),
@@ -3509,6 +3539,7 @@ mod tests {
                             processing_time: 3.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".to_string()),
@@ -3516,6 +3547,7 @@ mod tests {
                             processing_time: 2.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                     ],
                     due_date: None,
@@ -3555,6 +3587,7 @@ mod tests {
                             processing_time: 3.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".to_string()),
@@ -3562,6 +3595,7 @@ mod tests {
                             processing_time: 2.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                     ],
                     due_date: None,
@@ -3576,6 +3610,7 @@ mod tests {
                             processing_time: 4.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M1".to_string()),
@@ -3583,6 +3618,7 @@ mod tests {
                             processing_time: 1.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                     ],
                     due_date: None,
@@ -3631,6 +3667,7 @@ mod tests {
             processing_time: pt,
             machine_times: Default::default(),
             release_time: None,
+            overlap: None,
         };
         let job = |id: &str, ops: Vec<JobShopOperation>, due: Option<f64>| JobShopJob {
             id: id.to_string(),
@@ -3693,6 +3730,7 @@ mod tests {
                     processing_time: 5.0,
                     machine_times: Default::default(),
                     release_time: None,
+                    overlap: None,
                 }],
                 due_date: None,
                 release_time: None,
@@ -3732,6 +3770,7 @@ mod tests {
                             processing_time: 3.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M2".into()),
@@ -3739,6 +3778,7 @@ mod tests {
                             processing_time: 2.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M3".into()),
@@ -3746,6 +3786,7 @@ mod tests {
                             processing_time: 4.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                     ],
                     due_date: Some(20.0),
@@ -3760,6 +3801,7 @@ mod tests {
                             processing_time: 3.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M3".into()),
@@ -3767,6 +3809,7 @@ mod tests {
                             processing_time: 2.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                         JobShopOperation {
                             machine: Some("M1".into()),
@@ -3774,6 +3817,7 @@ mod tests {
                             processing_time: 5.0,
                             machine_times: Default::default(),
                             release_time: None,
+                            overlap: None,
                         },
                     ],
                     due_date: Some(18.0),
@@ -3974,6 +4018,7 @@ mod tests {
                     processing_time: 5.0,
                     machine_times: Default::default(),
                     release_time: None,
+                    overlap: None,
                 }],
                 due_date: None,
                 release_time: None,
@@ -4216,6 +4261,98 @@ mod dto_strictness_tests {
             (&twice["code"], &twice["entity"], &twice["second"]),
             (&json!("duplicate_id"), &json!("transport_time"), &json!(1))
         );
+    }
+
+    #[test]
+    fn jobshop_an_overlapping_operation_starts_at_its_share_and_ends_after_the_one_before() {
+        // Cut on M1 for 10 s, then bend on M2 overlapping it.
+        let problem = |bend: f64, overlap: serde_json::Value| {
+            json!({
+                "jobs": [{ "id": "J1", "operations": [
+                    { "machine": "M1", "processing_time": 10.0 },
+                    { "machine": "M2", "processing_time": bend, "overlap": overlap }
+                ] }],
+                "ga_config": { "population_size": 10, "max_generations": 5, "seed": 3 }
+            })
+        };
+        let solved = |bend: f64, overlap: serde_json::Value| {
+            let input: super::JobShopInput =
+                serde_json::from_value(problem(bend, overlap)).expect("valid shape");
+            let out = super::jobshop(&input).expect("solved");
+            let second = out
+                .schedule
+                .iter()
+                .find(|a| a.operation == 2)
+                .expect("placed");
+            (second.start, second.end)
+        };
+        assert_eq!(solved(10.0, json!({ "start_after": 0.3 })), (3.0, 13.0));
+        // Short: held back to end with the cut, plus the lag.
+        assert_eq!(
+            solved(2.0, json!({ "start_after": 0.0, "finish_after": 0.5 })),
+            (8.5, 10.5)
+        );
+
+        // check_jobshop reads it: ending before the cut is a precedence break.
+        let checked: super::JobShopCheckInput = serde_json::from_value(json!({
+            "problem": problem(2.0, json!({ "start_after": 0.0 })),
+            "solution": { "schedule": [
+                { "job_id": "J1", "operation": 1, "machine": "M1", "start": 0.0, "end": 10.0 },
+                { "job_id": "J1", "operation": 2, "machine": "M2", "start": 0.0, "end": 2.0 }
+            ] }
+        }))
+        .expect("valid shape");
+        let report = serde_json::to_value(super::check_jobshop_input(&checked).expect("checked"))
+            .expect("serializes");
+        assert_eq!(
+            report["violations"][0]["code"],
+            json!("precedence_violation"),
+            "{report}"
+        );
+
+        let refused = |input: serde_json::Value| {
+            let input: super::JobShopInput = serde_json::from_value(input).expect("valid shape");
+            super::jobshop(&input).expect_err("refused").fields
+        };
+        let share = refused(problem(1.0, json!({ "start_after": 1.5 })));
+        assert_eq!(
+            (
+                &share["code"],
+                &share["parameter"],
+                &share["activity"],
+                &share["max"]
+            ),
+            (
+                &json!("parameter_out_of_range"),
+                &json!("overlap.start_after"),
+                &json!("J1_2"),
+                &json!(1.0)
+            )
+        );
+        let lag = refused(problem(
+            1.0,
+            json!({ "start_after": 0.5, "finish_after": -1.0 }),
+        ));
+        assert_eq!(
+            (&lag["code"], &lag["parameter"], &lag["got"]),
+            (
+                &json!("parameter_out_of_range"),
+                &json!("overlap.finish_after"),
+                &json!(-1.0)
+            )
+        );
+        let first = refused(json!({
+            "jobs": [{ "id": "J1", "operations": [
+                { "machine": "M1", "processing_time": 1.0, "overlap": { "start_after": 0.5 } }
+            ] }]
+        }));
+        assert_eq!(
+            (&first["code"], &first["parameter"], &first["activity"]),
+            (&json!("invalid_option"), &json!("overlap"), &json!("J1_1"))
+        );
+        assert_rejects_unknown::<super::JobShopOverlap>(json!({
+            "start_after": 0.5, "transfer_batch_size": 10
+        }));
     }
 
     #[test]
