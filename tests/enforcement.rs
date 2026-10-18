@@ -574,3 +574,81 @@ proptest! {
         }
     }
 }
+
+/// Tasks of one to three steps, each on one or two of three machines (one
+/// with a break, one moving work on), some split, some overlapping the step
+/// before, some resumable.
+fn arb_split() -> impl Strategy<Value = (Vec<Task>, Vec<Resource>)> {
+    let step = (
+        100..2_000i64,
+        0..3usize,
+        any::<bool>(),
+        prop::option::of((2..5i32, 0..300i64, 0..100i64)),
+        prop::option::of((0.0..=1.0f64, 0..300i64)),
+        any::<bool>(),
+    );
+    let tasks = prop::collection::vec(prop::collection::vec(step, 1..=3usize), 1..=4usize);
+    tasks.prop_map(|specs| {
+        let resources = vec![
+            Resource::new("M0", "Machine").with_transport_to("M1", 150),
+            Resource::new("M1", "Machine").with_calendar(
+                Calendar::new("c")
+                    .with_window(0, 3_000)
+                    .with_window(3_500, 100_000),
+            ),
+            Resource::new("M2", "Machine"),
+        ];
+        let tasks = specs
+            .into_iter()
+            .enumerate()
+            .map(|(i, steps)| {
+                let tid = format!("J{i}");
+                let mut task = Task::new(&tid).with_priority(i as i32);
+                for (k, (ms, machine, two, split, overlap, resumable)) in
+                    steps.into_iter().enumerate()
+                {
+                    let mut machines = vec![format!("M{machine}")];
+                    if two {
+                        machines.push(format!("M{}", (machine + 1) % 3));
+                    }
+                    let mut act = Activity::new(format!("{tid}_O{k}"), &tid, k as i32)
+                        .with_process_time(ms)
+                        .with_requirement(
+                            ResourceRequirement::new("Machine").with_candidates(machines),
+                        );
+                    if let Some((parts, min, overhead)) = split {
+                        act = act.with_split(
+                            Split::new(parts)
+                                .with_min_part(min)
+                                .with_part_overhead(overhead),
+                        );
+                    }
+                    if let (Some((share, lag)), true) = (overlap, k > 0) {
+                        act = act.with_overlap(Overlap::new(share).with_finish_after(lag));
+                    }
+                    if resumable {
+                        act = act.resumable();
+                    }
+                    task = task.with_activity(act);
+                }
+                task
+            })
+            .collect::<Vec<_>>();
+        (tasks, resources)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+    #[test]
+    fn split_steps_are_placed_in_parts_the_check_accepts((tasks, resources) in arb_split()) {
+        let s = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+        prop_assert!(s.violations.is_empty(), "violations: {:?}", s.violations);
+        // Every step is placed, whole or in parts.
+        for task in &tasks {
+            for activity in &task.activities {
+                prop_assert!(!s.assignments_for_activity_all(&activity.id).is_empty());
+            }
+        }
+    }
+}

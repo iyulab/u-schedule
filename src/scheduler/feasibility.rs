@@ -731,20 +731,22 @@ fn check_precedence(
     res_by_id: &HashMap<&str, &Resource>,
     out: &mut Vec<Violation>,
 ) {
-    let mut push = |before: &str, after: &str, delay: i64| {
-        if let (Some((_, before_end)), Some((after_start, _))) = (
+    // `after` starts no earlier than `delay` after `before` ends.
+    let end_to_start = |before: &str, after: &str, delay: i64| -> Option<Violation> {
+        let (Some((_, before_end)), Some((after_start, _))) = (
             activity_span(schedule, before),
             activity_span(schedule, after),
-        ) {
-            if after_start < before_end + delay {
-                out.push(Violation::precedence_violation(
-                    after,
-                    format!(
-                        "'{after}' starts at {after_start} before '{before}' end {before_end} + delay {delay}"
-                    ),
-                ));
-            }
-        }
+        ) else {
+            return None;
+        };
+        (after_start < before_end + delay).then(|| {
+            Violation::precedence_violation(
+                after,
+                format!(
+                    "'{after}' starts at {after_start} before '{before}' end {before_end} + delay {delay}"
+                ),
+            )
+        })
     };
     let runs_on = |activity: &str| -> Vec<&str> {
         schedule
@@ -753,25 +755,93 @@ fn check_precedence(
             .map(|a| a.resource_id.as_str())
             .collect()
     };
-    let mut overlapped = Vec::new();
+    // The pieces of an activity (it whole, or each of its parts): when each
+    // starts and the resources it runs on. Each gets its own share of the
+    // work, which moves to its resources only.
+    let pieces_of = |activity: &str| -> Vec<(i64, Vec<&str>)> {
+        let mut by_part: BTreeMap<Option<i32>, (i64, Vec<&str>)> = BTreeMap::new();
+        for a in schedule.assignments_for_activity_all(activity) {
+            let piece = by_part
+                .entry(a.part.map(|p| p.index))
+                .or_insert((a.start_ms, Vec::new()));
+            piece.0 = piece.0.min(a.start_ms);
+            piece.1.push(a.resource_id.as_str());
+        }
+        if by_part.is_empty() {
+            // Time only: it moves nowhere.
+            return activity_span(schedule, activity)
+                .map(|(start, _)| (start, Vec::new()))
+                .into_iter()
+                .collect();
+        }
+        by_part.into_values().collect()
+    };
+    let transport = |from: &[&str], to: &[&str]| -> i64 {
+        transport_between(|id| res_by_id.get(id).copied(), from.iter().copied(), to)
+    };
     for task in input.tasks {
         let mut ordered: Vec<&Activity> = task.activities.iter().collect();
         ordered.sort_by_key(|a| a.sequence);
         for pair in ordered.windows(2) {
-            // The work moves from where one ran to where the next runs.
-            let transport = transport_between(
-                |id| res_by_id.get(id).copied(),
-                runs_on(&pair[0].id),
-                &runs_on(&pair[1].id),
-            );
-            match &pair[1].overlap {
-                None => push(&pair[0].id, &pair[1].id, transport),
-                Some(overlap) => overlapped.push((pair[0], pair[1], overlap, transport)),
+            let (before, after) = (pair[0], pair[1]);
+            let Some(previous) = activity_span(schedule, &before.id) else {
+                continue;
+            };
+            let from = runs_on(&before.id);
+            let pieces = pieces_of(&after.id);
+            // Each piece starts no earlier than the work reaches it: when the
+            // step before ends — or, overlapping it, once its share is done —
+            // plus the move from where that one ran to where the piece runs.
+            let after_previous = match &after.overlap {
+                None => previous.1,
+                Some(overlap) => overlap.earliest_start(previous),
+            };
+            if let Some((start, moved)) = pieces
+                .iter()
+                .map(|(start, to)| (*start, transport(&from, to)))
+                .find(|&(start, moved)| start < after_previous + moved)
+            {
+                let bound = match &after.overlap {
+                    None => format!("'{}' end {}", before.id, previous.1),
+                    Some(overlap) => format!(
+                        "{} of '{}' ({}..{})",
+                        overlap.start_after, before.id, previous.0, previous.1
+                    ),
+                };
+                out.push(Violation::precedence_violation(
+                    &after.id,
+                    format!(
+                        "'{}' starts at {start}, before {}: {bound} + transport {moved}",
+                        after.id,
+                        after_previous + moved
+                    ),
+                ));
+            }
+            // Overlapping: it ends no earlier than the step before, plus the
+            // lag and the move to where it runs.
+            if let (Some(overlap), Some((_, end))) =
+                (&after.overlap, activity_span(schedule, &after.id))
+            {
+                let to: Vec<&str> = pieces
+                    .iter()
+                    .flat_map(|(_, to)| to.iter().copied())
+                    .collect();
+                let moved = transport(&from, &to);
+                let earliest_end = overlap.earliest_end(previous.1) + moved;
+                if end < earliest_end {
+                    out.push(Violation::precedence_violation(
+                        &after.id,
+                        format!(
+                            "'{}' ends at {end}, before {earliest_end}: '{}' end {} + lag {} + transport {moved}",
+                            after.id, before.id, previous.1, overlap.finish_after_ms
+                        ),
+                    ));
+                }
             }
         }
         for activity in &task.activities {
             for pred in &activity.predecessors {
-                push(pred, &activity.id, 0);
+                out.extend(end_to_start(pred, &activity.id, 0));
             }
         }
     }
@@ -782,37 +852,7 @@ fn check_precedence(
             min_delay_ms,
         } = c
         {
-            push(before, after, *min_delay_ms);
-        }
-    }
-    // A step that overlaps the one before: two bounds instead of end-to-start
-    // (`Overlap`), each on top of the transport between them.
-    for (before, after, overlap, transport) in overlapped {
-        let (Some(previous), Some((start, end))) = (
-            activity_span(schedule, &before.id),
-            activity_span(schedule, &after.id),
-        ) else {
-            continue;
-        };
-        let earliest_start = overlap.earliest_start(previous) + transport;
-        if start < earliest_start {
-            out.push(Violation::precedence_violation(
-                &after.id,
-                format!(
-                    "'{}' starts at {start}, before {earliest_start}: {} of '{}' ({}..{}) + transport {transport}",
-                    after.id, overlap.start_after, before.id, previous.0, previous.1
-                ),
-            ));
-        }
-        let earliest_end = overlap.earliest_end(previous.1) + transport;
-        if end < earliest_end {
-            out.push(Violation::precedence_violation(
-                &after.id,
-                format!(
-                    "'{}' ends at {end}, before {earliest_end}: '{}' end {} + lag {} + transport {transport}",
-                    after.id, before.id, previous.1, overlap.finish_after_ms
-                ),
-            ));
+            out.extend(end_to_start(before, after, *min_delay_ms));
         }
     }
 }

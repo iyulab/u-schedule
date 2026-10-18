@@ -47,7 +47,7 @@ use super::timeline::ResourceTimeline;
 use crate::dispatching::policy::SharedPolicy;
 use crate::dispatching::{rules, Decision, RuleEngine, RulePolicy, SchedulingContext};
 use crate::models::{
-    transport_between, Activity, Assignment, Resource, Schedule, Task, TimeOnlySpan,
+    transport_between, Activity, Assignment, Part, Resource, Schedule, Task, TimeOnlySpan,
     TransitionMatrixCollection,
 };
 use crate::Problem;
@@ -506,24 +506,36 @@ impl SimpleScheduler {
             let (i, placement) = offers.swap_remove(k);
             let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
 
-            for (resource_id, setup_ms, usage) in &placement.selections {
-                let tl = timelines
-                    .get_mut(resource_id)
-                    .expect("selection references known resource");
-                tl.book(placement.start_ms, placement.end_ms, *usage);
-                let companion = placement.companions.contains(resource_id);
-                schedule.add_assignment(
-                    Assignment::new(
+            // The activity whole, or each of its parts.
+            let pieces: Vec<(Option<Part>, &Placement)> = if placement.parts.is_empty() {
+                vec![(None, &placement)]
+            } else {
+                placement
+                    .parts
+                    .iter()
+                    .map(|(p, at)| (Some(*p), at))
+                    .collect()
+            };
+            for (part, piece) in pieces {
+                for (resource_id, setup_ms, usage) in &piece.selections {
+                    let tl = timelines
+                        .get_mut(resource_id)
+                        .expect("selection references known resource");
+                    tl.book(piece.start_ms, piece.end_ms, *usage);
+                    let companion = piece.companions.contains(resource_id);
+                    let mut assignment = Assignment::new(
                         &activity.id,
                         &task.id,
                         resource_id,
-                        placement.start_ms,
-                        placement.end_ms,
+                        piece.start_ms,
+                        piece.end_ms,
                     )
-                    .with_setup(*setup_ms),
-                );
-                if !companion && self.transition_matrices.has_matrix(resource_id) {
-                    last_category.insert(resource_id.clone(), task.category.clone());
+                    .with_setup(*setup_ms);
+                    assignment.part = part;
+                    schedule.add_assignment(assignment);
+                    if !companion && self.transition_matrices.has_matrix(resource_id) {
+                        last_category.insert(resource_id.clone(), task.category.clone());
+                    }
                 }
             }
             // The offers that read a resource just booked are made again.
@@ -604,7 +616,7 @@ impl SimpleScheduler {
         finish_floor: Option<i64>,
     ) -> Option<Placement> {
         let place = |ready: i64| {
-            self.place_activity(
+            self.place_pieces(
                 activity,
                 task,
                 timelines,
@@ -653,6 +665,138 @@ impl SimpleScheduler {
             }
         }
         Some(best)
+    }
+
+    /// `activity` placed whole, or split into parts
+    /// ([`Activity::split`]) — whichever ends first, the fewer parts on a
+    /// tie. For each number of parts `k` it tries the work in equal parts,
+    /// each part going where it fits first with the parts before it booked
+    /// (so the next part takes another resource while one is busy), and then
+    /// the work divided so the parts end together, from when each part could
+    /// start and how fast it runs there — a resource free later gets less
+    /// (Xing & Zhang 2000, splitting on parallel machines).
+    #[allow(clippy::too_many_arguments)]
+    fn place_pieces(
+        &self,
+        activity: &Activity,
+        task: &Task,
+        timelines: &HashMap<String, ResourceTimeline>,
+        own: Option<&ResourceTimeline>,
+        last_category: &HashMap<String, String>,
+        resources: &[Resource],
+        ready: i64,
+        came_from: &[String],
+    ) -> Option<Placement> {
+        let whole = self.place_activity(
+            activity,
+            task,
+            timelines,
+            own,
+            last_category,
+            resources,
+            ready,
+            came_from,
+        );
+        let work = activity.duration.process_ms;
+        let Some(split) = activity.split.filter(|s| s.max_parts > 1 && work > 1) else {
+            return whole;
+        };
+        let most = match split.min_part_ms {
+            0 => i64::from(split.max_parts),
+            min => (work / min).min(i64::from(split.max_parts)),
+        }
+        .min(work);
+        let mut best = whole;
+        for k in 2..=most {
+            let equal: Vec<i64> = (0..k).map(|i| work / k + i64::from(i < work % k)).collect();
+            let place = |works: &[i64]| {
+                self.place_parts(
+                    activity,
+                    task,
+                    timelines,
+                    own,
+                    last_category,
+                    resources,
+                    ready,
+                    came_from,
+                    works,
+                )
+            };
+            let Some(even) = place(&equal) else {
+                continue;
+            };
+            let balanced = balanced_works(activity, &even, work, split.min_part_ms)
+                .and_then(|works| place(&works));
+            for tried in std::iter::once(even).chain(balanced) {
+                if best.as_ref().is_none_or(|b| tried.end_ms < b.end_ms) {
+                    best = Some(tried);
+                }
+            }
+        }
+        best
+    }
+
+    /// `activity` as parts doing `works` of its processing, placed one
+    /// after another, each with the ones before it booked. `None` when a
+    /// part cannot be placed.
+    #[allow(clippy::too_many_arguments)]
+    fn place_parts(
+        &self,
+        activity: &Activity,
+        task: &Task,
+        timelines: &HashMap<String, ResourceTimeline>,
+        own: Option<&ResourceTimeline>,
+        last_category: &HashMap<String, String>,
+        resources: &[Resource],
+        ready: i64,
+        came_from: &[String],
+        works: &[i64],
+    ) -> Option<Placement> {
+        let mut timelines = timelines.clone();
+        let mut last_category = last_category.clone();
+        let mut parts: Vec<(Part, Placement)> = Vec::with_capacity(works.len());
+        for (index, &work_ms) in works.iter().enumerate() {
+            let part = Part {
+                index: i32::try_from(index).expect("parts are at most max_parts, an i32"),
+                work_ms,
+            };
+            let piece = activity.part(part);
+            let at = self.place_activity(
+                &piece,
+                task,
+                &timelines,
+                own,
+                &last_category,
+                resources,
+                ready,
+                came_from,
+            )?;
+            for (rid, _, usage) in &at.selections {
+                timelines
+                    .get_mut(rid)
+                    .expect("selection references known resource")
+                    .book(at.start_ms, at.end_ms, *usage);
+                if !at.companions.contains(rid) && self.transition_matrices.has_matrix(rid) {
+                    last_category.insert(rid.clone(), task.category.clone());
+                }
+            }
+            parts.push((part, at));
+        }
+        let start_ms = parts.iter().map(|(_, at)| at.start_ms).min()?;
+        let end_ms = parts.iter().map(|(_, at)| at.end_ms).max()?;
+        let mut selections: Vec<(String, i64, i32)> = Vec::new();
+        let mut companions: Vec<String> = Vec::new();
+        for (_, at) in &parts {
+            selections.extend(at.selections.iter().cloned());
+            companions.extend(at.companions.iter().cloned());
+        }
+        Some(Placement {
+            start_ms,
+            end_ms,
+            selections,
+            companions,
+            parts,
+        })
     }
 
     /// Finds the earliest common start for an activity across all its
@@ -793,6 +937,7 @@ impl SimpleScheduler {
                     end_ms: t + d,
                     selections,
                     companions,
+                    parts: Vec::new(),
                 });
             }
             t = t_next;
@@ -852,6 +997,7 @@ impl SimpleScheduler {
                     end_ms: end,
                     selections: selections.clone(),
                     companions: companions.clone(),
+                    parts: Vec::new(),
                 })
         })
     }
@@ -1020,6 +1166,51 @@ struct Placement {
     selections: Vec<(String, i64, i32)>, // (resource_id, setup_ms, usage) — companions included
     /// The selections held only as companions of another.
     companions: Vec<String>,
+    /// The parts of a split activity, each placed; empty when it runs
+    /// whole. Then the span and selections above are the parts' together.
+    parts: Vec<(Part, Placement)>,
+}
+
+/// The work of `trial`'s parts divided again so they end together: each part
+/// is ready when its setup is done on the resource it took (`r`) and does a
+/// ms of work in `c` ms there, so all end at `E` with `Σ (E − r) / c = work`.
+/// `None` when a part would get less than `min_part_ms` (or nothing) — that
+/// many parts is too many to end together — or when nothing would change.
+fn balanced_works(
+    activity: &Activity,
+    trial: &Placement,
+    work: i64,
+    min_part_ms: i64,
+) -> Option<Vec<i64>> {
+    let mut ready_rate: Vec<(f64, f64)> = Vec::with_capacity(trial.parts.len());
+    for (part, at) in &trial.parts {
+        let runs_on = at
+            .selections
+            .iter()
+            .map(|(rid, _, _)| rid.as_str())
+            .filter(|rid| !at.companions.iter().any(|c| c == rid));
+        let process = activity.part(*part).duration_on(runs_on).process_ms;
+        if part.work_ms <= 0 || process <= 0 {
+            return None;
+        }
+        let ready = (at.end_ms - process) as f64;
+        ready_rate.push((ready, process as f64 / part.work_ms as f64));
+    }
+    let speed: f64 = ready_rate.iter().map(|&(_, c)| 1.0 / c).sum();
+    let end = (work as f64 + ready_rate.iter().map(|&(r, c)| r / c).sum::<f64>()) / speed;
+    let mut works: Vec<i64> = ready_rate
+        .iter()
+        .map(|&(r, c)| ((end - r) / c).round() as i64)
+        .collect();
+    // Whole ms that add up to the work: the rounding goes to the largest.
+    let largest = (0..works.len()).max_by_key(|&i| works[i])?;
+    works[largest] += work - works.iter().sum::<i64>();
+    let floor = min_part_ms.max(1);
+    let changed = works
+        .iter()
+        .zip(&trial.parts)
+        .any(|(w, (p, _))| *w != p.work_ms);
+    (works.iter().all(|&w| w >= floor) && changed).then_some(works)
 }
 
 /// The companions `resource_id` declares ([`Resource::companions`]).
@@ -2315,6 +2506,150 @@ mod tests {
         let bend = s.assignment_for_activity("bend").expect("bend");
         assert_eq!((bend.start_ms, bend.end_ms), (701, 1_001));
         assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    /// A 1 000 ms cut on any machine, split by `split`.
+    fn split_cut(split: crate::models::Split) -> Task {
+        Task::new("J").with_activity(
+            Activity::new("cut", "J", 1)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("Machine"))
+                .with_split(split),
+        )
+    }
+
+    /// Each part of `activity` as (index, work, resource, start, end), by index.
+    fn parts_of(s: &Schedule, activity: &str) -> Vec<(i32, i64, String, i64, i64)> {
+        let mut parts: Vec<_> = s
+            .assignments_for_activity_all(activity)
+            .iter()
+            .map(|a| {
+                let p = a.part.expect("a part");
+                (
+                    p.index,
+                    p.work_ms,
+                    a.resource_id.clone(),
+                    a.start_ms,
+                    a.end_ms,
+                )
+            })
+            .collect();
+        parts.sort();
+        parts
+    }
+
+    #[test]
+    fn a_split_activity_runs_its_parts_side_by_side_on_idle_machines() {
+        use crate::models::Split;
+        let machines = vec![
+            make_resource("M1"),
+            make_resource("M2"),
+            make_resource("M3"),
+        ];
+        let s = SimpleScheduler::new().schedule(&valid(&[split_cut(Split::new(2))], &machines), 0);
+        assert_eq!(
+            parts_of(&s, "cut"),
+            [(0, 500, "M1".into(), 0, 500), (1, 500, "M2".into(), 0, 500)]
+        );
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        // Three parts when allowed.
+        let s = SimpleScheduler::new().schedule(&valid(&[split_cut(Split::new(5))], &machines), 0);
+        assert_eq!(s.makespan_ms(), 334);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn the_parts_end_together_when_a_part_takes_longer() {
+        use crate::models::Split;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        // The second part's overhead: 550 + 450 + 100 end together at 550.
+        let s = SimpleScheduler::new().schedule(
+            &valid(
+                &[split_cut(Split::new(2).with_part_overhead(100))],
+                &machines,
+            ),
+            0,
+        );
+        assert_eq!(
+            parts_of(&s, "cut"),
+            [(0, 550, "M1".into(), 0, 550), (1, 450, "M2".into(), 0, 550)]
+        );
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn a_machine_free_later_gets_less_of_the_work() {
+        use crate::models::Split;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        // M2 is busy until 400: it takes 300, M1 700, both ending at 700.
+        let busy = on("other", "M2", 400).with_priority(10);
+        let s = SimpleScheduler::new()
+            .schedule(&valid(&[busy, split_cut(Split::new(2))], &machines), 0);
+        assert_eq!(
+            parts_of(&s, "cut"),
+            [
+                (0, 700, "M1".into(), 0, 700),
+                (1, 300, "M2".into(), 400, 700)
+            ]
+        );
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn a_faster_machine_gets_more_of_the_work() {
+        use crate::models::Split;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        let mut task = split_cut(Split::new(2));
+        task.activities[0] = task.activities[0].clone().with_speed_on("M2", 3.0);
+        let s = SimpleScheduler::new().schedule(&valid(&[task], &machines), 0);
+        // 1 000 ms of work at speeds 1 and 3 ends at 250: 250 on M1, 750 on M2.
+        assert_eq!(
+            parts_of(&s, "cut"),
+            [(0, 750, "M2".into(), 0, 250), (1, 250, "M1".into(), 0, 250)]
+        );
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn it_runs_whole_when_splitting_does_not_end_earlier() {
+        use crate::models::Split;
+        // One machine: parts would run one after another.
+        let s = SimpleScheduler::new().schedule(
+            &valid(&[split_cut(Split::new(3))], &[make_resource("M1")]),
+            0,
+        );
+        let cut = s.assignment_for_activity("cut").expect("placed");
+        assert_eq!((cut.part, cut.start_ms, cut.end_ms), (None, 0, 1_000));
+        // Parts of at least 600 ms: 1 000 ms cannot be two.
+        let s = SimpleScheduler::new().schedule(
+            &valid(
+                &[split_cut(Split::new(3).with_min_part(600))],
+                &[make_resource("M1"), make_resource("M2")],
+            ),
+            0,
+        );
+        assert_eq!(s.assignment_for_activity("cut").expect("placed").part, None);
+    }
+
+    #[test]
+    fn the_step_after_a_split_one_waits_for_its_last_part() {
+        use crate::models::{Overlap, Split};
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        let mut task = split_cut(Split::new(2)).with_activity(
+            Activity::new("bend", "J", 2)
+                .with_process_time(1_000)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec!["M1".into()]),
+                ),
+        );
+        let s = SimpleScheduler::new().schedule(&valid(&[task.clone()], &machines), 0);
+        assert_eq!(span_of(&s, "bend"), (500, 1_500));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        // Overlapping a split step: half of its 0..500 span.
+        task.activities[1] = task.activities[1].clone().with_overlap(Overlap::new(0.5));
+        let s = SimpleScheduler::new().schedule(&valid(&[task], &machines), 0);
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+        assert!(span_of(&s, "bend").0 <= 500);
     }
 
     #[test]

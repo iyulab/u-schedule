@@ -46,7 +46,17 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   when there are several, none beside a whole placement. `Problem::new`
   refuses `max_parts` below 1 and a negative `min_part_ms` or
   `part_overhead_ms` (`parameter_out_of_range`). Splitting is allowed, not
-  required: a whole placement still passes.
+  required: a whole placement still passes. `SimpleScheduler` (and
+  `DispatchSearch`) split: for each number of parts it tries the work in
+  equal parts -- each going where it fits first, the parts before it booked
+  -- and divided so the parts end together (a resource free later, or
+  slower, gets less), and keeps whichever placement, whole or split, ends
+  first (the fewer parts on a tie). The genetic algorithm and the CP model
+  place every activity whole.
+- The feasibility check judges the start of each part of the next step on
+  its own: a part waits for the work to reach its resources only, not the
+  longest move to any of the step's resources (one piece for a whole
+  activity, as before).
 - `solve_jobshop` and `check_jobshop` (WebAssembly): an operation's
   `overlap: { start_after, finish_after? }` (seconds) -- it starts once
   `start_after` of the job's previous operation has passed and ends no
