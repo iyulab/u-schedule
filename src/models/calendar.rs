@@ -198,24 +198,62 @@ fn joint_available(calendars: &[&Calendar], start_ms: i64) -> IntervalSet<i64> {
 /// # Complexity
 /// O(W log W) over the calendars' windows and blocked periods.
 pub fn joint_work_end(calendars: &[&Calendar], start_ms: i64, work_ms: i64) -> Option<i64> {
-    let set = joint_available(calendars, start_ms);
-    let mut pieces = set.iter().peekable();
-    let &(first_start, _) = pieces.peek()?;
-    if first_start != start_ms {
-        return None;
-    }
-    if work_ms <= 0 {
-        return Some(start_ms);
-    }
-    let mut left = work_ms;
-    for (s, e) in pieces.by_ref() {
-        let len = e - s;
-        if len >= left {
-            return Some(s + left);
+    JointTime::new(calendars, start_ms).work_end(start_ms, work_ms)
+}
+
+/// The joint working time of some calendars from an instant on, laid out
+/// once so that many starts can be tried against it —
+/// [`joint_work_end`] for each start would lay it out again every time.
+#[derive(Debug, Clone)]
+pub(crate) struct JointTime {
+    /// The joint working stretches, ordered and disjoint.
+    pieces: Vec<(i64, i64)>,
+}
+
+impl JointTime {
+    /// The joint working time of `calendars` from `from_ms` on.
+    pub(crate) fn new(calendars: &[&Calendar], from_ms: i64) -> Self {
+        Self {
+            pieces: joint_available(calendars, from_ms).iter().collect(),
         }
-        left -= len;
     }
-    None
+
+    /// Whether the calendars never work together from the start on.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    /// Where a stretch starts at or after `from_ms`, in order — the instants
+    /// work can first start in.
+    pub(crate) fn starts_from(&self, from_ms: i64) -> impl Iterator<Item = i64> + '_ {
+        self.pieces
+            .iter()
+            .filter(move |&&(_, e)| e > from_ms)
+            .map(move |&(s, _)| s.max(from_ms))
+    }
+
+    /// [`joint_work_end`] for `start_ms`, which must not be before the
+    /// instant this was laid out from.
+    pub(crate) fn work_end(&self, start_ms: i64, work_ms: i64) -> Option<i64> {
+        let at = self.pieces.partition_point(|&(_, e)| e <= start_ms);
+        let &(s, _) = self.pieces.get(at)?;
+        if s > start_ms {
+            return None; // in a pause
+        }
+        if work_ms <= 0 {
+            return Some(start_ms);
+        }
+        let mut left = work_ms;
+        for (k, &(piece_start, e)) in self.pieces[at..].iter().enumerate() {
+            let s = if k == 0 { start_ms } else { piece_start };
+            let len = e - s;
+            if len >= left {
+                return Some(s + left);
+            }
+            left -= len;
+        }
+        None
+    }
 }
 
 /// Joint working time of `calendars` within `[start_ms, end_ms)`.

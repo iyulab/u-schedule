@@ -692,16 +692,22 @@ impl SimpleScheduler {
             .chain(own)
             .filter_map(ResourceTimeline::calendar)
             .collect();
+        // Laid out once: every candidate start is tried against it.
+        let joint = crate::models::JointTime::new(&calendars, t);
+        if joint.is_empty() {
+            return None; // they never work together
+        }
         let mut candidates: Vec<i64> = selected
             .iter()
             .map(|(tl, _)| *tl)
             .chain(own)
             .flat_map(|tl| tl.start_candidates(t))
+            .chain(joint.starts_from(t))
             .collect();
         candidates.sort_unstable();
         candidates.dedup();
         candidates.into_iter().find_map(|start| {
-            let end = crate::models::joint_work_end(&calendars, start, work_ms)?;
+            let end = joint.work_end(start, work_ms)?;
             selected
                 .iter()
                 .all(|(tl, usage)| tl.is_free(start, end, *usage))

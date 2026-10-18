@@ -89,8 +89,9 @@ impl ResourceTimeline {
                 .map(|t| (t, t + work_ms));
         }
         let calendars: Vec<&Calendar> = self.calendar.iter().collect();
+        let joint = crate::models::JointTime::new(&calendars, from_ms);
         self.start_candidates(from_ms).into_iter().find_map(|t| {
-            let end = crate::models::joint_work_end(&calendars, t, work_ms)?;
+            let end = joint.work_end(t, work_ms)?;
             self.capacity_ok(t, end, units).then_some((t, end))
         })
     }

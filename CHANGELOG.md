@@ -35,6 +35,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   time), not before its release, in order with its task — and reports one
   with no span as a `TimeWindowViolation`. The GA decoders and the CP builder
   still leave such an activity out, so their schedules now say so.
+- A resumable activity is placed against the joint working time of its
+  resources (and its own calendar) laid out once, not once per candidate
+  start. With calendars a year long that never work together, finding that
+  out used to take time in the number of candidate starts squared; it is now
+  one pass.
 
 ## [0.27.0] - 2026-10-18
 
