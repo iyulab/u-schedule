@@ -398,6 +398,74 @@ let schedule = SimpleScheduler::new().schedule(&problem, 0);
 assert_eq!(schedule.assignment_for_activity("J1-2").unwrap().start_ms, 6_000);
 ```
 
+### Overlapping steps
+
+A task's steps run in `sequence` order, each after the one before ends —
+unless it overlaps it, as when the work moves on in transfer batches:
+`with_overlap(Overlap::new(0.25))` lets a step start once a quarter of the
+previous step's scheduled span has passed, and it still ends no earlier than
+the previous step (plus `with_finish_after(lag_ms)`); a transport time adds to
+both bounds. A short step is held back so that it does not finish first. Every
+scheduler reads it — the CP builder as an end-to-start delay that may be
+negative — and the feasibility check reports either bound broken as a
+precedence violation.
+
+```rust
+use u_schedule::models::{Activity, Overlap, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+let on = |id: &str, step: i32, ms: i64, machine: &str| {
+    Activity::new(id, "J1", step)
+        .with_process_time(ms)
+        .with_requirement(ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]))
+};
+let problem = Problem::new(
+    vec![Task::new("J1")
+        .with_activity(on("cut", 0, 1_000, "M1"))
+        .with_activity(on("bend", 1, 1_000, "M2").with_overlap(Overlap::new(0.25)))],
+    vec![Resource::new("M1", "Machine"), Resource::new("M2", "Machine")],
+)
+.expect("valid input");
+let schedule = SimpleScheduler::new().schedule(&problem, 0);
+let bend = schedule.assignment_for_activity("bend").unwrap();
+assert_eq!((bend.start_ms, bend.end_ms), (250, 1_250));
+assert!(schedule.violations.is_empty());
+```
+
+### Splitting an activity into parts
+
+`with_split(Split::new(3))` lets an activity's processing be split into up to
+three parts that run apart — on several resources at once, or at different
+times (`with_min_part(ms)` bounds a part from below, `with_part_overhead(ms)`
+adds time to each part after the first). Each part is an assignment carrying
+its `Part { index, work_ms }`. `SimpleScheduler` splits when that ends the
+activity sooner: for each number of parts it tries equal parts and parts that
+end together (a resource free later, or slower, does less), and keeps the
+placement that ends first. Splitting is allowed, not required — the GA
+decoders and the CP builder place an activity whole, which the feasibility
+check accepts as well.
+
+```rust
+use u_schedule::models::{Activity, Resource, ResourceRequirement, Split, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+let cut = Activity::new("cut", "J1", 0)
+    .with_process_time(1_000)
+    .with_requirement(ResourceRequirement::new("Machine"))
+    .with_split(Split::new(2));
+let problem = Problem::new(
+    vec![Task::new("J1").with_activity(cut)],
+    vec![Resource::new("M1", "Machine"), Resource::new("M2", "Machine")],
+)
+.expect("valid input");
+let schedule = SimpleScheduler::new().schedule(&problem, 0);
+assert_eq!(schedule.assignments_for_activity_all("cut").len(), 2);
+assert_eq!(schedule.makespan_ms(), 500);
+assert!(schedule.violations.is_empty());
+```
+
 `SimpleScheduler` and the feasibility check read calendars, activity
 calendars, activities without resources and companions; the GA decoders and the CP
 builder do not, so on calendared resources their schedules are checked, not
