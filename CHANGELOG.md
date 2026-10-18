@@ -38,6 +38,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   resource for one activity at a time, as they did — their schedules stay
   within any capacity.
 
+- Rules chosen decision by decision: `SimpleScheduler::with_rule_policy`
+  takes a `RulePolicy` (any `Fn(&Decision) -> RuleEngine`) and asks it for
+  the engine at each conflict, given the `Decision` — every task, the ones
+  waiting, the ones competing and the `SchedulingContext`. A rule for the
+  start of the horizon and another once tasks run late, say, with the
+  conditions the caller's. It and `with_rule_engine` replace each other.
+
 ### Changed
 
 - **Breaking:** `Resource` has a `transport_ms` field, `ResourceRequirement` a

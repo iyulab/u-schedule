@@ -39,7 +39,8 @@
 use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
-use crate::dispatching::{rules, RuleEngine, SchedulingContext};
+use crate::dispatching::policy::SharedPolicy;
+use crate::dispatching::{rules, Decision, RuleEngine, RulePolicy, SchedulingContext};
 use crate::models::{
     transport_between, Activity, Assignment, Resource, Schedule, Task, TransitionMatrixCollection,
 };
@@ -129,8 +130,19 @@ impl ScheduleRequest {
 #[derive(Debug, Clone)]
 pub struct SimpleScheduler {
     transition_matrices: TransitionMatrixCollection,
-    rule_engine: Option<RuleEngine>,
+    rules: Rules,
     fixed: Vec<Assignment>,
+}
+
+/// What decides each conflict.
+#[derive(Debug, Clone)]
+enum Rules {
+    /// The higher `Task::priority`.
+    Priority,
+    /// One engine for every decision.
+    Engine(RuleEngine),
+    /// An engine chosen for each decision.
+    Policy(SharedPolicy),
 }
 
 impl SimpleScheduler {
@@ -138,7 +150,7 @@ impl SimpleScheduler {
     pub fn new() -> Self {
         Self {
             transition_matrices: TransitionMatrixCollection::new(),
-            rule_engine: None,
+            rules: Rules::Priority,
             fixed: Vec::new(),
         }
     }
@@ -152,8 +164,18 @@ impl SimpleScheduler {
     /// Sets the rule engine that decides each conflict.
     ///
     /// Without one, the higher `Task::priority` wins (ties: input order).
+    /// Replaces a [`with_rule_policy`](Self::with_rule_policy).
     pub fn with_rule_engine(mut self, engine: RuleEngine) -> Self {
-        self.rule_engine = Some(engine);
+        self.rules = Rules::Engine(engine);
+        self
+    }
+
+    /// Chooses the rule engine for each conflict from that decision's state
+    /// ([`RulePolicy`] — a rule for the start of the horizon and another
+    /// once tasks run late, say). Replaces a
+    /// [`with_rule_engine`](Self::with_rule_engine).
+    pub fn with_rule_policy(mut self, policy: impl RulePolicy + 'static) -> Self {
+        self.rules = Rules::Policy(SharedPolicy(std::sync::Arc::new(policy)));
         self
     }
 
@@ -273,14 +295,7 @@ impl SimpleScheduler {
             schedule.add_assignment(pin.clone());
         }
 
-        let by_priority;
-        let engine = match &self.rule_engine {
-            Some(engine) => engine,
-            None => {
-                by_priority = RuleEngine::new().with_rule(rules::Priority);
-                &by_priority
-            }
-        };
+        let by_priority = RuleEngine::new().with_rule(rules::Priority);
 
         // Per task: the next activity to place, and the earliest it may start.
         let mut cursor: Vec<usize> = vec![0; tasks.len()];
@@ -354,6 +369,21 @@ impl SimpleScheduler {
                 start_time_ms,
             );
             let candidates: Vec<usize> = conflict.iter().map(|&k| offers[k].0).collect();
+            let per_decision;
+            let engine = match &self.rules {
+                Rules::Priority => &by_priority,
+                Rules::Engine(engine) => engine,
+                Rules::Policy(policy) => {
+                    let waiting: Vec<usize> = offers.iter().map(|(i, _)| *i).collect();
+                    per_decision = policy.0.rules_for(&Decision {
+                        tasks,
+                        waiting: &waiting,
+                        competing: &candidates,
+                        context: &context,
+                    });
+                    &per_decision
+                }
+            };
             let chosen = engine
                 .best_of(tasks, &candidates, &context)
                 .expect("the conflict set is non-empty");
@@ -593,7 +623,7 @@ impl SimpleScheduler {
     pub fn schedule_request(&self, request: &ScheduleRequest) -> Schedule {
         let scheduler = Self {
             transition_matrices: request.transition_matrices.clone(),
-            rule_engine: self.rule_engine.clone(),
+            rules: self.rules.clone(),
             fixed: self.fixed.clone(),
         };
         let mut schedule = scheduler.schedule(&request.problem, request.start_time_ms);
@@ -1725,5 +1755,50 @@ mod tests {
         );
         assert!(s.assignment_for_activity("A-1").is_none());
         assert!(!s.violations.is_empty());
+    }
+
+    #[test]
+    fn a_rule_policy_chooses_the_rules_at_each_decision() {
+        // On one machine: the longest first at the start, the shortest after.
+        let tasks = [
+            on("A", "M1", 1_000),
+            on("B", "M1", 3_000),
+            on("C", "M1", 2_000),
+        ];
+        let problem = valid(&tasks, &machines(&["M1"]));
+        let s = SimpleScheduler::new()
+            .with_rule_policy(|d: &Decision<'_>| {
+                let engine = RuleEngine::new();
+                if d.context.current_time_ms == 0 {
+                    engine.with_rule(rules::Lpt)
+                } else {
+                    engine.with_rule(rules::Spt)
+                }
+            })
+            .schedule(&problem, 0);
+        assert_eq!(
+            [
+                start_of(&s, "B-1"),
+                start_of(&s, "A-1"),
+                start_of(&s, "C-1")
+            ],
+            [0, 3_000, 4_000]
+        );
+
+        // The decision names who waits and who competes.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        SimpleScheduler::new()
+            .with_rule_policy(move |d: &Decision<'_>| {
+                log.lock()
+                    .expect("not poisoned")
+                    .push((d.waiting.len(), d.competing.len()));
+                RuleEngine::new().with_rule(rules::Spt)
+            })
+            .schedule(&problem, 0);
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            [(3, 3), (2, 2), (1, 1)]
+        );
     }
 }

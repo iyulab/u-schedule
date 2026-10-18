@@ -139,6 +139,29 @@ assert!(schedule.is_valid());
 assert_eq!(schedule.makespan_ms(), 50_000); // the two jobs run back to back
 ```
 
+### Rules chosen decision by decision
+
+`SimpleScheduler::with_rule_policy` takes a `RulePolicy` — any
+`Fn(&Decision) -> RuleEngine` — and asks it for the rules at every conflict.
+The `Decision` carries the tasks, which of them wait and which compete now,
+and the `SchedulingContext` (the time, each resource's utilization, …), so a
+caller can dispatch by one rule early in the horizon and another once its
+tasks run late, without the scheduler knowing the conditions:
+
+```rust
+use u_schedule::dispatching::{rules, Decision, RuleEngine};
+use u_schedule::scheduler::SimpleScheduler;
+
+let scheduler = SimpleScheduler::new().with_rule_policy(|d: &Decision<'_>| {
+    let late = d.waiting.iter().any(|&i| {
+        d.tasks[i].deadline.is_some_and(|due| due < d.context.current_time_ms)
+    });
+    let engine = RuleEngine::new();
+    if late { engine.with_rule(rules::Edd) } else { engine.with_rule(rules::Spt) }
+});
+# let _ = scheduler;
+```
+
 ### Which resources fill a requirement
 
 A `ResourceRequirement` and a `Resource` share one type vocabulary — free-form

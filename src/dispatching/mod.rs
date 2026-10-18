@@ -24,10 +24,12 @@
 
 mod context;
 mod engine;
+pub(crate) mod policy;
 pub mod rules;
 
 pub use context::SchedulingContext;
 pub use engine::{EvaluationMode, RuleEngine, TieBreaker};
+pub use policy::{Decision, RulePolicy};
 
 use crate::models::Task;
 use std::fmt::Debug;
