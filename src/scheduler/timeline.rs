@@ -10,7 +10,11 @@
 //! Each candidate is checked with `Calendar::interval_fits` and the units
 //! booked at once against capacity. O((W+B+K)²) per query
 //! (W windows, B blocks, K bookings) — fine for the greedy scheduler's
-//! workloads; verified against brute-force in property tests.
+//! workloads; verified against brute-force in property tests. A resource of
+//! capacity 1 — the common case — answers in O(log K) whether an interval
+//! is free (bookings kept by start, with the latest end so far), and with no
+//! calendar finds the earliest gap in one pass over the bookings after
+//! `from`.
 //!
 //! # Reference
 //! Kolisch & Hartmann (1999), "Heuristic algorithms for solving the
@@ -26,8 +30,10 @@ pub struct ResourceTimeline {
     pub resource_id: String,
     capacity: i32,
     calendar: Option<Calendar>,
-    /// Each booking and the units it takes.
+    /// Each booking and the units it takes, by start.
     bookings: Vec<(TimeWindow, i32)>,
+    /// The latest end among `bookings[..=i]`.
+    latest_end_to: Vec<i64>,
 }
 
 impl ResourceTimeline {
@@ -38,6 +44,7 @@ impl ResourceTimeline {
             capacity: resource.capacity.max(1),
             calendar: resource.calendar.clone(),
             bookings: Vec::new(),
+            latest_end_to: Vec::new(),
         }
     }
 
@@ -59,6 +66,9 @@ impl ResourceTimeline {
         if units > self.capacity {
             return None; // never fits — no need to search
         }
+        if self.capacity == 1 && self.calendar.is_none() {
+            return Some(self.earliest_gap(from_ms, duration_ms));
+        }
         self.start_candidates(from_ms)
             .into_iter()
             .find(|&t| self.fits(t, duration_ms, units))
@@ -71,6 +81,12 @@ impl ResourceTimeline {
     pub fn earliest_resumable(&self, from_ms: i64, work_ms: i64, units: i32) -> Option<(i64, i64)> {
         if units > self.capacity {
             return None;
+        }
+        if self.calendar.is_none() {
+            // No pause: the work runs straight through.
+            return self
+                .earliest_fit(from_ms, work_ms, units)
+                .map(|t| (t, t + work_ms));
         }
         let calendars: Vec<&Calendar> = self.calendar.iter().collect();
         self.start_candidates(from_ms).into_iter().find_map(|t| {
@@ -109,8 +125,41 @@ impl ResourceTimeline {
     /// Records a booking of `units`. Does not itself validate feasibility —
     /// callers query `earliest_fit`/`fits` first.
     pub fn book(&mut self, start_ms: i64, end_ms: i64, units: i32) {
+        let at = self
+            .bookings
+            .partition_point(|(b, _)| b.start_ms <= start_ms);
         self.bookings
-            .push((TimeWindow::new(start_ms, end_ms), units));
+            .insert(at, (TimeWindow::new(start_ms, end_ms), units));
+        self.latest_end_to.truncate(at);
+        let mut latest = at
+            .checked_sub(1)
+            .map_or(i64::MIN, |i| self.latest_end_to[i]);
+        for (b, _) in &self.bookings[at..] {
+            latest = latest.max(b.end_ms);
+            self.latest_end_to.push(latest);
+        }
+    }
+
+    /// Whether a booking overlaps `[start_ms, end_ms)`.
+    fn overlapped(&self, start_ms: i64, end_ms: i64) -> bool {
+        let before_end = self.bookings.partition_point(|(b, _)| b.start_ms < end_ms);
+        before_end > 0 && self.latest_end_to[before_end - 1] > start_ms
+    }
+
+    /// The earliest start from `from_ms` of a gap `duration_ms` long, at
+    /// capacity 1 and with no calendar.
+    fn earliest_gap(&self, from_ms: i64, duration_ms: i64) -> i64 {
+        let first = self.bookings.partition_point(|(b, _)| b.start_ms < from_ms);
+        let mut t = first
+            .checked_sub(1)
+            .map_or(from_ms, |i| from_ms.max(self.latest_end_to[i]));
+        for (b, _) in &self.bookings[first..] {
+            if b.start_ms >= t + duration_ms {
+                break;
+            }
+            t = t.max(b.end_ms);
+        }
+        t
     }
 
     /// Booked unit-time: each booking's length times its units (a capacity-2
@@ -143,6 +192,9 @@ impl ResourceTimeline {
         let room = self.capacity - units;
         if room < 0 {
             return false;
+        }
+        if self.capacity == 1 {
+            return !self.overlapped(start_ms, end_ms);
         }
         if overlapping.iter().map(|(_, u)| u).sum::<i32>() <= room {
             return true;

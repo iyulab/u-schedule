@@ -307,9 +307,27 @@ impl SimpleScheduler {
         // work moves on from (`Resource::transport_ms`).
         let mut came_from: Vec<Vec<String>> = vec![Vec::new(); tasks.len()];
 
+        // The resources each activity may run on, by task and step (WINQ).
+        let eligible: Vec<Vec<Vec<&str>>> = tasks
+            .iter()
+            .map(|t| {
+                t.activities
+                    .iter()
+                    .map(|a| a.eligible_resources(resources))
+                    .collect()
+            })
+            .collect();
+        // Per task: its offer, kept until a booking can change it, and the
+        // resources whose booking can (`Self::read_by`).
+        let mut kept: Vec<Option<(Placement, Vec<&str>)>> = vec![None; tasks.len()];
+
         loop {
             let mut offers: Vec<(usize, Placement)> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
+                if let Some((placement, _)) = &kept[i] {
+                    offers.push((i, placement.clone()));
+                    continue;
+                }
                 while let Some(activity) = task.activities.get(cursor[i]) {
                     if let Some(pins) = fixed_by_activity.get(activity.id.as_str()) {
                         // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
@@ -333,6 +351,8 @@ impl SimpleScheduler {
                         &came_from[i],
                     ) {
                         Some(placement) => {
+                            let read = self.read_by(activity, &placement, resources);
+                            kept[i] = Some((placement.clone(), read));
                             offers.push((i, placement));
                             break;
                         }
@@ -359,7 +379,7 @@ impl SimpleScheduler {
                 .collect();
             let context = decision_context(
                 tasks,
-                resources,
+                &eligible,
                 &timelines,
                 &fixed_by_activity,
                 &cursor,
@@ -414,6 +434,16 @@ impl SimpleScheduler {
                     last_category.insert(resource_id.clone(), task.category.clone());
                 }
             }
+            // The offers that read a resource just booked are made again.
+            kept[i] = None;
+            for offer in kept.iter_mut() {
+                if offer.as_ref().is_some_and(|(_, read)| {
+                    read.iter()
+                        .any(|r| placement.selections.iter().any(|(s, _, _)| s == r))
+                }) {
+                    *offer = None;
+                }
+            }
             ready[i] = placement.end_ms;
             came_from[i] = placement
                 .selections
@@ -430,6 +460,35 @@ impl SimpleScheduler {
         };
         super::feasibility::annotate_schedule(&mut schedule, &input);
         schedule
+    }
+
+    /// The resources a booking on which can change `placement`, the offer of
+    /// `activity`: the ones it holds, and the candidates with a transition
+    /// matrix. A booking only takes time from a resource, so a candidate the
+    /// offer passed over can only get later — except that a matrix charges a
+    /// set-up from the category booked last, which a booking changes.
+    fn read_by<'r>(
+        &self,
+        activity: &'r Activity,
+        placement: &Placement,
+        resources: &'r [Resource],
+    ) -> Vec<&'r str> {
+        let mut read: Vec<&str> = Vec::new();
+        for r in activity
+            .resource_requirements
+            .iter()
+            .flat_map(|req| req.eligible(resources))
+        {
+            let held = placement.selections.iter().any(|(s, _, _)| s == &r.id);
+            if held || self.transition_matrices.has_matrix(&r.id) {
+                for id in std::iter::once(&r.id).chain(&r.companions) {
+                    if !read.contains(&id.as_str()) {
+                        read.push(id);
+                    }
+                }
+            }
+        }
+        read
     }
 
     /// Finds the earliest common start for an activity across all its
@@ -640,15 +699,16 @@ impl SimpleScheduler {
 
 /// The state a rule judges one decision on.
 ///
-/// Every task with an offer is waiting: its imminent activity, the work left
-/// on it, when it joined the queue, and how many other waiting tasks want a
-/// resource its next activity can use (WINQ). The average imminent operation
+/// Every task with an offer is waiting; for each one competing now: its
+/// imminent activity, the work left on it, when it joined the queue, and how
+/// many other waiting tasks want a resource its next activity can use
+/// (WINQ). The average imminent operation
 /// is over the conflict set (ATC's `p̄`). Utilization is booked time over the
 /// planned span so far, per unit of capacity (LPUL).
 #[allow(clippy::too_many_arguments)]
 fn decision_context(
     tasks: &[Task],
-    resources: &[Resource],
+    eligible: &[Vec<Vec<&str>>],
     timelines: &HashMap<String, ResourceTimeline>,
     fixed: &HashMap<&str, Vec<&Assignment>>,
     cursor: &[usize],
@@ -664,16 +724,14 @@ fn decision_context(
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
 
-    let wanted: Vec<(usize, Vec<&str>)> = offers
+    let wanted: Vec<(usize, &[&str])> = offers
         .iter()
-        .map(|&(i, _)| {
-            (
-                i,
-                tasks[i].activities[cursor[i]].eligible_resources(resources),
-            )
-        })
+        .map(|&(i, _)| (i, eligible[i][cursor[i]].as_slice()))
         .collect();
-    for &(i, _) in offers {
+    // The rules judge the competing tasks only, so their entries are the
+    // ones filled.
+    for &k in conflict {
+        let i = offers[k].0;
         let (task, c) = (&tasks[i], cursor[i]);
         let remaining: i64 = task.activities[c..]
             .iter()
@@ -681,9 +739,9 @@ fn decision_context(
             .sum();
         let next_queue = task.activities[c + 1..]
             .iter()
-            .find(|a| !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str()))
-            .map(|next| {
-                let usable = next.eligible_resources(resources);
+            .position(|a| !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str()))
+            .map(|n| {
+                let usable = &eligible[i][c + 1 + n];
                 wanted
                     .iter()
                     .filter(|(j, rs)| *j != i && rs.iter().any(|r| usable.contains(r)))
@@ -730,6 +788,7 @@ impl Default for SimpleScheduler {
 }
 
 /// A resolved activity placement: common interval plus per-resource setup.
+#[derive(Clone)]
 struct Placement {
     start_ms: i64,
     end_ms: i64,

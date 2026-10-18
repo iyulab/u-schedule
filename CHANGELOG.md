@@ -63,6 +63,16 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   unit-time (length × units).
 - `ResourceRequirement::quantity` is documented as what it always was: the
   number of different resources taken at once.
+- `SimpleScheduler` is faster, with the same schedules: a waiting task keeps
+  its offer until a booking on a resource it holds (or a candidate with a
+  transition matrix) can change it — a booking only makes a resource later —
+  and a capacity-1 resource answers in O(log K) whether an interval is free
+  and, without a calendar, finds its earliest gap in one pass. On Taillard
+  ta01/ta11/ta21 dispatching takes 4–8 ms where 0.26.0 took 13–32 ms; on a
+  1,000-operation request with 11 alternative machines per operation, 14.7 s
+  became 3.4 s (release build). The `SchedulingContext` it builds fills the
+  per-task entries (remaining work, arrival, WINQ, imminent activity) for the
+  tasks competing at the decision — the ones the rules judge.
 
 ## [0.26.0] - 2026-10-18
 
