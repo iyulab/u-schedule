@@ -1,0 +1,202 @@
+{
+  "$schema": "scripts/engine-card/engine-card.schema.json",
+  "card_version": 1,
+  "engine": {
+    "id": "u-schedule",
+    "summary": "Scheduling: orders jobs on identical machines by a dispatching rule, searches job-shop schedules (each job a sequence of operations on machines) with a genetic algorithm, and checks a schedule against its problem's rules.",
+    "version": "0.29.0",
+    "license": "MIT",
+    "repository": "https://github.com/iyulab/u-schedule"
+  },
+  "surfaces": [
+    {
+      "kind": "crate",
+      "name": "u-schedule",
+      "package_version": "0.29.0",
+      "engine_version": "0.29.0",
+      "note": "The crate is a framework: resource and activity models, dispatching rules, a GA encoding, constraint programming and KPIs; the WebAssembly operations are request-level entry points over it.",
+      "error_shape": "Err(...) of the solver's error type for a model or setting it cannot run."
+    },
+    {
+      "kind": "npm",
+      "name": "@iyulab/u-schedule",
+      "package_version": "0.29.0",
+      "engine_version": "0.29.0",
+      "wasm": true,
+      "note": "Objects in and out, typed in the .d.ts (ScheduleInput, JobShopInput, JobShopCheckInput and their outputs). Bundler and Node targets; no bundler-less browser build.",
+      "error_shape": "A thrown Error whose code property is the code, with the fields (parameter, index, min, max, got, expected, ...) as its other properties."
+    }
+  ],
+  "errors": {
+    "shape": "A refusal carries a stable snake_case 'code' and the fields listed for that code; the checker reports violations in the same vocabulary as data, not as an error.",
+    "source": {
+      "catalog": "code_catalog in src/wasm.rs, built from the Code table refusals are made from and one example of every job-shop violation; published as codes() in WebAssembly. What each code means is tabled in README.md, which a test holds equal to the catalog.",
+      "test": "src/wasm.rs::tests::the_code_catalog_covers_every_violation"
+    }
+  },
+  "operations": [
+    {
+      "id": "run_schedule",
+      "summary": "Orders jobs on one or more identical machines by a dispatching rule (SPT, LPT, EDD, FCFS, CR, WSPT, MST, S/RO, ATC, LWKR, MWKR or PRIORITY), honouring release times, and reports each job's start and end, the makespan, the total tardiness and each machine's busy time and utilization.",
+      "input": {
+        "schema": "schemas/wasm.schema.json#/$defs/run_schedule.input",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "output": {
+        "schema": "schemas/wasm.schema.json#/$defs/run_schedule.output",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "contract_test": "src/wasm.rs::engine_card_tests::every_export_is_a_card_operation_with_its_arguments",
+      "hints": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "effects": {
+        "filesystem": "none",
+        "network": "none",
+        "clock": "none",
+        "randomness": "none"
+      },
+      "determinism": {
+        "kind": "deterministic",
+        "test": "src/wasm.rs::engine_card_tests::the_same_request_gives_the_same_answer"
+      },
+      "validation": {
+        "status": "none"
+      },
+      "performance": {
+        "status": "none"
+      }
+    },
+    {
+      "id": "solve_jobshop",
+      "summary": "A job-shop schedule found by a genetic algorithm over operation sequences, with optional machine alternatives, release times, due dates, transport times between machines and a weight on tardiness; reports every operation's machine and times, each job's completion and tardiness, the makespan and why the search stopped.",
+      "input": {
+        "schema": "schemas/wasm.schema.json#/$defs/solve_jobshop.input",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "output": {
+        "schema": "schemas/wasm.schema.json#/$defs/solve_jobshop.output",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "contract_test": "src/wasm.rs::engine_card_tests::every_export_is_a_card_operation_with_its_arguments",
+      "hints": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": false,
+        "open_world": false
+      },
+      "effects": {
+        "filesystem": "none",
+        "network": "none",
+        "clock": "none",
+        "randomness": "unseeded",
+        "note": "The search draws from ga_config.seed when it is given and from fresh entropy when it is not."
+      },
+      "determinism": {
+        "kind": "nondeterministic",
+        "note": "The worst case, a search without ga_config.seed.",
+        "cases": [
+          {
+            "when": "ga_config.seed given",
+            "kind": "seeded",
+            "randomness": "seeded",
+            "clock": "none",
+            "test": "src/wasm.rs::engine_card_tests::the_same_request_gives_the_same_answer"
+          }
+        ]
+      },
+      "output_provenance": {
+        "fields": [
+          "stop_reason",
+          "generations",
+          "fitness_history"
+        ],
+        "note": "Whether the search ran its max_generations or stalled first, and how its best fitness moved."
+      },
+      "validation": {
+        "status": "none",
+        "limits": [
+          "Schedule quality has not been compared against best-known makespans of standard instances (Taillard, Lawrence).",
+          "Feasibility of a returned schedule is checkable with check_jobshop."
+        ]
+      },
+      "performance": {
+        "status": "none"
+      }
+    },
+    {
+      "id": "check_jobshop",
+      "summary": "Whether a schedule keeps its job-shop problem, read as solve_jobshop reads it: each step of each job placed once, on a machine it can run on, for its processing time, after the step ahead of it and the job's release, no two steps on one machine at once, and the reported makespan equal to the latest end; lists every rule broken.",
+      "input": {
+        "schema": "schemas/wasm.schema.json#/$defs/check_jobshop.input",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "output": {
+        "schema": "schemas/wasm.schema.json#/$defs/check_jobshop.output",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "contract_test": "src/wasm.rs::engine_card_tests::every_export_is_a_card_operation_with_its_arguments",
+      "hints": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "effects": {
+        "filesystem": "none",
+        "network": "none",
+        "clock": "none",
+        "randomness": "none"
+      },
+      "determinism": {
+        "kind": "deterministic",
+        "test": "src/wasm.rs::engine_card_tests::the_crate_reads_no_clock_and_no_unseeded_randomness"
+      },
+      "validation": {
+        "status": "none"
+      },
+      "performance": {
+        "status": "none"
+      }
+    },
+    {
+      "id": "available_rules",
+      "summary": "The dispatching rules run_schedule takes and, for each, the config settings it reads; a request giving any other setting with that rule is refused.",
+      "input": {
+        "schema": "schemas/wasm.schema.json#/$defs/available_rules.input",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "output": {
+        "schema": "schemas/wasm.schema.json#/$defs/available_rules.output",
+        "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"
+      },
+      "contract_test": "src/wasm.rs::engine_card_tests::every_export_is_a_card_operation_with_its_arguments",
+      "hints": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "effects": {
+        "filesystem": "none",
+        "network": "none",
+        "clock": "none",
+        "randomness": "none"
+      },
+      "determinism": {
+        "kind": "deterministic",
+        "test": "src/wasm.rs::engine_card_tests::the_crate_reads_no_clock_and_no_unseeded_randomness"
+      },
+      "validation": {
+        "status": "none"
+      },
+      "performance": {
+        "status": "none",
+        "complexity": "O(1)."
+      }
+    }
+  ]
+}

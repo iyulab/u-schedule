@@ -758,6 +758,7 @@ fn failure_site(param: &str, path: &serde_path_to_error::Path) -> (String, Optio
 // ── input schema ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct InputJob {
     id: String,
@@ -816,6 +817,7 @@ impl ScheduleConfig {
 }
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct ScheduleConfig {
     #[serde(default = "default_rule")]
@@ -823,6 +825,7 @@ struct ScheduleConfig {
     #[tsify(
         type = "\"SPT\" | \"LPT\" | \"EDD\" | \"FCFS\" | \"CR\" | \"WSPT\" | \"MST\" | \"S/RO\" | \"SRO\" | \"ATC\" | \"LWKR\" | \"MWKR\" | \"PRIORITY\""
     )]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::rule"))]
     rule: String,
     /// Number of identical parallel machines, at least 1 (default: 1 = single
     /// machine). Read signed so a negative count is a range refusal: [`Whole`].
@@ -839,6 +842,7 @@ struct ScheduleConfig {
 }
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct ScheduleInput {
     jobs: Vec<InputJob>,
@@ -850,6 +854,7 @@ struct ScheduleInput {
 // ── output schema ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct OutputJob {
     id: String,
     start: f64,
@@ -860,6 +865,7 @@ struct OutputJob {
 }
 
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct MachineUtilization {
     machine: usize,
     busy_time: f64,
@@ -867,6 +873,7 @@ struct MachineUtilization {
 }
 
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct ScheduleOutput {
     schedule: Vec<OutputJob>,
     makespan: f64,
@@ -1010,15 +1017,18 @@ fn rule_reads(rule: &str, setting: &str) -> bool {
 /// One dispatching rule and the `config` settings it reads; a request giving
 /// any other setting with this rule is refused (`invalid_option`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct RuleInfo {
     /// The rule, as a request's `config.rule` names it.
     #[tsify(
         type = "\"SPT\" | \"LPT\" | \"EDD\" | \"FCFS\" | \"CR\" | \"WSPT\" | \"MST\" | \"S/RO\" | \"ATC\" | \"LWKR\" | \"MWKR\" | \"PRIORITY\""
     )]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::rule_name"))]
     name: String,
     /// The settings it reads, in [`RULE_SETTINGS`] order.
     #[tsify(type = "(\"num_machines\" | \"atc_k\")[]")]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::rule_settings"))]
     reads: Vec<String>,
 }
 
@@ -1057,6 +1067,7 @@ pub fn available_rules() -> Result<JsValue, JsValue> {
 /// A refusal reason: the `code` an `Error` carries and the fields that can
 /// stand beside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct RefusalCode {
     code: String,
@@ -1066,17 +1077,20 @@ struct RefusalCode {
 /// A violation a checker reports: its `code`, the fields beside it, and the
 /// functions that report it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct ViolationCode {
     code: String,
     fields: Vec<String>,
     #[tsify(type = "\"check_jobshop\"[]")]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::checkers"))]
     checkers: Vec<String>,
 }
 
 /// What this package can answer with besides a result: every refusal `code`
 /// and every checker violation `code`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct Codes {
     refusals: Vec<RefusalCode>,
@@ -1305,6 +1319,7 @@ fn schedule_jobs(input: &ScheduleInput) -> Result<ScheduleOutput, WireError> {
 // ── input schema ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopOperation {
     /// Machine ID (e.g., "M1", "M2"). If multiple candidates, use an array.
@@ -1347,6 +1362,7 @@ impl JobShopOperation {
 }
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopJob {
     id: String,
@@ -1390,6 +1406,7 @@ fn default_mutation_type() -> String {
 }
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopGaConfig {
     /// At least 2. Counts and the seed are read signed so a negative one is a
@@ -1421,10 +1438,12 @@ struct JobShopGaConfig {
     #[serde(default = "default_crossover_type")]
     #[tsify(optional)]
     #[tsify(type = "\"POX\" | \"LOX\" | \"JOX\"")]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::crossover"))]
     crossover: String,
     #[serde(default = "default_mutation_type")]
     #[tsify(optional)]
     #[tsify(type = "\"Swap\" | \"Insert\" | \"Invert\"")]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::mutation"))]
     mutation: String,
 }
 
@@ -1444,6 +1463,7 @@ impl Default for JobShopGaConfig {
 }
 
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopInput {
     jobs: Vec<JobShopJob>,
@@ -1465,6 +1485,7 @@ struct JobShopInput {
 
 /// The time to move work from machine `from` to machine `to` (seconds).
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopTransport {
     from: String,
@@ -1475,6 +1496,7 @@ struct JobShopTransport {
 // ── output schema ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct JobShopAssignment {
     job_id: String,
     /// Which step of its job this is, counting from 1 in the order the job's
@@ -1487,6 +1509,7 @@ struct JobShopAssignment {
 
 /// How a job ends: when its last step finishes and how late that is.
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct JobShopJobResult {
     id: String,
     /// When the job's last step ends (seconds).
@@ -1496,6 +1519,7 @@ struct JobShopJobResult {
 }
 
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct JobShopOutput {
     schedule: Vec<JobShopAssignment>,
     /// Every job, in the order the request lists them -- the tardiness the
@@ -1513,35 +1537,46 @@ struct JobShopOutput {
     #[tsify(
         type = "\"completed\" | \"optimal\" | \"target_reached\" | \"iteration_limit\" | \"no_improvement\" | \"time_limit\" | \"cancelled\""
     )]
+    #[cfg_attr(test, schemars(schema_with = "card_schema::stop_reason"))]
     stop_reason: StopReason,
 }
 
 // ── conversion helpers ──────────────────────────────────────────────────────
 
+/// `ga_config.crossover` names, as a request spells them.
+const CROSSOVERS: [(&str, CrossoverType); 3] = [
+    ("POX", CrossoverType::POX),
+    ("LOX", CrossoverType::LOX),
+    ("JOX", CrossoverType::JOX),
+];
+
+/// `ga_config.mutation` names, as a request spells them.
+const MUTATIONS: [(&str, MutationType); 3] = [
+    ("Swap", MutationType::Swap),
+    ("Insert", MutationType::Insert),
+    ("Invert", MutationType::Invert),
+];
+
 fn parse_crossover(s: &str) -> Result<CrossoverType, WireError> {
-    match s {
-        "POX" => Ok(CrossoverType::POX),
-        "LOX" => Ok(CrossoverType::LOX),
-        "JOX" => Ok(CrossoverType::JOX),
-        other => Err(WireError::unknown_option(
-            "ga_config.crossover",
-            other,
-            &["POX", "LOX", "JOX"],
-        )),
-    }
+    CROSSOVERS
+        .into_iter()
+        .find(|(name, _)| *name == s)
+        .map(|(_, c)| c)
+        .ok_or_else(|| {
+            let expected: Vec<&str> = CROSSOVERS.iter().map(|(n, _)| *n).collect();
+            WireError::unknown_option("ga_config.crossover", s, &expected)
+        })
 }
 
 fn parse_mutation(s: &str) -> Result<MutationType, WireError> {
-    match s {
-        "Swap" => Ok(MutationType::Swap),
-        "Insert" => Ok(MutationType::Insert),
-        "Invert" => Ok(MutationType::Invert),
-        other => Err(WireError::unknown_option(
-            "ga_config.mutation",
-            other,
-            &["Swap", "Insert", "Invert"],
-        )),
-    }
+    MUTATIONS
+        .into_iter()
+        .find(|(name, _)| *name == s)
+        .map(|(_, m)| m)
+        .ok_or_else(|| {
+            let expected: Vec<&str> = MUTATIONS.iter().map(|(n, _)| *n).collect();
+            WireError::unknown_option("ga_config.mutation", s, &expected)
+        })
 }
 
 // ── GA config validation ────────────────────────────────────────────────────
@@ -1924,6 +1959,7 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
 /// answer's `schedule`. `operation` is read as given: a number the job has no
 /// step for (0, negative, past its last) is a violation, not a refusal.
 #[derive(Debug, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopStep {
     job_id: String,
@@ -1938,6 +1974,7 @@ struct JobShopStep {
 /// A schedule to check: the `schedule` of a `solve_jobshop` answer, or one
 /// built elsewhere in its shape, and the `makespan` it reports, if any.
 #[derive(Debug, Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopPlan {
     schedule: Vec<JobShopStep>,
@@ -1950,6 +1987,7 @@ struct JobShopPlan {
 /// The input of `check_jobshop`: the problem as given to `solve_jobshop`,
 /// unchanged, and the schedule to check against it.
 #[derive(Deserialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct JobShopCheckInput {
     problem: JobShopInput,
@@ -1959,6 +1997,7 @@ struct JobShopCheckInput {
 /// One way a schedule breaks its problem, by `code`. `entity` is the step
 /// (`"J1_2"` -- job and step number), job or machine it is about.
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "code", rename_all = "snake_case")]
 enum JobShopViolation {
     /// A job or step the problem does not have, or a step placed twice.
@@ -2061,6 +2100,7 @@ impl JobShopViolation {
 
 /// Whether a schedule keeps its problem, and every way it does not.
 #[derive(Debug, Serialize, tsify::Tsify)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct JobShopCheckOutput {
     feasible: bool,
     violations: Vec<JobShopViolation>,
@@ -4161,5 +4201,139 @@ mod whole_number_tests {
             assert_eq!(err.fields["code"], "malformed_input", "{bad}");
             assert_eq!(err.fields["parameter"], "config.num_machines", "{bad}");
         }
+    }
+}
+
+/// The closed string vocabularies of the wire types, as JSON Schema built from
+/// the tables the binding parses and prints them from (the engine card's
+/// schemas; tests only).
+#[cfg(test)]
+mod card_schema {
+    use schemars::{Schema, SchemaGenerator};
+
+    use crate::engine_card::string_enum;
+
+    fn array_of(item: Schema) -> Schema {
+        Schema::try_from(serde_json::json!({ "type": "array", "items": item.to_value() }))
+            .expect("an object is a schema")
+    }
+
+    pub(super) fn rule(_: &mut SchemaGenerator) -> Schema {
+        string_enum(super::RULES)
+    }
+
+    pub(super) fn rule_name(_: &mut SchemaGenerator) -> Schema {
+        let names: Vec<String> = super::rule_catalog().into_iter().map(|r| r.name).collect();
+        string_enum(names.iter().map(String::as_str))
+    }
+
+    pub(super) fn rule_settings(_: &mut SchemaGenerator) -> Schema {
+        array_of(string_enum(super::RULE_SETTINGS))
+    }
+
+    pub(super) fn checkers(_: &mut SchemaGenerator) -> Schema {
+        array_of(string_enum(["check_jobshop"]))
+    }
+
+    pub(super) fn crossover(_: &mut SchemaGenerator) -> Schema {
+        string_enum(super::CROSSOVERS.iter().map(|(n, _)| *n))
+    }
+
+    pub(super) fn mutation(_: &mut SchemaGenerator) -> Schema {
+        string_enum(super::MUTATIONS.iter().map(|(n, _)| *n))
+    }
+
+    pub(super) fn stop_reason(_: &mut SchemaGenerator) -> Schema {
+        string_enum(super::StopReason::ALL.iter().map(|r| r.name()))
+    }
+}
+
+#[cfg(test)]
+mod engine_card_tests {
+    //! The engine card's operations are this binding's exports, and the
+    //! schemas it points at are generated from the types they read and return.
+
+    use super::*;
+    use crate::engine_card::{arg, Schemas};
+
+    fn schemas() -> Schemas {
+        let s = Schemas::new();
+        s.op(
+            "run_schedule",
+            vec![arg("jobs", s.of::<ScheduleInput>())],
+            s.of::<ScheduleOutput>(),
+        );
+        s.op(
+            "solve_jobshop",
+            vec![arg("problem", s.of::<JobShopInput>())],
+            s.of::<JobShopOutput>(),
+        );
+        s.op(
+            "check_jobshop",
+            vec![arg("input", s.of::<JobShopCheckInput>())],
+            s.of::<JobShopCheckOutput>(),
+        );
+        s.op("available_rules", vec![], s.of::<Vec<RuleInfo>>());
+        s
+    }
+
+    #[test]
+    fn the_schemas_are_generated_from_the_binding_types() {
+        schemas().check("u-schedule WebAssembly operations");
+    }
+
+    #[test]
+    fn every_export_is_a_card_operation_with_its_arguments() {
+        let s = schemas();
+        s.check_exports(include_str!("wasm.rs"));
+        s.check_card();
+    }
+
+    /// The crate reads no clock and draws no unseeded random number itself;
+    /// the job-shop search's draw of a seed when none is given is in
+    /// u-metaheur's runner, which the card declares on `solve_jobshop`.
+    #[test]
+    fn the_crate_reads_no_clock_and_no_unseeded_randomness() {
+        assert_eq!(
+            crate::engine_card::clock_and_entropy_uses(),
+            Vec::<(String, &str)>::new()
+        );
+    }
+
+    /// The same request gives the same answer: a dispatching rule has no
+    /// randomness, and the job-shop search given a seed repeats its run.
+    #[test]
+    fn the_same_request_gives_the_same_answer() {
+        let jobs: ScheduleInput = serde_json::from_value(serde_json::json!({
+            "jobs": [
+                { "id": "a", "processing_time": 3.0, "due_date": 4.0 },
+                { "id": "b", "processing_time": 1.0, "due_date": 9.0 },
+                { "id": "c", "processing_time": 2.0, "due_date": 2.0 }
+            ],
+            "config": { "rule": "ATC", "num_machines": 2 }
+        }))
+        .expect("a valid request");
+        let schedule =
+            || serde_json::to_value(schedule_jobs(&jobs).expect("schedules")).expect("serializes");
+        assert_eq!(schedule(), schedule());
+
+        let problem: JobShopInput = serde_json::from_value(serde_json::json!({
+            "jobs": [
+                { "id": "j1", "operations": [
+                    { "machine": "m1", "processing_time": 3.0 },
+                    { "machine": "m2", "processing_time": 2.0 } ] },
+                { "id": "j2", "operations": [
+                    { "machine": "m2", "processing_time": 2.0 },
+                    { "machine": "m1", "processing_time": 4.0 } ] },
+                { "id": "j3", "operations": [
+                    { "machine": "m1", "processing_time": 1.0 },
+                    { "machine": "m2", "processing_time": 3.0 } ] }
+            ],
+            "ga_config": { "population_size": 12, "max_generations": 15, "seed": 7 }
+        }))
+        .expect("a valid problem");
+        let solve =
+            || serde_json::to_value(jobshop(&problem).expect("solves")).expect("serializes");
+        assert_eq!(solve(), solve());
     }
 }

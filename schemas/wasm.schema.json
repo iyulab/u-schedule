@@ -1,0 +1,930 @@
+{
+  "$defs": {
+    "InputJob": {
+      "additionalProperties": false,
+      "properties": {
+        "due_date": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "priority": {
+          "default": 0,
+          "description": "Read by the `PRIORITY` rule only (higher goes first, default 0).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "processing_time": {
+          "format": "double",
+          "type": "number"
+        },
+        "release_time": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "weight": {
+          "default": 1.0,
+          "description": "WSPT/ATC weight `w_j` (> 0, default 1): a heavier job goes earlier.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "processing_time"
+      ],
+      "type": "object"
+    },
+    "JobShopAssignment": {
+      "properties": {
+        "end": {
+          "format": "double",
+          "type": "number"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "operation": {
+          "description": "Which step of its job this is, counting from 1 in the order the job's\n`operations` array lists them -- not the order they run on the timeline.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "job_id",
+        "operation",
+        "machine",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "JobShopCheckInput": {
+      "additionalProperties": false,
+      "description": "The input of `check_jobshop`: the problem as given to `solve_jobshop`,\nunchanged, and the schedule to check against it.",
+      "properties": {
+        "problem": {
+          "$ref": "#/$defs/JobShopInput"
+        },
+        "solution": {
+          "$ref": "#/$defs/JobShopPlan"
+        }
+      },
+      "required": [
+        "problem",
+        "solution"
+      ],
+      "type": "object"
+    },
+    "JobShopCheckOutput": {
+      "description": "Whether a schedule keeps its problem, and every way it does not.",
+      "properties": {
+        "feasible": {
+          "type": "boolean"
+        },
+        "violations": {
+          "items": {
+            "$ref": "#/$defs/JobShopViolation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "feasible",
+        "violations"
+      ],
+      "type": "object"
+    },
+    "JobShopGaConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "crossover": {
+          "default": "POX",
+          "enum": [
+            "POX",
+            "LOX",
+            "JOX"
+          ],
+          "type": "string"
+        },
+        "local_search_steps": {
+          "default": 60,
+          "description": "From 0: the swaps the local search may make to improve each child and\neach mutated schedule, 0 turning it off. More swaps give a shorter\nschedule and a longer run.",
+          "format": "int128",
+          "type": "integer"
+        },
+        "max_generations": {
+          "default": 200,
+          "description": "At least 1.",
+          "format": "int128",
+          "type": "integer"
+        },
+        "mutation": {
+          "default": "Swap",
+          "enum": [
+            "Swap",
+            "Insert",
+            "Invert"
+          ],
+          "type": "string"
+        },
+        "mutation_rate": {
+          "default": 0.1,
+          "format": "double",
+          "type": "number"
+        },
+        "population_size": {
+          "default": 100,
+          "description": "At least 2. Counts and the seed are read signed so a negative one is a\nrange refusal: [`Whole`].",
+          "format": "int128",
+          "type": "integer"
+        },
+        "seed": {
+          "default": null,
+          "description": "From 0 to 2^64 - 1.",
+          "format": "int128",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tardiness_weight": {
+          "default": 0.5,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "JobShopInput": {
+      "additionalProperties": false,
+      "properties": {
+        "ga_config": {
+          "$ref": "#/$defs/JobShopGaConfig"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobShopJob"
+          },
+          "type": "array"
+        },
+        "num_machines": {
+          "default": null,
+          "description": "Number of machines. If omitted, inferred from operation machine IDs.",
+          "format": "int128",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transport_times": {
+          "description": "Time a job's work takes to move from one machine to another: when its\nnext operation runs on `to`, it starts no earlier than the previous\none's end on `from` plus `time`. A pair not listed takes none.",
+          "items": {
+            "$ref": "#/$defs/JobShopTransport"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "JobShopJob": {
+      "additionalProperties": false,
+      "properties": {
+        "due_date": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/JobShopOperation"
+          },
+          "type": "array"
+        },
+        "release_time": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "operations"
+      ],
+      "type": "object"
+    },
+    "JobShopJobResult": {
+      "description": "How a job ends: when its last step finishes and how late that is.",
+      "properties": {
+        "completion": {
+          "description": "When the job's last step ends (seconds).",
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "tardiness": {
+          "description": "`max(0, completion − due_date)` in seconds; 0 without a `due_date`.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "completion",
+        "tardiness"
+      ],
+      "type": "object"
+    },
+    "JobShopOperation": {
+      "additionalProperties": false,
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine ID (e.g., \"M1\", \"M2\"). If multiple candidates, use an array.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "machine_times": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "default": {},
+          "description": "Processing time (seconds) on particular candidate machines, in place of\n`processing_time` there — a flexible job shop's per-machine times.\nEach key must be one of the operation's machines.",
+          "type": "object"
+        },
+        "machines": {
+          "default": [],
+          "description": "Candidate machine IDs. Takes precedence over `machine`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "processing_time": {
+          "description": "Processing time in seconds.",
+          "format": "double",
+          "type": "number"
+        },
+        "release_time": {
+          "default": null,
+          "description": "The earliest this operation may start (seconds), on top of its job's\n`release_time`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "processing_time"
+      ],
+      "type": "object"
+    },
+    "JobShopOutput": {
+      "properties": {
+        "fitness": {
+          "format": "double",
+          "type": "number"
+        },
+        "fitness_history": {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "generations": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jobs": {
+          "description": "Every job, in the order the request lists them -- the tardiness the\nsearch weighed (`ga_config.tardiness_weight`), per job.",
+          "items": {
+            "$ref": "#/$defs/JobShopJobResult"
+          },
+          "type": "array"
+        },
+        "makespan": {
+          "format": "double",
+          "type": "number"
+        },
+        "schedule": {
+          "items": {
+            "$ref": "#/$defs/JobShopAssignment"
+          },
+          "type": "array"
+        },
+        "stop_reason": {
+          "description": "Why the search stopped: `\"iteration_limit\"` when it ran its\n`max_generations`, `\"no_improvement\"` when it stalled first;\n`\"completed\"` for a problem with no jobs.",
+          "enum": [
+            "completed",
+            "optimal",
+            "target_reached",
+            "iteration_limit",
+            "no_improvement",
+            "time_limit",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        "total_tardiness": {
+          "description": "The sum of `jobs[].tardiness`.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schedule",
+        "jobs",
+        "makespan",
+        "total_tardiness",
+        "fitness",
+        "generations",
+        "fitness_history",
+        "stop_reason"
+      ],
+      "type": "object"
+    },
+    "JobShopPlan": {
+      "additionalProperties": false,
+      "description": "A schedule to check: the `schedule` of a `solve_jobshop` answer, or one\nbuilt elsewhere in its shape, and the `makespan` it reports, if any.",
+      "properties": {
+        "makespan": {
+          "default": null,
+          "description": "The makespan the schedule claims, compared with its latest end.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "schedule": {
+          "items": {
+            "$ref": "#/$defs/JobShopStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schedule"
+      ],
+      "type": "object"
+    },
+    "JobShopStep": {
+      "additionalProperties": false,
+      "description": "One placed step of a schedule to check -- an entry of a `solve_jobshop`\nanswer's `schedule`. `operation` is read as given: a number the job has no\nstep for (0, negative, past its last) is a violation, not a refusal.",
+      "properties": {
+        "end": {
+          "format": "double",
+          "type": "number"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "operation": {
+          "format": "int128",
+          "type": "integer"
+        },
+        "start": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "job_id",
+        "operation",
+        "machine",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "JobShopTransport": {
+      "additionalProperties": false,
+      "description": "The time to move work from machine `from` to machine `to` (seconds).",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "time": {
+          "format": "double",
+          "type": "number"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "time"
+      ],
+      "type": "object"
+    },
+    "JobShopViolation": {
+      "description": "One way a schedule breaks its problem, by `code`. `entity` is the step\n(`\"J1_2\"` -- job and step number), job or machine it is about.",
+      "oneOf": [
+        {
+          "description": "A job or step the problem does not have, or a step placed twice.",
+          "properties": {
+            "code": {
+              "const": "unknown_activity",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step left out, or put on a machine it cannot run on.",
+          "properties": {
+            "code": {
+              "const": "requirement_unfilled",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Two steps on one machine at once.",
+          "properties": {
+            "code": {
+              "const": "capacity_exceeded",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step that starts before the step ahead of it ends.",
+          "properties": {
+            "code": {
+              "const": "precedence_violation",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step shorter than its processing time.",
+          "properties": {
+            "code": {
+              "const": "duration_too_short",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step that starts before its job's `release_time`.",
+          "properties": {
+            "code": {
+              "const": "early_start",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A job that ends after its `due_date`.",
+          "properties": {
+            "code": {
+              "const": "deadline_miss",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step on a machine while the machine is unavailable.",
+          "properties": {
+            "code": {
+              "const": "resource_unavailable",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A step outside its time window.",
+          "properties": {
+            "code": {
+              "const": "time_window_violation",
+              "type": "string"
+            },
+            "entity": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "entity",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A reported `makespan` other than the schedule's latest end.",
+          "properties": {
+            "actual": {
+              "format": "double",
+              "type": "number"
+            },
+            "code": {
+              "const": "makespan_mismatch",
+              "type": "string"
+            },
+            "reported": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "code",
+            "reported",
+            "actual"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MachineUtilization": {
+      "properties": {
+        "busy_time": {
+          "format": "double",
+          "type": "number"
+        },
+        "machine": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "utilization": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "machine",
+        "busy_time",
+        "utilization"
+      ],
+      "type": "object"
+    },
+    "OutputJob": {
+      "properties": {
+        "end": {
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "description": "Machine index (0-based). Always 0 for single-machine mode.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "double",
+          "type": "number"
+        },
+        "tardiness": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "start",
+        "end",
+        "tardiness",
+        "machine"
+      ],
+      "type": "object"
+    },
+    "RuleInfo": {
+      "additionalProperties": false,
+      "description": "One dispatching rule and the `config` settings it reads; a request giving\nany other setting with this rule is refused (`invalid_option`).",
+      "properties": {
+        "name": {
+          "description": "The rule, as a request's `config.rule` names it.",
+          "enum": [
+            "SPT",
+            "LPT",
+            "EDD",
+            "FCFS",
+            "CR",
+            "WSPT",
+            "MST",
+            "S/RO",
+            "ATC",
+            "LWKR",
+            "MWKR",
+            "PRIORITY"
+          ],
+          "type": "string"
+        },
+        "reads": {
+          "description": "The settings it reads, in [`RULE_SETTINGS`] order.",
+          "items": {
+            "enum": [
+              "num_machines",
+              "atc_k"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "reads"
+      ],
+      "type": "object"
+    },
+    "ScheduleConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "atc_k": {
+          "default": null,
+          "description": "Lookahead parameter `k` of the ATC rule (> 0; default 2). Read by\n`ATC` only: given with any other rule it is refused (`invalid_option`)\nrather than ignored.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "num_machines": {
+          "default": 1,
+          "description": "Number of identical parallel machines, at least 1 (default: 1 = single\nmachine). Read signed so a negative count is a range refusal: [`Whole`].",
+          "format": "int128",
+          "type": "integer"
+        },
+        "rule": {
+          "default": "SPT",
+          "enum": [
+            "SPT",
+            "LPT",
+            "EDD",
+            "FCFS",
+            "CR",
+            "WSPT",
+            "MST",
+            "S/RO",
+            "SRO",
+            "ATC",
+            "LWKR",
+            "MWKR",
+            "PRIORITY"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ScheduleInput": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/ScheduleConfig"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/InputJob"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "ScheduleOutput": {
+      "properties": {
+        "machine_utilization": {
+          "description": "Busy time and utilization (busy time over makespan) of every machine,\none entry per `config.num_machines` -- one machine included.",
+          "items": {
+            "$ref": "#/$defs/MachineUtilization"
+          },
+          "type": "array"
+        },
+        "makespan": {
+          "format": "double",
+          "type": "number"
+        },
+        "schedule": {
+          "items": {
+            "$ref": "#/$defs/OutputJob"
+          },
+          "type": "array"
+        },
+        "total_tardiness": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schedule",
+        "makespan",
+        "total_tardiness",
+        "machine_utilization"
+      ],
+      "type": "object"
+    },
+    "available_rules.input": {
+      "additionalProperties": false,
+      "description": "The arguments of available_rules(), by name; the WebAssembly function takes them in that order.",
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "available_rules.output": {
+      "items": {
+        "$ref": "#/$defs/RuleInfo"
+      },
+      "type": "array"
+    },
+    "check_jobshop.input": {
+      "additionalProperties": false,
+      "description": "The arguments of check_jobshop(input), by name; the WebAssembly function takes them in that order.",
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/JobShopCheckInput"
+        }
+      },
+      "required": [
+        "input"
+      ],
+      "type": "object"
+    },
+    "check_jobshop.output": {
+      "$ref": "#/$defs/JobShopCheckOutput"
+    },
+    "run_schedule.input": {
+      "additionalProperties": false,
+      "description": "The arguments of run_schedule(jobs), by name; the WebAssembly function takes them in that order.",
+      "properties": {
+        "jobs": {
+          "$ref": "#/$defs/ScheduleInput"
+        }
+      },
+      "required": [
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "run_schedule.output": {
+      "$ref": "#/$defs/ScheduleOutput"
+    },
+    "solve_jobshop.input": {
+      "additionalProperties": false,
+      "description": "The arguments of solve_jobshop(problem), by name; the WebAssembly function takes them in that order.",
+      "properties": {
+        "problem": {
+          "$ref": "#/$defs/JobShopInput"
+        }
+      },
+      "required": [
+        "problem"
+      ],
+      "type": "object"
+    },
+    "solve_jobshop.output": {
+      "$ref": "#/$defs/JobShopOutput"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "u-schedule WebAssembly operations"
+}
