@@ -346,6 +346,12 @@ impl SimpleScheduler {
         // Per task: its offer, kept until a booking can change it, and the
         // resources whose booking can (`Self::read_by`).
         let mut kept: Vec<Option<(Placement, Vec<&str>)>> = vec![None; tasks.len()];
+        // Every activity passed so far, with when it ended — `None` for one
+        // left unplaced, which its successors go on without (as the next step
+        // of its own task does). An activity waits for its `predecessors`
+        // here; `validate_input` has refused the cycles that could leave one
+        // waiting for ever.
+        let mut settled: HashMap<&str, Option<i64>> = HashMap::new();
 
         loop {
             let mut offers: Vec<(usize, Placement)> = Vec::new();
@@ -360,8 +366,20 @@ impl SimpleScheduler {
                         let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready[i]);
                         ready[i] = ready[i].max(pin_end);
                         came_from[i] = pins.iter().map(|p| p.resource_id.clone()).collect();
+                        settled.insert(&activity.id, Some(pin_end));
                         cursor[i] += 1;
                         continue;
+                    }
+                    let mut waits = false;
+                    for predecessor in &activity.predecessors {
+                        match settled.get(predecessor.as_str()) {
+                            None => waits = true,
+                            Some(end) => ready[i] = ready[i].max(end.unwrap_or(i64::MIN)),
+                        }
+                    }
+                    if waits {
+                        // Asked again once a booking settles more activities.
+                        break;
                     }
                     if activity.resource_requirements.is_empty() {
                         // It holds nothing, so nothing competes for it: it
@@ -369,6 +387,7 @@ impl SimpleScheduler {
                         // it was (`came_from`). Never placed: the feasibility
                         // check reports it.
                         let from = activity.release_time.map_or(ready[i], |r| ready[i].max(r));
+                        let mut end_ms = None;
                         if let Some((start, end)) =
                             time_only_span(activity, own.get(activity.id.as_str()), from)
                         {
@@ -377,7 +396,9 @@ impl SimpleScheduler {
                                     .with_sequence(cursor[i] as i32 + 1),
                             );
                             ready[i] = end;
+                            end_ms = Some(end);
                         }
+                        settled.insert(&activity.id, end_ms);
                         cursor[i] += 1;
                         continue;
                     }
@@ -398,7 +419,10 @@ impl SimpleScheduler {
                             break;
                         }
                         // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
-                        None => cursor[i] += 1,
+                        None => {
+                            settled.insert(&activity.id, None);
+                            cursor[i] += 1;
+                        }
                     }
                 }
             }
@@ -486,6 +510,7 @@ impl SimpleScheduler {
                 }
             }
             ready[i] = placement.end_ms;
+            settled.insert(&activity.id, Some(placement.end_ms));
             came_from[i] = placement
                 .selections
                 .iter()
@@ -1657,6 +1682,38 @@ mod tests {
         let a = schedule.assignment_for_activity("J1_O1").unwrap();
         // Must not start before release_time
         assert_eq!(a.start_ms, 5000);
+    }
+
+    #[test]
+    fn an_activity_waits_for_its_predecessors_in_other_tasks() {
+        // B waits for A, which runs on another machine; C, free, starts at 0.
+        let a = on("A", "M1", 5_000);
+        let mut b = on("B", "M2", 1_000);
+        b.activities[0].predecessors.push("A-1".into());
+        let c = on("C", "M2", 1_000);
+        let resources = machines(&["M1", "M2"]);
+        let schedule = SimpleScheduler::new().schedule(&valid(&[b, a, c], &resources), 0);
+        let at = |id: &str| schedule.assignment_for_activity(id).expect(id).start_ms;
+        assert_eq!(at("A-1"), 0);
+        assert_eq!(at("B-1"), 5_000, "B starts when A ends");
+        assert_eq!(at("C-1"), 0, "M2 is not held back for B");
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+
+        // A predecessor nothing can run goes unplaced; its successor goes on
+        // without it, as the next step of its own task would.
+        let stuck = Task::new("X").with_activity(
+            Activity::new("X-1", "X", 0)
+                .with_process_time(1_000)
+                .with_requirement(ResourceRequirement::new("Oven")),
+        );
+        let mut after = on("Y", "M1", 1_000);
+        after.activities[0].predecessors.push("X-1".into());
+        let schedule = SimpleScheduler::new().schedule(&valid(&[stuck, after], &resources), 0);
+        assert!(schedule.assignment_for_activity("X-1").is_none());
+        assert_eq!(
+            schedule.assignment_for_activity("Y-1").expect("Y").start_ms,
+            0
+        );
     }
 
     #[test]

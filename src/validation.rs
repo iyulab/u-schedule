@@ -594,6 +594,11 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
 
 /// Detects cycles in the precedence graph using DFS.
 ///
+/// The graph holds every `predecessors` edge and the order a task runs its
+/// activities in (each before the next): an activity waiting on a later
+/// activity of its own task, or two tasks each waiting on the other's later
+/// step, can never start, though no `predecessors` edges alone close a loop.
+///
 /// # Algorithm
 /// Topological sort via DFS. If a back-edge is found (visiting a node
 /// currently in the recursion stack), a cycle exists.
@@ -611,6 +616,11 @@ fn detect_cycles(tasks: &[Task]) -> Option<ValidationError> {
             for pred in &act.predecessors {
                 adj.entry(pred.as_str()).or_default().push(act.id.as_str());
             }
+        }
+        for pair in task.activities.windows(2) {
+            adj.entry(pair[0].id.as_str())
+                .or_default()
+                .push(pair[1].id.as_str());
         }
     }
 
@@ -805,6 +815,45 @@ mod tests {
         let resources = sample_resources();
 
         let errors = validate_input(&tasks, &resources).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency { .. })));
+    }
+
+    #[test]
+    fn a_cycle_through_the_order_of_two_tasks_is_refused() {
+        // J1: A1 then A2; J2: B1 then B2. A1 waits on B2 and B1 on A2, so
+        // A1 → A2 → B1 → B2 → A1 — no predecessors edge alone closes it.
+        let tasks = vec![
+            Task::new("J1")
+                .with_activity(
+                    Activity::new("A1", "J1", 0)
+                        .with_process_time(100)
+                        .with_predecessor("B2"),
+                )
+                .with_activity(Activity::new("A2", "J1", 1).with_process_time(100)),
+            Task::new("J2")
+                .with_activity(
+                    Activity::new("B1", "J2", 0)
+                        .with_process_time(100)
+                        .with_predecessor("A2"),
+                )
+                .with_activity(Activity::new("B2", "J2", 1).with_process_time(100)),
+        ];
+        let errors = validate_input(&tasks, &sample_resources()).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency { .. })));
+
+        // An activity waiting on a later step of its own task.
+        let tasks = vec![Task::new("J1")
+            .with_activity(
+                Activity::new("O1", "J1", 0)
+                    .with_process_time(100)
+                    .with_predecessor("O2"),
+            )
+            .with_activity(Activity::new("O2", "J1", 1).with_process_time(100))];
+        let errors = validate_input(&tasks, &sample_resources()).unwrap_err();
         assert!(errors
             .iter()
             .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency { .. })));

@@ -8,6 +8,26 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Fixed
+
+- **`SimpleScheduler` now waits for an activity's `predecessors`**, in any
+  task (and so does `DispatchSearch`, which decodes with it). It used to read
+  only the order of a task's own activities, so an activity naming one of
+  another task's started at once; the feasibility check reported it as a
+  `PrecedenceViolation`. A predecessor left unplaced does not hold its
+  successors back, as an unplaced step of a task does not hold the next.
+  The genetic algorithm (`ga`) and the CP model (`cp`) still order a task's
+  activities only — the activities they take from a `Problem` with
+  cross-task predecessors are not kept to them.
+
+### Changed
+
+- `Problem::new` (`validate_input`) refuses a precedence cycle that runs
+  through the order of a task's activities as `CyclicDependency` — an
+  activity waiting for a later activity of its own task, or two tasks each
+  waiting for the other's later step. Such a problem was accepted, and no
+  schedule could keep it.
+
 ## [0.28.0] - 2026-10-18
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.
