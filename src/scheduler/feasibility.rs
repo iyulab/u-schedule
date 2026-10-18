@@ -52,7 +52,7 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
     check_assignments(schedule, input, &mut v);
     check_requirements(schedule, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
-    check_calendars(schedule, &res_by_id, &mut v);
+    check_calendars(schedule, input, &res_by_id, &mut v);
     check_precedence(schedule, input, &mut v);
     check_deadlines(schedule, input, &mut v);
     check_constraints(schedule, input, &mut v);
@@ -284,20 +284,64 @@ fn check_capacity(
 
 fn check_calendars(
     schedule: &Schedule,
+    input: &FeasibilityInput,
     res_by_id: &HashMap<&str, &Resource>,
     out: &mut Vec<Violation>,
 ) {
+    let activities: HashMap<&str, &Activity> = input
+        .tasks
+        .iter()
+        .flat_map(|t| &t.activities)
+        .map(|a| (a.id.as_str(), a))
+        .collect();
     for a in &schedule.assignments {
-        if let Some(res) = res_by_id.get(a.resource_id.as_str()) {
-            if let Some(cal) = &res.calendar {
-                if !cal.interval_fits(a.start_ms, a.end_ms) {
+        let Some(res) = res_by_id.get(a.resource_id.as_str()) else {
+            continue;
+        };
+        match activities.get(a.activity_id.as_str()) {
+            // Resumable work may pause: it starts in the joint working time
+            // of every resource it runs on, and that time within its span
+            // covers the work.
+            Some(activity) if activity.resumable => {
+                let runs_on: Vec<&str> = schedule
+                    .assignments_for_activity_all(&activity.id)
+                    .iter()
+                    .map(|x| x.resource_id.as_str())
+                    .collect();
+                let calendars: Vec<&crate::models::Calendar> = runs_on
+                    .iter()
+                    .filter_map(|r| res_by_id.get(r).and_then(|res| res.calendar.as_ref()))
+                    .collect();
+                let d = activity.duration_on(runs_on.iter().copied());
+                let needed = a.setup_ms + d.process_ms + d.teardown_ms;
+                let starts_in_work =
+                    crate::models::joint_work_end(&calendars, a.start_ms, 0).is_some();
+                let worked = crate::models::joint_available_ms(&calendars, a.start_ms, a.end_ms);
+                if !starts_in_work || worked < needed {
                     out.push(Violation::resource_unavailable(
                         &a.resource_id,
                         format!(
-                            "assignment '{}' [{}..{}) outside working time of '{}'",
-                            a.activity_id, a.start_ms, a.end_ms, a.resource_id
+                            "assignment '{}' [{}..{}) on '{}' has {worked} ms of joint working time{}; its work needs {needed}",
+                            a.activity_id,
+                            a.start_ms,
+                            a.end_ms,
+                            a.resource_id,
+                            if starts_in_work { "" } else { " and starts outside it" }
                         ),
                     ));
+                }
+            }
+            _ => {
+                if let Some(cal) = &res.calendar {
+                    if !cal.interval_fits(a.start_ms, a.end_ms) {
+                        out.push(Violation::resource_unavailable(
+                            &a.resource_id,
+                            format!(
+                                "assignment '{}' [{}..{}) outside working time of '{}'",
+                                a.activity_id, a.start_ms, a.end_ms, a.resource_id
+                            ),
+                        ));
+                    }
                 }
             }
         }

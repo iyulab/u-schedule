@@ -414,10 +414,13 @@ impl SimpleScheduler {
                     .filter_map(|rid| {
                         let d = activity.duration_on([rid]);
                         let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
-                        timelines
-                            .get(rid)?
-                            .earliest_fit(t, span)
-                            .map(|fit| (fit, d.process_ms, rid))
+                        let tl = timelines.get(rid)?;
+                        let fit = if activity.resumable {
+                            tl.earliest_resumable(t, span).map(|(fit, _)| fit)
+                        } else {
+                            tl.earliest_fit(t, span)
+                        };
+                        fit.map(|fit| (fit, d.process_ms, rid))
                     })
                     .collect();
                 // 동시각이면 짧은 처리, 그다음 자원 선언 순서 (stable sort)
@@ -448,6 +451,9 @@ impl SimpleScheduler {
             .collect();
         let max_setup = selections.iter().map(|&(_, s)| s).max().unwrap_or(0);
         let d = max_setup + d.process_ms + d.teardown_ms;
+        if activity.resumable {
+            return Self::place_resumable(timelines, selections, t, d);
+        }
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
             for (rid, _) in &selections {
@@ -466,6 +472,41 @@ impl SimpleScheduler {
             t = t_next;
         }
         None // 고정점 미수렴 (방어적 상한 — property test가 실질 커버)
+    }
+
+    /// The earliest `[start, end)` from `t` on in which `work_ms` of work
+    /// runs while every selected resource is in working time, pausing
+    /// otherwise, with every selected resource free throughout
+    /// ([`Activity::resumable`]).
+    fn place_resumable(
+        timelines: &HashMap<String, ResourceTimeline>,
+        selections: Vec<(String, i64)>,
+        t: i64,
+        work_ms: i64,
+    ) -> Option<Placement> {
+        let selected: Vec<&ResourceTimeline> = selections
+            .iter()
+            .map(|(rid, _)| timelines.get(rid).expect("selected resource has timeline"))
+            .collect();
+        let calendars: Vec<&crate::models::Calendar> =
+            selected.iter().filter_map(|tl| tl.calendar()).collect();
+        let mut candidates: Vec<i64> = selected
+            .iter()
+            .flat_map(|tl| tl.start_candidates(t))
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.into_iter().find_map(|start| {
+            let end = crate::models::joint_work_end(&calendars, start, work_ms)?;
+            selected
+                .iter()
+                .all(|tl| tl.is_free(start, end))
+                .then(|| Placement {
+                    start_ms: start,
+                    end_ms: end,
+                    selections: selections.clone(),
+                })
+        })
     }
 
     /// Schedules from a request.
@@ -614,6 +655,105 @@ mod tests {
             activity = activity.with_speed_on(m, speed);
         }
         Task::new(id).with_activity(activity)
+    }
+
+    const HOUR: i64 = 3_600_000;
+
+    /// 08–12 and 13–17 on each of `days` days from 0.
+    fn day_shifts(id: &str, days: i64) -> crate::models::Calendar {
+        (0..days).fold(crate::models::Calendar::new(id), |c, d| {
+            let day = d * 24 * HOUR;
+            c.with_window(day + 8 * HOUR, day + 12 * HOUR)
+                .with_window(day + 13 * HOUR, day + 17 * HOUR)
+        })
+    }
+
+    fn one_activity(id: &str, hours: i64, resumable: bool) -> Task {
+        let mut a = Activity::new(format!("{id}-1"), id, 0)
+            .with_process_time(hours * HOUR)
+            .with_requirement(ResourceRequirement::new("Machine"));
+        if resumable {
+            a = a.resumable();
+        }
+        Task::new(id).with_activity(a)
+    }
+
+    #[test]
+    fn test_resumable_work_pauses_over_a_break_and_holds_the_resource() {
+        let resources = vec![Resource::new("M", "Machine").with_calendar(day_shifts("c", 3))];
+        let tasks = vec![one_activity("A", 3, true), one_activity("B", 6, true)];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 11 * HOUR);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        let at = |a: &str| {
+            let x = schedule.assignment_for_activity(a).expect("placed");
+            (x.start_ms, x.end_ms)
+        };
+        // 11–12, lunch, 13–15.
+        assert_eq!(at("A-1"), (11 * HOUR, 15 * HOUR));
+        // 15–17, night, next day 08–12.
+        assert_eq!(at("B-1"), (15 * HOUR, (24 + 12) * HOUR));
+    }
+
+    #[test]
+    fn test_work_that_is_not_resumable_waits_for_a_stretch_long_enough() {
+        let resources = vec![Resource::new("M", "Machine").with_calendar(day_shifts("c", 3))];
+        let tasks = vec![one_activity("A", 3, false)];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 11 * HOUR);
+
+        let a = schedule.assignment_for_activity("A-1").expect("placed");
+        assert_eq!((a.start_ms, a.end_ms), (13 * HOUR, 16 * HOUR));
+    }
+
+    #[test]
+    fn test_resumable_work_runs_only_while_every_resource_works() {
+        // The machine runs around the clock; the operator works 08–12, 13–17.
+        let tasks = vec![Task::new("A").with_activity(
+            Activity::new("A-1", "A", 0)
+                .with_process_time(5 * HOUR)
+                .with_requirement(ResourceRequirement::new("Machine"))
+                .with_requirement(ResourceRequirement::new("Operator"))
+                .resumable(),
+        )];
+        let resources = vec![
+            Resource::new("M", "Machine"),
+            Resource::new("OP", "Operator").with_calendar(day_shifts("c", 2)),
+        ];
+
+        let schedule = SimpleScheduler::new().schedule(&valid(&tasks, &resources), 0);
+
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+        for a in &schedule.assignments {
+            assert_eq!(
+                (a.start_ms, a.end_ms),
+                (8 * HOUR, 14 * HOUR),
+                "{}",
+                a.resource_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_feasibility_counts_the_working_time_of_resumable_work() {
+        let tasks = vec![one_activity("A", 3, true)];
+        let resources = vec![Resource::new("M", "Machine").with_calendar(day_shifts("c", 1))];
+        let input = super::super::feasibility::FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        let check = |start: i64, end: i64| {
+            let mut s = Schedule::new();
+            s.add_assignment(Assignment::new("A-1", "A", "M", start, end));
+            super::super::feasibility::check_schedule(&s, &input)
+        };
+        assert!(check(11 * HOUR, 15 * HOUR).is_empty());
+        // Only 2 h of working time in 11–14.
+        assert!(!check(11 * HOUR, 14 * HOUR).is_empty());
+        // Starts in the lunch break.
+        assert!(!check(12 * HOUR, 16 * HOUR).is_empty());
     }
 
     #[test]

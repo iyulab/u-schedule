@@ -180,6 +180,55 @@ impl Calendar {
     }
 }
 
+/// The instants from `start_ms` on at which every one of `calendars` is
+/// available (no calendars: all of them).
+fn joint_available(calendars: &[&Calendar], start_ms: i64) -> IntervalSet<i64> {
+    calendars.iter().fold(
+        interval_set(std::iter::once((start_ms, i64::MAX))),
+        |set, c| set.intersection(&c.available_set(start_ms, i64::MAX)),
+    )
+}
+
+/// When `work_ms` of work started at `start_ms` ends, if it runs only while
+/// every one of `calendars` is available and pauses otherwise: the instant at
+/// which that much joint working time from `start_ms` has passed. `None` if
+/// the calendars never offer that much, or if `start_ms` itself is not
+/// joint working time (work cannot start in a pause).
+///
+/// # Complexity
+/// O(W log W) over the calendars' windows and blocked periods.
+pub fn joint_work_end(calendars: &[&Calendar], start_ms: i64, work_ms: i64) -> Option<i64> {
+    let set = joint_available(calendars, start_ms);
+    let mut pieces = set.iter().peekable();
+    let &(first_start, _) = pieces.peek()?;
+    if first_start != start_ms {
+        return None;
+    }
+    if work_ms <= 0 {
+        return Some(start_ms);
+    }
+    let mut left = work_ms;
+    for (s, e) in pieces.by_ref() {
+        let len = e - s;
+        if len >= left {
+            return Some(s + left);
+        }
+        left -= len;
+    }
+    None
+}
+
+/// Joint working time of `calendars` within `[start_ms, end_ms)`.
+pub fn joint_available_ms(calendars: &[&Calendar], start_ms: i64, end_ms: i64) -> i64 {
+    if end_ms <= start_ms {
+        return 0;
+    }
+    let set = joint_available(calendars, start_ms)
+        .clip(start_ms, end_ms)
+        .expect("range is ordered: checked above");
+    i64::try_from(set.measure()).unwrap_or(i64::MAX)
+}
+
 /// The union of the well-ordered `(start, end)` pairs; reversed pairs are empty.
 fn interval_set(pairs: impl Iterator<Item = (i64, i64)>) -> IntervalSet<i64> {
     IntervalSet::from_intervals(pairs.filter(|(s, e)| s <= e))

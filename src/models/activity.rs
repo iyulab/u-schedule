@@ -45,6 +45,12 @@ pub struct Activity {
     /// How the time changes on particular resources, by resource id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resource_timings: BTreeMap<String, ResourceTiming>,
+    /// Whether the work may pause while its resources are not all in working
+    /// time (a break, a night, a holiday) and resume after — the resources
+    /// stay held across the pause. Otherwise the whole span must lie in one
+    /// stretch of working time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumable: bool,
     /// Resources needed (type + quantity + candidates).
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
@@ -62,6 +68,7 @@ impl Activity {
             sequence,
             duration: ActivityDuration::default(),
             resource_timings: BTreeMap::new(),
+            resumable: false,
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
             attributes: HashMap::new(),
@@ -117,6 +124,13 @@ impl Activity {
         resources: impl IntoIterator<Item = &'a str>,
     ) -> ActivityDuration {
         timed_duration(&self.duration, &self.resource_timings, resources)
+    }
+
+    /// Lets the work pause outside its resources' joint working time and
+    /// resume after ([`resumable`](Self::resumable)).
+    pub fn resumable(mut self) -> Self {
+        self.resumable = true;
+        self
     }
 
     /// Adds a resource requirement.

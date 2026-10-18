@@ -23,7 +23,7 @@ pub mod time_constraints;
 
 pub(crate) use activity::timed_duration;
 pub use activity::{Activity, ActivityDuration, ResourceRequirement, ResourceTiming};
-pub use calendar::{Calendar, TimeWindow};
+pub use calendar::{joint_available_ms, joint_work_end, Calendar, TimeWindow};
 pub use constraint::{Constraint, TransitionMatrix, TransitionMatrixCollection};
 pub use resource::Resource;
 pub use schedule::{Assignment, Schedule, Violation, ViolationType};

@@ -24,6 +24,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   (`SpeedOutOfRange` — `parameter_out_of_range`), a negative duration and a
   timing for an unknown resource.
 
+- Resumable activities: `Activity::resumable()` lets the work pause while its
+  resources are not all in working time and resume after, the resources held
+  across the pause; the work advances only in their joint working time
+  (`joint_work_end`, `joint_available_ms`). `SimpleScheduler` places it, and
+  the feasibility check judges such an assignment by the joint working time in
+  its span instead of requiring one unbroken stretch.
+  `ResourceTimeline::earliest_resumable`, `calendar` and `is_free`.
+
 ### Fixed
 
 - The GA scheduled every activity with its own duration on every resource:

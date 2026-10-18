@@ -54,6 +54,27 @@ impl ResourceTimeline {
     /// Earliest start >= from_ms where duration_ms fits, or None if the
     /// calendar can never contain the duration.
     pub fn earliest_fit(&self, from_ms: i64, duration_ms: i64) -> Option<i64> {
+        self.start_candidates(from_ms)
+            .into_iter()
+            .find(|&t| self.fits(t, duration_ms))
+    }
+
+    /// The earliest `[start, end)` from `from_ms` on in which `work_ms` of work
+    /// fits when it pauses outside the calendar and the resource stays held
+    /// across the pauses ([`Activity::resumable`](crate::models::Activity::resumable)),
+    /// or `None` if the calendar never offers that much work.
+    pub fn earliest_resumable(&self, from_ms: i64, work_ms: i64) -> Option<(i64, i64)> {
+        let calendars: Vec<&Calendar> = self.calendar.iter().collect();
+        self.start_candidates(from_ms).into_iter().find_map(|t| {
+            let end = crate::models::joint_work_end(&calendars, t, work_ms)?;
+            self.capacity_ok(t, end).then_some((t, end))
+        })
+    }
+
+    /// The instants at or after `from_ms` at which an interval can first start
+    /// here: `from_ms`, a window start, a blocked-period end, a booking end —
+    /// in increasing order.
+    pub(crate) fn start_candidates(&self, from_ms: i64) -> Vec<i64> {
         let mut candidates: Vec<i64> = vec![from_ms];
         if let Some(cal) = &self.calendar {
             candidates.extend(cal.time_windows.iter().map(|w| w.start_ms));
@@ -63,7 +84,18 @@ impl ResourceTimeline {
         candidates.retain(|&t| t >= from_ms);
         candidates.sort_unstable();
         candidates.dedup();
-        candidates.into_iter().find(|&t| self.fits(t, duration_ms))
+        candidates
+    }
+
+    /// The resource's calendar, if it has one.
+    pub fn calendar(&self) -> Option<&Calendar> {
+        self.calendar.as_ref()
+    }
+
+    /// Whether `[start_ms, end_ms)` has a free unit (concurrent bookings below
+    /// capacity), working time or not.
+    pub fn is_free(&self, start_ms: i64, end_ms: i64) -> bool {
+        self.capacity_ok(start_ms, end_ms)
     }
 
     /// Records a booking. Does not itself validate feasibility —

@@ -217,6 +217,41 @@ assert_eq!((a.resource_id.as_str(), a.end_ms), ("FAST", 30_000)); // free at 0 a
 assert_eq!((b.resource_id.as_str(), b.end_ms), ("OLD", 90_000)); // free at 0: not left idle
 ```
 
+### Working time and pauses
+
+A resource with a `Calendar` works inside its availability windows and
+outside its blocked periods. By default an activity's whole span — setup,
+processing, teardown — must lie in one stretch of working time on every
+resource it uses. An activity marked `resumable()` may instead pause while its
+resources are not all working (a break, a night) and resume after; the
+resources stay held across the pause, and the work advances only in the time
+**every** one of them works (`joint_work_end`). Its assignment spans the
+pauses: it starts in working time and ends when the work is done.
+
+```rust
+use u_schedule::models::{Activity, Calendar, Resource, ResourceRequirement, Task};
+use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::Problem;
+
+const H: i64 = 3_600_000;
+let shift = Calendar::new("day").with_window(8 * H, 12 * H).with_window(13 * H, 17 * H);
+let task = Task::new("A").with_activity(
+    Activity::new("A-1", "A", 0)
+        .with_process_time(3 * H)
+        .with_requirement(ResourceRequirement::new("Machine"))
+        .resumable(),
+);
+let resources = vec![Resource::new("M", "Machine").with_calendar(shift)];
+let problem = Problem::new(vec![task], resources).expect("valid input");
+let a = SimpleScheduler::new().schedule(&problem, 11 * H).assignments.remove(0);
+assert_eq!((a.start_ms, a.end_ms), (11 * H, 15 * H)); // 11–12, lunch, 13–15
+```
+
+`SimpleScheduler` and the feasibility check read calendars; the GA decoders
+and the CP builder do not, so on calendared resources their schedules are
+checked, not built, against working time (breaches appear in
+`Schedule::violations`).
+
 ## Build & Test
 
 ```bash
