@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-18
+
+Depends on u-numflow 0.14 and u-metaheur 0.14.
+
 ### Added
 
 - An activity's own calendar: `Activity::with_calendar` (held in
