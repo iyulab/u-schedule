@@ -8,6 +8,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `models::joint_working_spans(calendars, start, end)`: the stretches of
+  joint working time within a range — where resumable work placed on it
+  actually runs, the gaps being its pauses. A sibling of `joint_work_end`
+  and `joint_available_ms`.
+
 ### Fixed
 
 - **`SimpleScheduler` now waits for an activity's `predecessors`**, in any

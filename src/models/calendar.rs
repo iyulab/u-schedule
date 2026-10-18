@@ -256,6 +256,25 @@ impl JointTime {
     }
 }
 
+/// The stretches of joint working time of `calendars` within
+/// `[start_ms, end_ms)`, ordered and disjoint: where resumable work placed on
+/// `[start_ms, end_ms)` actually runs, its pauses being the gaps between them.
+/// No calendars: the whole range. An empty or reversed range: none.
+///
+/// # Complexity
+/// O(W log W) over the calendars' windows and blocked periods.
+pub fn joint_working_spans(calendars: &[&Calendar], start_ms: i64, end_ms: i64) -> Vec<(i64, i64)> {
+    if end_ms <= start_ms {
+        return Vec::new();
+    }
+    joint_available(calendars, start_ms)
+        .clip(start_ms, end_ms)
+        .expect("range is ordered: checked above")
+        .iter()
+        .filter(|(s, e)| s < e)
+        .collect()
+}
+
 /// Joint working time of `calendars` within `[start_ms, end_ms)`.
 pub fn joint_available_ms(calendars: &[&Calendar], start_ms: i64, end_ms: i64) -> i64 {
     if end_ms <= start_ms {
@@ -434,6 +453,21 @@ mod tests {
         let cal = Calendar::new("cal").with_window(0, 10).with_window(50, 40);
         assert_eq!(cal.available_time_in_range(0, 100), 10);
         assert!(!cal.is_working_time(45));
+    }
+
+    #[test]
+    fn resumable_work_runs_in_the_joint_working_spans() {
+        // Two shifts with a lunch, and a second calendar that stops at 15.
+        let shifts = Calendar::new("a").with_window(8, 12).with_window(13, 17);
+        let until = Calendar::new("b").with_window(0, 15);
+        let cals = [&shifts, &until];
+        assert_eq!(joint_working_spans(&cals, 11, 15), vec![(11, 12), (13, 15)]);
+        // The spans of a placement add up to the work it was given.
+        let end = joint_work_end(&cals, 11, 3).expect("fits");
+        let spans = joint_working_spans(&cals, 11, end);
+        assert_eq!(spans.iter().map(|(s, e)| e - s).sum::<i64>(), 3);
+        assert_eq!(joint_working_spans(&[], 5, 9), vec![(5, 9)]);
+        assert!(joint_working_spans(&cals, 9, 9).is_empty());
     }
 
     proptest::proptest! {
