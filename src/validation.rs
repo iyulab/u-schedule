@@ -71,6 +71,38 @@ pub enum ValidationErrorKind {
         /// The time given (ms).
         time_ms: i64,
     },
+    /// Two activities of one task share a
+    /// [`sequence`](crate::models::Activity::sequence): which runs first, and
+    /// which step an [`Overlap`](crate::models::Overlap) refers to, would be
+    /// left to the order they were listed in.
+    DuplicateSequence {
+        /// The task.
+        task: String,
+        /// The repeated sequence number.
+        sequence: i32,
+    },
+    /// An [`Overlap`](crate::models::Overlap) on the first step of its task —
+    /// there is no previous step to overlap.
+    OverlapWithoutPreviousStep {
+        /// The activity.
+        activity: String,
+    },
+    /// An overlap's [`start_after`](crate::models::Overlap::start_after) is
+    /// not a number in `[0, 1]`.
+    OverlapShareOutOfRange {
+        /// The activity.
+        activity: String,
+        /// The share given.
+        start_after: f64,
+    },
+    /// An overlap's [`finish_after_ms`](crate::models::Overlap::finish_after_ms)
+    /// is below 0: the step could end before the one it follows.
+    NegativeOverlapLag {
+        /// The activity.
+        activity: String,
+        /// The lag given (ms).
+        finish_after_ms: i64,
+    },
     /// The precedence graph contains a cycle.
     CyclicDependency {
         /// An activity on the cycle.
@@ -218,7 +250,9 @@ impl ValidationErrorKind {
     /// across a wire (`duplicate_id`, `invalid_resource_reference`, ...).
     pub fn code(&self) -> &'static str {
         match self {
-            ValidationErrorKind::DuplicateId { .. } => "duplicate_id",
+            ValidationErrorKind::DuplicateId { .. }
+            | ValidationErrorKind::DuplicateSequence { .. } => "duplicate_id",
+            ValidationErrorKind::OverlapWithoutPreviousStep { .. } => "invalid_option",
             ValidationErrorKind::InvalidResourceReference { .. }
             | ValidationErrorKind::InvalidCompanion { .. }
             | ValidationErrorKind::InvalidTransportTarget { .. } => "invalid_resource_reference",
@@ -236,6 +270,8 @@ impl ValidationErrorKind {
             | ValidationErrorKind::CapacityOutOfRange { .. }
             | ValidationErrorKind::UsageOutOfRange { .. }
             | ValidationErrorKind::NegativeTransport { .. }
+            | ValidationErrorKind::OverlapShareOutOfRange { .. }
+            | ValidationErrorKind::NegativeOverlapLag { .. }
             | ValidationErrorKind::TardinessWeightOutOfRange { .. } => "parameter_out_of_range",
         }
     }
@@ -276,6 +312,24 @@ impl ValidationError {
                 time_ms,
             } => format!(
                 "Resource '{resource}' gives transport time {time_ms} ms to '{to}'; a transport time must be >= 0"
+            ),
+            ValidationErrorKind::DuplicateSequence { task, sequence } => {
+                format!("Task '{task}' has two activities with sequence {sequence}")
+            }
+            ValidationErrorKind::OverlapWithoutPreviousStep { activity } => format!(
+                "Activity '{activity}' overlaps the previous step of its task, but it is the first step"
+            ),
+            ValidationErrorKind::OverlapShareOutOfRange {
+                activity,
+                start_after,
+            } => format!(
+                "Activity '{activity}' starts after {start_after} of the previous step; the share must be in [0, 1]"
+            ),
+            ValidationErrorKind::NegativeOverlapLag {
+                activity,
+                finish_after_ms,
+            } => format!(
+                "Activity '{activity}' ends {finish_after_ms} ms after the previous step; the lag must be >= 0"
             ),
             ValidationErrorKind::CyclicDependency { activity } => {
                 format!("Circular dependency detected involving activity '{activity}'")
@@ -376,6 +430,9 @@ fn reversed_periods(
 /// 12. Every companion names another existing resource
 /// 13. Every transport time is `>= 0` and to another existing resource
 /// 14. Every requirement's usage is at least 1
+/// 15. No two activities of a task share a `sequence`
+/// 16. Every overlap is on a step after the first, with `start_after` in
+///     `[0, 1]` and `finish_after_ms >= 0`
 ///
 /// # Returns
 /// `Ok(())` if all checks pass, `Err(errors)` with all detected issues.
@@ -439,6 +496,47 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
             errors.push(ValidationError::new(ValidationErrorKind::EmptyTask {
                 task: task.id.clone(),
             }));
+        }
+
+        let mut sequences = HashSet::new();
+        for act in &task.activities {
+            if !sequences.insert(act.sequence) {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::DuplicateSequence {
+                        task: task.id.clone(),
+                        sequence: act.sequence,
+                    },
+                ));
+            }
+        }
+        let first = task.activities.iter().map(|a| a.sequence).min();
+        for act in &task.activities {
+            let Some(overlap) = &act.overlap else {
+                continue;
+            };
+            if Some(act.sequence) == first {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::OverlapWithoutPreviousStep {
+                        activity: act.id.clone(),
+                    },
+                ));
+            }
+            if !(0.0..=1.0).contains(&overlap.start_after) {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::OverlapShareOutOfRange {
+                        activity: act.id.clone(),
+                        start_after: overlap.start_after,
+                    },
+                ));
+            }
+            if overlap.finish_after_ms < 0 {
+                errors.push(ValidationError::new(
+                    ValidationErrorKind::NegativeOverlapLag {
+                        activity: act.id.clone(),
+                        finish_after_ms: overlap.finish_after_ms,
+                    },
+                ));
+            }
         }
 
         for act in &task.activities {
@@ -595,7 +693,7 @@ pub fn validate_input(tasks: &[Task], resources: &[Resource]) -> ValidationResul
 /// Detects cycles in the precedence graph using DFS.
 ///
 /// The graph holds every `predecessors` edge and the order a task runs its
-/// activities in (each before the next): an activity waiting on a later
+/// activities in (each before the next, by `sequence`): an activity waiting on a later
 /// activity of its own task, or two tasks each waiting on the other's later
 /// step, can never start, though no `predecessors` edges alone close a loop.
 ///
@@ -617,7 +715,9 @@ fn detect_cycles(tasks: &[Task]) -> Option<ValidationError> {
                 adj.entry(pred.as_str()).or_default().push(act.id.as_str());
             }
         }
-        for pair in task.activities.windows(2) {
+        let mut steps: Vec<&crate::models::Activity> = task.activities.iter().collect();
+        steps.sort_by_key(|a| a.sequence);
+        for pair in steps.windows(2) {
             adj.entry(pair[0].id.as_str())
                 .or_default()
                 .push(pair[1].id.as_str());

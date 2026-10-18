@@ -130,9 +130,9 @@ impl Code {
                 "to",
                 "errors",
             ],
-            Code::InvalidOption => &["parameter", "rule"],
+            Code::InvalidOption => &["parameter", "rule", "activity", "errors"],
             Code::EmptyInput => &["parameter", "task", "errors"],
-            Code::DuplicateId => &["entity", "id", "first", "second", "errors"],
+            Code::DuplicateId => &["entity", "id", "task", "first", "second", "errors"],
             Code::MissingMachine => &["job", "operation"],
             Code::NoMachines | Code::Internal => &[],
             Code::InvalidResourceReference => {
@@ -500,6 +500,27 @@ fn finding_fields(kind: &ValidationErrorKind) -> serde_json::Value {
         } => json!({
             "parameter": "transport_times", "resource": resource, "to": to, "min": 0.0,
             "max": null, "got": ms_to_sec(*time_ms),
+        }),
+        // Two steps of one task with one sequence: the id repeated is the step number.
+        ValidationErrorKind::DuplicateSequence { task, sequence } => {
+            json!({ "entity": "sequence", "task": task, "id": sequence })
+        }
+        ValidationErrorKind::OverlapWithoutPreviousStep { activity } => {
+            json!({ "parameter": "overlap", "activity": activity })
+        }
+        ValidationErrorKind::OverlapShareOutOfRange {
+            activity,
+            start_after,
+        } => json!({
+            "parameter": "overlap.start_after", "activity": activity, "min": 0.0, "max": 1.0,
+            "got": start_after,
+        }),
+        ValidationErrorKind::NegativeOverlapLag {
+            activity,
+            finish_after_ms,
+        } => json!({
+            "parameter": "overlap.finish_after", "activity": activity, "min": 0.0, "max": null,
+            "got": ms_to_sec(*finish_after_ms),
         }),
         ValidationErrorKind::CyclicDependency { activity } => json!({ "activity": activity }),
         ValidationErrorKind::EmptyTask { task } => {
@@ -2472,6 +2493,21 @@ mod tests {
                 predecessor: String::new(),
             },
             ValidationErrorKind::TardinessWeightOutOfRange { weight: 2.0 },
+            ValidationErrorKind::DuplicateSequence {
+                task: String::new(),
+                sequence: 1,
+            },
+            ValidationErrorKind::OverlapWithoutPreviousStep {
+                activity: String::new(),
+            },
+            ValidationErrorKind::OverlapShareOutOfRange {
+                activity: String::new(),
+                start_after: 2.0,
+            },
+            ValidationErrorKind::NegativeOverlapLag {
+                activity: String::new(),
+                finish_after_ms: -1,
+            },
         ];
         for kind in &kinds {
             assert_eq!(Code::of(kind).name(), kind.code());

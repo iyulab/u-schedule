@@ -17,6 +17,29 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   cost, the rule's cost, the generations run and why it stopped. `search`
   takes the population, the generation and stagnation budgets, a seed, a time
   limit and the weight of tardiness against makespan.
+- **Breaking:** `Activity::overlap` (`models::Overlap { start_after,
+  finish_after_ms }`): a step that overlaps the previous step of its task, as
+  when the work moves on in transfer batches. It may start once
+  `start_after` (a share in `[0, 1]`) of the previous step's scheduled span
+  has passed, and ends no earlier than the previous step's end plus
+  `finish_after_ms` -- the transport between their resources adding to both.
+  `SimpleScheduler` (and `DispatchSearch`) place by both bounds, holding back
+  a step that would end too early, and the feasibility check reports either
+  bound broken as a `PrecedenceViolation`. `Problem::new` refuses an overlap
+  on a task's first step (`invalid_option`), a share outside `[0, 1]` or a
+  negative lag (`parameter_out_of_range`). A new public field: a struct
+  literal of `Activity` needs it.
+
+### Changed
+
+- **Breaking:** a task's steps run in `sequence` order everywhere.
+  `Problem::new` keeps each task's activities sorted by `sequence` and refuses
+  two activities of one task with the same `sequence` (`duplicate_id`,
+  `ValidationErrorKind::DuplicateSequence`). `SimpleScheduler` and the CP
+  model used to read the order the activities were listed in, while the
+  feasibility check and the genetic algorithm read `sequence` -- a task listed
+  out of order was scheduled in one order and checked in the other, and two
+  steps with one `sequence` collided in the genetic algorithm's index.
 
 ## [0.29.0] - 2026-10-18
 

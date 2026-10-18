@@ -594,6 +594,7 @@ fn check_precedence(
             .map(|a| a.resource_id.as_str())
             .collect()
     };
+    let mut overlapped = Vec::new();
     for task in input.tasks {
         let mut ordered: Vec<&Activity> = task.activities.iter().collect();
         ordered.sort_by_key(|a| a.sequence);
@@ -604,7 +605,10 @@ fn check_precedence(
                 runs_on(&pair[0].id),
                 &runs_on(&pair[1].id),
             );
-            push(&pair[0].id, &pair[1].id, transport);
+            match &pair[1].overlap {
+                None => push(&pair[0].id, &pair[1].id, transport),
+                Some(overlap) => overlapped.push((pair[0], pair[1], overlap, transport)),
+            }
         }
         for activity in &task.activities {
             for pred in &activity.predecessors {
@@ -620,6 +624,36 @@ fn check_precedence(
         } = c
         {
             push(before, after, *min_delay_ms);
+        }
+    }
+    // A step that overlaps the one before: two bounds instead of end-to-start
+    // (`Overlap`), each on top of the transport between them.
+    for (before, after, overlap, transport) in overlapped {
+        let (Some(previous), Some((start, end))) = (
+            activity_span(schedule, &before.id),
+            activity_span(schedule, &after.id),
+        ) else {
+            continue;
+        };
+        let earliest_start = overlap.earliest_start(previous) + transport;
+        if start < earliest_start {
+            out.push(Violation::precedence_violation(
+                &after.id,
+                format!(
+                    "'{}' starts at {start}, before {earliest_start}: {} of '{}' ({}..{}) + transport {transport}",
+                    after.id, overlap.start_after, before.id, previous.0, previous.1
+                ),
+            ));
+        }
+        let earliest_end = overlap.earliest_end(previous.1) + transport;
+        if end < earliest_end {
+            out.push(Violation::precedence_violation(
+                &after.id,
+                format!(
+                    "'{}' ends at {end}, before {earliest_end}: '{}' end {} + lag {} + transport {transport}",
+                    after.id, before.id, previous.1, overlap.finish_after_ms
+                ),
+            ));
         }
     }
 }
@@ -1152,6 +1186,61 @@ mod tests {
         Task::new("J")
             .with_activity(on("J-1", 0, vec![first.to_string()]))
             .with_activity(on("J-2", 1, next.iter().map(|m| m.to_string()).collect()))
+    }
+
+    fn overlapped(share: f64, lag: i64) -> Vec<Task> {
+        vec![Task::new("J")
+            .with_activity(
+                Activity::new("cut", "J", 1)
+                    .with_process_time(100)
+                    .with_requirement(ResourceRequirement::new("M")),
+            )
+            .with_activity(
+                Activity::new("bend", "J", 2)
+                    .with_process_time(100)
+                    .with_requirement(ResourceRequirement::new("M"))
+                    .with_overlap(crate::models::Overlap::new(share).with_finish_after(lag)),
+            )]
+    }
+
+    fn two_steps(bend_start: i64, bend_end: i64) -> Schedule {
+        let mut s = Schedule::new();
+        s.add_assignment(Assignment::new("cut", "J", "M1", 0, 100));
+        s.add_assignment(Assignment::new("bend", "J", "M2", bend_start, bend_end));
+        s
+    }
+
+    #[test]
+    fn an_overlapping_step_may_start_once_its_share_is_done_but_not_end_first() {
+        let tasks = overlapped(0.3, 10);
+        let resources = vec![Resource::new("M1", "M"), Resource::new("M2", "M")];
+        let input = FeasibilityInput {
+            tasks: &tasks,
+            resources: &resources,
+            constraints: &[],
+        };
+        // From 30 (0.3 of 0..100) on, ending at 110 (100 + 10) or later: clean.
+        assert!(check_schedule(&two_steps(30, 130), &input).is_empty());
+        let early_start = check_schedule(&two_steps(10, 110), &input);
+        assert_eq!(early_start.len(), 1, "{early_start:?}");
+        assert!(early_start[0].message.contains("starts at 10"));
+        // Ends at 105: the last batch is not through yet.
+        let mut tasks = tasks.clone();
+        tasks[0].activities[1].duration = crate::models::ActivityDuration::fixed(75);
+        let input = FeasibilityInput {
+            tasks: &tasks,
+            ..input
+        };
+        let early_end = check_schedule(&two_steps(30, 105), &input);
+        assert_eq!(early_end.len(), 1, "{early_end:?}");
+        assert_eq!(
+            early_end[0].violation_type,
+            ViolationType::PrecedenceViolation
+        );
+        assert!(
+            early_end[0].message.contains("ends at 105"),
+            "{early_end:?}"
+        );
     }
 
     #[test]

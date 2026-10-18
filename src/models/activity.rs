@@ -66,6 +66,11 @@ pub struct Activity {
     pub resource_requirements: Vec<ResourceRequirement>,
     /// IDs of activities that must complete before this one starts.
     pub predecessors: Vec<String>,
+    /// How this activity overlaps the previous step of its task (the one of
+    /// the next lower [`sequence`](Self::sequence)) — it may start before
+    /// that step ends. `None`: it starts once the previous step ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<Overlap>,
     /// Domain-specific metadata.
     pub attributes: HashMap<String, String>,
 }
@@ -84,8 +89,16 @@ impl Activity {
             calendar: None,
             resource_requirements: Vec::new(),
             predecessors: Vec::new(),
+            overlap: None,
             attributes: HashMap::new(),
         }
+    }
+
+    /// Lets the activity overlap the previous step of its task
+    /// ([`overlap`](Self::overlap)).
+    pub fn with_overlap(mut self, overlap: Overlap) -> Self {
+        self.overlap = Some(overlap);
+        self
     }
 
     /// Starts the activity no earlier than `release_ms`
@@ -284,6 +297,65 @@ impl Default for ActivityDuration {
     }
 }
 
+/// How an activity overlaps the previous step of its task: the work moves on
+/// in transfer batches, so the next step starts once part of the previous
+/// one is done and ends after it.
+///
+/// Two bounds, both on the previous step `p` as scheduled (its actual span
+/// on the resources it ran on):
+///
+/// - start `>= p.start + ⌈start_after · (p.end − p.start)⌉` — the first
+///   batch is done;
+/// - end `>= p.end + finish_after_ms` — the last batch reaches this step
+///   only once the previous one ends, and still has to be worked.
+///
+/// The transport time from the previous step's resources
+/// ([`Resource::transport_ms`]) adds to both. `start_after = 1` with
+/// `finish_after_ms = 0` is the ordinary end-to-start precedence.
+///
+/// # Reference
+/// Bartusch, Möhring & Radermacher (1988), generalized precedence relations
+/// (start-to-start and finish-to-finish time lags); Trietsch & Baker (1993),
+/// basic techniques for lot streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Overlap {
+    /// The share of the previous step's span that must have passed before
+    /// this one starts, in `[0, 1]`.
+    pub start_after: f64,
+    /// The least time from the previous step's end to this one's (ms, `>= 0`).
+    #[serde(default)]
+    pub finish_after_ms: i64,
+}
+
+impl Overlap {
+    /// Starts after `start_after` of the previous step's span, ends no
+    /// earlier than the previous step.
+    pub fn new(start_after: f64) -> Self {
+        Self {
+            start_after,
+            finish_after_ms: 0,
+        }
+    }
+
+    /// Ends at least `finish_after_ms` after the previous step
+    /// ([`finish_after_ms`](Self::finish_after_ms)).
+    pub fn with_finish_after(mut self, finish_after_ms: i64) -> Self {
+        self.finish_after_ms = finish_after_ms;
+        self
+    }
+
+    /// The earliest this step may start, given the previous step's span.
+    pub fn earliest_start(&self, previous: (i64, i64)) -> i64 {
+        let (start, end) = previous;
+        start + (self.start_after * (end - start) as f64).ceil() as i64
+    }
+
+    /// The earliest this step may end, given the previous step's end.
+    pub fn earliest_end(&self, previous_end: i64) -> i64 {
+        previous_end + self.finish_after_ms
+    }
+}
+
 /// A resource requirement for an activity.
 ///
 /// Specifies what type and quantity of resources are needed,
@@ -399,6 +471,17 @@ mod tests {
         assert_eq!(act.duration.total_ms(), 650);
         assert_eq!(act.resource_requirements.len(), 1);
         assert_eq!(act.predecessors, vec!["O0"]);
+    }
+
+    #[test]
+    fn an_overlap_bounds_the_start_by_a_share_of_the_previous_span_and_the_end_by_its_end() {
+        let overlap = Overlap::new(0.25).with_finish_after(10);
+        // A 0..90 step: a quarter is 22.5 ms, rounded up.
+        assert_eq!(overlap.earliest_start((0, 90)), 23);
+        assert_eq!(overlap.earliest_start((100, 100)), 100);
+        assert_eq!(overlap.earliest_end(90), 100);
+        // The whole span with no lag is end-to-start.
+        assert_eq!(Overlap::new(1.0).earliest_start((5, 50)), 50);
     }
 
     #[test]

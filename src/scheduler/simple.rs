@@ -319,6 +319,10 @@ impl SimpleScheduler {
         // Per task: the resources its last placed activity ran on, which the
         // work moves on from (`Resource::transport_ms`).
         let mut came_from: Vec<Vec<String>> = vec![Vec::new(); tasks.len()];
+        // Per task: the span of its previous step, which a step that
+        // overlaps it (`Activity::overlap`) is bounded by — `None` once a
+        // step is left unplaced.
+        let mut previous: Vec<Option<(i64, i64)>> = vec![None; tasks.len()];
 
         // The resources each activity may run on, by task and step, as sets
         // of resource positions (WINQ asks whether two of them meet).
@@ -364,12 +368,23 @@ impl SimpleScheduler {
                     if let Some(pins) = fixed_by_activity.get(activity.id.as_str()) {
                         // 고정 activity: SGS 스킵, 후속 커서를 pin end 이후로 전진
                         let pin_end = pins.iter().map(|p| p.end_ms).max().unwrap_or(ready[i]);
+                        let pin_start = pins.iter().map(|p| p.start_ms).min().unwrap_or(pin_end);
                         ready[i] = ready[i].max(pin_end);
                         came_from[i] = pins.iter().map(|p| p.resource_id.clone()).collect();
+                        previous[i] = Some((pin_start, pin_end));
                         settled.insert(&activity.id, Some(pin_end));
                         cursor[i] += 1;
                         continue;
                     }
+                    // A step that overlaps the previous one may start once its
+                    // share of that step is done, not only at its end.
+                    let finish_floor = match (&activity.overlap, previous[i]) {
+                        (Some(overlap), Some(span)) => {
+                            ready[i] = overlap.earliest_start(span);
+                            Some(overlap.earliest_end(span.1))
+                        }
+                        _ => None,
+                    };
                     let mut waits = false;
                     for predecessor in &activity.predecessors {
                         match settled.get(predecessor.as_str()) {
@@ -386,11 +401,20 @@ impl SimpleScheduler {
                         // runs when the task reaches it. The work stays where
                         // it was (`came_from`). Never placed: the feasibility
                         // check reports it.
-                        let from = activity.release_time.map_or(ready[i], |r| ready[i].max(r));
+                        let mut from = activity.release_time.map_or(ready[i], |r| ready[i].max(r));
+                        let span = loop {
+                            let span =
+                                time_only_span(activity, own.get(activity.id.as_str()), from);
+                            match (span, finish_floor) {
+                                // Ends too early: start later by as much.
+                                (Some((start, end)), Some(floor)) if end < floor => {
+                                    from = start + (floor - end);
+                                }
+                                _ => break span,
+                            }
+                        };
                         let mut end_ms = None;
-                        if let Some((start, end)) =
-                            time_only_span(activity, own.get(activity.id.as_str()), from)
-                        {
+                        if let Some((start, end)) = span {
                             schedule.time_only.push(
                                 TimeOnlySpan::new(&activity.id, &task.id, start, end)
                                     .with_sequence(cursor[i] as i32 + 1),
@@ -398,11 +422,12 @@ impl SimpleScheduler {
                             ready[i] = end;
                             end_ms = Some(end);
                         }
+                        previous[i] = span;
                         settled.insert(&activity.id, end_ms);
                         cursor[i] += 1;
                         continue;
                     }
-                    match self.place_activity(
+                    match self.place_ending_after(
                         activity,
                         task,
                         &timelines,
@@ -411,6 +436,7 @@ impl SimpleScheduler {
                         resources,
                         ready[i],
                         &came_from[i],
+                        finish_floor,
                     ) {
                         Some(placement) => {
                             let read = self.read_by(activity, &placement, resources);
@@ -420,6 +446,7 @@ impl SimpleScheduler {
                         }
                         // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
                         None => {
+                            previous[i] = None;
                             settled.insert(&activity.id, None);
                             cursor[i] += 1;
                         }
@@ -510,6 +537,7 @@ impl SimpleScheduler {
                 }
             }
             ready[i] = placement.end_ms;
+            previous[i] = Some((placement.start_ms, placement.end_ms));
             settled.insert(&activity.id, Some(placement.end_ms));
             came_from[i] = placement
                 .selections
@@ -555,6 +583,76 @@ impl SimpleScheduler {
             }
         }
         read
+    }
+
+    /// [`place_activity`](Self::place_activity), ending no earlier than
+    /// `finish_floor` plus the transport from `came_from` to the resources
+    /// chosen — a step that overlaps the previous one cannot end before it
+    /// ([`Overlap::earliest_end`](crate::models::Overlap::earliest_end)). An
+    /// offer that ends too early is made again that much later.
+    #[allow(clippy::too_many_arguments)]
+    fn place_ending_after(
+        &self,
+        activity: &Activity,
+        task: &Task,
+        timelines: &HashMap<String, ResourceTimeline>,
+        own: Option<&ResourceTimeline>,
+        last_category: &HashMap<String, String>,
+        resources: &[Resource],
+        ready: i64,
+        came_from: &[String],
+        finish_floor: Option<i64>,
+    ) -> Option<Placement> {
+        let place = |ready: i64| {
+            self.place_activity(
+                activity,
+                task,
+                timelines,
+                own,
+                last_category,
+                resources,
+                ready,
+                came_from,
+            )
+        };
+        let placement = place(ready)?;
+        let Some(floor) = finish_floor else {
+            return Some(placement);
+        };
+        // How far short of the floor (and the transport to where it runs) an
+        // offer ends.
+        let short = |p: &Placement| -> i64 {
+            let to: Vec<&str> = p
+                .selections
+                .iter()
+                .map(|(rid, _, _)| rid.as_str())
+                .collect();
+            let transport = transport_between(
+                |id| resources.iter().find(|r| r.id == id),
+                came_from.iter().map(String::as_str),
+                &to,
+            );
+            floor + transport - p.end_ms
+        };
+        let (mut lo, mut hi, mut best) = (ready, ready, placement);
+        // Later by as much as it ends too early, until it does not — exact
+        // for work that runs without a pause. `ready` is before the
+        // transport, which the offer adds again.
+        while short(&best) > 0 {
+            lo = hi;
+            hi += short(&best);
+            best = place(hi)?;
+        }
+        // Work that pauses (a break inside the span) can overshoot: the
+        // earliest start whose end clears the floor lies in `(lo, hi]`.
+        while short(&best) < 0 && hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            match place(mid) {
+                Some(p) if short(&p) <= 0 => (hi, best) = (mid, p),
+                _ => lo = mid,
+            }
+        }
+        Some(best)
     }
 
     /// Finds the earliest common start for an activity across all its
@@ -2103,6 +2201,130 @@ mod tests {
         let resources = machines(&["A", "B"]);
         let s = SimpleScheduler::new().schedule(&valid(&[released_second()], &resources), 0);
         assert_eq!((start_of(&s, "J1-1"), start_of(&s, "J1-2")), (0, 5_000));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    /// Cut on M1 (`cut_ms`), then bend on M2 (`bend_ms`) overlapping it.
+    fn cut_then_bend(cut_ms: i64, bend_ms: i64, overlap: crate::models::Overlap) -> Task {
+        let step = |id: &str, seq: i32, ms: i64, machine: &str| {
+            Activity::new(id, "J", seq)
+                .with_process_time(ms)
+                .with_requirement(
+                    ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+                )
+        };
+        Task::new("J")
+            .with_activity(step("cut", 1, cut_ms, "M1"))
+            .with_activity(step("bend", 2, bend_ms, "M2").with_overlap(overlap))
+    }
+
+    fn span_of(s: &Schedule, activity: &str) -> (i64, i64) {
+        let a = s.assignment_for_activity(activity).expect(activity);
+        (a.start_ms, a.end_ms)
+    }
+
+    #[test]
+    fn an_overlapping_step_starts_once_its_share_of_the_previous_step_is_done() {
+        use crate::models::Overlap;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        let s = SimpleScheduler::new().schedule(
+            &valid(&[cut_then_bend(1_000, 1_000, Overlap::new(0.3))], &machines),
+            0,
+        );
+        assert_eq!(span_of(&s, "cut"), (0, 1_000));
+        assert_eq!(span_of(&s, "bend"), (300, 1_300));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn a_shorter_overlapping_step_is_held_back_so_it_ends_after_the_previous_one() {
+        use crate::models::Overlap;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        // Free to start at once, but 200 ms of bending cannot finish before
+        // the last of 1 000 ms of cutting: it starts at 800.
+        let s = SimpleScheduler::new().schedule(
+            &valid(&[cut_then_bend(1_000, 200, Overlap::new(0.0))], &machines),
+            0,
+        );
+        assert_eq!(span_of(&s, "bend"), (800, 1_000));
+        // With a lag, the last batch is still worked after the cut ends.
+        let s = SimpleScheduler::new().schedule(
+            &valid(
+                &[cut_then_bend(
+                    1_000,
+                    200,
+                    Overlap::new(0.0).with_finish_after(50),
+                )],
+                &machines,
+            ),
+            0,
+        );
+        assert_eq!(span_of(&s, "bend"), (850, 1_050));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn the_transport_between_overlapping_steps_adds_to_both_bounds() {
+        use crate::models::Overlap;
+        let machines = vec![
+            make_resource("M1").with_transport_to("M2", 100),
+            make_resource("M2"),
+        ];
+        let long = SimpleScheduler::new().schedule(
+            &valid(&[cut_then_bend(1_000, 1_000, Overlap::new(0.3))], &machines),
+            0,
+        );
+        assert_eq!(span_of(&long, "bend"), (400, 1_400));
+        let short = SimpleScheduler::new().schedule(
+            &valid(&[cut_then_bend(1_000, 200, Overlap::new(0.3))], &machines),
+            0,
+        );
+        assert_eq!(span_of(&short, "bend"), (900, 1_100));
+        assert!(long.violations.is_empty() && short.violations.is_empty());
+    }
+
+    #[test]
+    fn an_overlapping_step_waits_for_its_machine_like_any_other() {
+        use crate::models::Overlap;
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        // M2 is busy until 600: bend starts there, not at 300.
+        let busy = on("other", "M2", 600).with_priority(10);
+        let s = SimpleScheduler::new().schedule(
+            &valid(
+                &[busy, cut_then_bend(1_000, 1_000, Overlap::new(0.3))],
+                &machines,
+            ),
+            0,
+        );
+        assert_eq!(span_of(&s, "bend"), (600, 1_600));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn resumable_overlapping_work_starts_as_early_as_still_ends_after_the_previous_step() {
+        use crate::models::{Calendar, Overlap};
+        let machines = vec![
+            make_resource("M1"),
+            make_resource("M2")
+                .with_calendar(Calendar::always_available("M2").with_blocked(900, 1_000)),
+        ];
+        let mut task = cut_then_bend(1_000, 200, Overlap::new(0.0));
+        task.activities[1] = task.activities[1].clone().resumable();
+        let s = SimpleScheduler::new().schedule(&valid(&[task], &machines), 0);
+        // 199 ms before the break, 1 ms after: ends at 1 001, just past the cut.
+        let bend = s.assignment_for_activity("bend").expect("bend");
+        assert_eq!((bend.start_ms, bend.end_ms), (701, 1_001));
+        assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+
+    #[test]
+    fn a_task_listed_out_of_sequence_runs_its_steps_in_sequence_order() {
+        let machines = vec![make_resource("M1"), make_resource("M2")];
+        let mut task = cut_then_bend(1_000, 1_000, crate::models::Overlap::new(1.0));
+        task.activities.reverse();
+        let s = SimpleScheduler::new().schedule(&valid(&[task], &machines), 0);
+        assert_eq!(span_of(&s, "cut"), (0, 1_000));
+        assert_eq!(span_of(&s, "bend"), (1_000, 2_000));
         assert!(s.violations.is_empty(), "{:?}", s.violations);
     }
 }

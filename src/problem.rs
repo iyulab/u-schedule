@@ -9,7 +9,9 @@ use crate::validation::{validate_input, ValidationError};
 /// A `Problem` exists only for input that passes
 /// [`validate_input`]: every task, activity and resource has its own id, every
 /// resource an activity names and every predecessor it waits on exists, the
-/// precedence graph has no cycle, and every task has an activity. The solvers
+/// precedence graph has no cycle, and every task has an activity, each with
+/// its own `sequence`. A task's activities are kept in `sequence` order — the
+/// order its steps run in, which every solver reads. The solvers
 /// ([`SchedulingGaProblem`](crate::ga::SchedulingGaProblem),
 /// [`ScheduleCpBuilder`](crate::cp::ScheduleCpBuilder),
 /// [`SimpleScheduler`](crate::scheduler::SimpleScheduler)) take only this type.
@@ -44,12 +46,19 @@ impl Problem {
     /// # Errors
     ///
     /// Every problem [`validate_input`] finds, not only the first.
-    pub fn new(tasks: Vec<Task>, resources: Vec<Resource>) -> Result<Self, Vec<ValidationError>> {
+    pub fn new(
+        mut tasks: Vec<Task>,
+        resources: Vec<Resource>,
+    ) -> Result<Self, Vec<ValidationError>> {
         validate_input(&tasks, &resources)?;
+        for task in &mut tasks {
+            task.activities.sort_by_key(|a| a.sequence);
+        }
         Ok(Self { tasks, resources })
     }
 
-    /// The tasks, in the order given.
+    /// The tasks, in the order given — each one's activities in `sequence`
+    /// order.
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
     }
@@ -79,6 +88,78 @@ mod tests {
         let problem = Problem::new(tasks, vec![]).expect("valid");
         let ids: Vec<&str> = problem.tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["B", "A"]);
+    }
+
+    #[test]
+    fn a_tasks_steps_run_in_sequence_order_whatever_order_they_are_listed_in() {
+        let tasks = vec![Task::new("J")
+            .with_activity(Activity::new("second", "J", 2).with_process_time(1))
+            .with_activity(Activity::new("first", "J", 1).with_process_time(1))];
+        let problem = Problem::new(tasks, vec![]).expect("valid");
+        let ids: Vec<&str> = problem.tasks()[0]
+            .activities
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(ids, ["first", "second"]);
+    }
+
+    #[test]
+    fn two_steps_of_a_task_with_one_sequence_are_refused() {
+        let tasks = vec![Task::new("J")
+            .with_activity(Activity::new("a", "J", 1).with_process_time(1))
+            .with_activity(Activity::new("b", "J", 1).with_process_time(1))];
+        let errors = Problem::new(tasks, vec![]).expect_err("ambiguous order");
+        assert_eq!(
+            errors[0].kind,
+            crate::validation::ValidationErrorKind::DuplicateSequence {
+                task: "J".into(),
+                sequence: 1
+            }
+        );
+        assert_eq!(errors[0].kind.code(), "duplicate_id");
+    }
+
+    #[test]
+    fn an_overlap_needs_a_previous_step_a_share_in_0_1_and_a_lag_of_at_least_0() {
+        use crate::models::Overlap;
+        use crate::validation::ValidationErrorKind as K;
+        let tasks = vec![Task::new("J")
+            .with_activity(
+                Activity::new("a", "J", 1)
+                    .with_process_time(1)
+                    .with_overlap(Overlap::new(0.5)),
+            )
+            .with_activity(
+                Activity::new("b", "J", 2)
+                    .with_process_time(1)
+                    .with_overlap(Overlap::new(1.5).with_finish_after(-1)),
+            )];
+        let errors = Problem::new(tasks, vec![]).expect_err("three faults");
+        let kinds: Vec<&K> = errors.iter().map(|e| &e.kind).collect();
+        assert!(kinds.contains(&&K::OverlapWithoutPreviousStep {
+            activity: "a".into()
+        }));
+        assert!(kinds.contains(&&K::OverlapShareOutOfRange {
+            activity: "b".into(),
+            start_after: 1.5
+        }));
+        assert!(kinds.contains(&&K::NegativeOverlapLag {
+            activity: "b".into(),
+            finish_after_ms: -1
+        }));
+        // A NaN share is out of range too.
+        let nan = vec![Task::new("J")
+            .with_activity(Activity::new("a", "J", 1).with_process_time(1))
+            .with_activity(
+                Activity::new("b", "J", 2)
+                    .with_process_time(1)
+                    .with_overlap(Overlap::new(f64::NAN)),
+            )];
+        assert_eq!(
+            Problem::new(nan, vec![]).expect_err("NaN")[0].kind.code(),
+            "parameter_out_of_range"
+        );
     }
 
     #[test]
