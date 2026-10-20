@@ -1044,7 +1044,7 @@ fn refuse_time_span(span: f64) -> Result<(), WireError> {
     Err(WireError::new(
         Code::ParameterOutOfRange,
         format!(
-            "the times given add up to {span} seconds; the engine counts milliseconds in 64 bits,              so they must add up to at most {MAX_SPAN_S}"
+            "the times given add up to {span} seconds; the engine counts milliseconds in 64 bits, so they must add up to at most {MAX_SPAN_S}"
         ),
         fields,
     ))
