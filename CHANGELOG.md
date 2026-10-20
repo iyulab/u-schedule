@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-10-20
+
+Depends on u-numflow 0.14 and u-metaheur 0.14.
+
 ### Fixed
 
 - Times that added up past what the engine's 64-bit milliseconds hold (processing
