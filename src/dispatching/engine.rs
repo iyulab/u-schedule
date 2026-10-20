@@ -56,6 +56,10 @@ pub struct RuleEngine {
     rules: Vec<WeightedRule>,
     mode: EvaluationMode,
     tie_breaker: TieBreaker,
+    /// Two scores closer than this fraction of the larger one are tied
+    /// (relative, because scores have the unit of their rule: a ratio such as
+    /// `w / p` shrinks as processing times grow, and a fixed gap would tie
+    /// every pair of long jobs).
     epsilon: f64,
 }
 
@@ -166,7 +170,8 @@ impl RuleEngine {
                             == std::cmp::Ordering::Less
                     }
                     EvaluationMode::Weighted => {
-                        self.weighted_score(&tasks[i], context) < b_score - self.epsilon
+                        self.weighted_score(&tasks[i], context)
+                            < b_score - self.epsilon * b_score.abs()
                     }
                 },
             };
@@ -199,7 +204,7 @@ impl RuleEngine {
             let score_a = wr.rule.evaluate(a, context);
             let score_b = wr.rule.evaluate(b, context);
 
-            if (score_a - score_b).abs() > self.epsilon {
+            if (score_a - score_b).abs() > self.epsilon * score_a.abs().max(score_b.abs()) {
                 return score_a
                     .partial_cmp(&score_b)
                     .unwrap_or(std::cmp::Ordering::Equal);
@@ -348,6 +353,24 @@ mod tests {
         let indices = engine.sort_indices(&tasks, &ctx);
         // SPT ties → ById → A before B
         assert_eq!(tasks[indices[0]].id, "A");
+    }
+
+    /// A score ratio such as `w / p` shrinks as the jobs get longer; two jobs
+    /// of three and four days differ by 1e-9, which is a real difference.
+    #[test]
+    fn a_small_score_gap_is_not_a_tie() {
+        const DAY_MS: i64 = 86_400_000;
+        let tasks = vec![
+            make_task("four", 4 * DAY_MS, None, 0),
+            make_task("three", 3 * DAY_MS, None, 0),
+        ];
+        let ctx = SchedulingContext::at_time(0);
+        let engine = RuleEngine::new()
+            .with_rule(rules::Wspt)
+            .with_final_tie_breaker(TieBreaker::ById);
+        let indices = engine.sort_indices(&tasks, &ctx);
+        // Same weight: the shorter job goes first (ById would put "four" first).
+        assert_eq!(tasks[indices[0]].id, "three");
     }
 
     #[test]

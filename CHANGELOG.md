@@ -8,6 +8,15 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Fixed
+
+- `RuleEngine` decided that two scores were tied when they differed by less than an
+  absolute 1e-9. A ratio rule's score shrinks as the jobs get longer (`WSPT` scores
+  `w / p` with `p` in milliseconds, about 4e-9 for a three-day job), so jobs of
+  three and four days were tied and left in the order they arrived in, and a
+  schedule changed with the unit its times were given in. Scores are now tied when
+  they differ by less than 1e-9 of the larger one.
+
 ## [0.30.0] - 2026-10-19
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

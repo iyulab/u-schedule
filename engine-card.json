@@ -64,7 +64,37 @@
         "test": "src/wasm.rs::engine_card_tests::the_same_request_gives_the_same_answer"
       },
       "validation": {
-        "status": "none"
+        "status": "partial",
+        "checks": [
+          {
+            "claim": "Every rule on one to three machines returns each job once, no earlier than its release, for its processing time, with no two jobs at once on a machine; makespan, total tardiness, per-job tardiness, busy time and utilization equal the figures the entries add up to.",
+            "reference_kind": "literature",
+            "reference": "the definition of a feasible dispatching schedule and its figures",
+            "method": "13 rules x 1-3 machines x 3 seeded eight-job shops, recomputed from the entries",
+            "tolerance": "1e-9 relative",
+            "test": "src/wasm.rs::schedule_oracle_tests::every_rule_returns_a_feasible_schedule_with_true_figures"
+          },
+          {
+            "claim": "On one machine with every job ready at 0, SPT minimises total completion time, WSPT total weighted completion time and EDD maximum lateness, against every order of six jobs.",
+            "reference_kind": "literature",
+            "reference": "Smith (1956), Jackson (1955): the optimality of SPT, WSPT and EDD",
+            "method": "five seeded six-job shops, 720 orders each",
+            "tolerance": "1e-9 relative",
+            "test": "src/wasm.rs::schedule_oracle_tests::on_one_machine_the_classic_rules_are_optimal_for_their_objective"
+          },
+          {
+            "claim": "The unit of time does not change a schedule: scaling every time by 10, 1e3 or 1e5 gives the same order on the same machines, the starts scaled.",
+            "reference_kind": "literature",
+            "reference": "a schedule is unchanged by a change of unit",
+            "method": "13 rules x 1-2 machines x 3 seeds x 3 scales",
+            "tolerance": "1e-9 relative",
+            "test": "src/wasm.rs::schedule_oracle_tests::the_unit_of_time_does_not_change_a_schedule"
+          }
+        ],
+        "limits": [
+          "Times are rounded to whole milliseconds (documented), so the unit check scales up only.",
+          "Rules other than SPT, WSPT and EDD are checked for feasibility and unit invariance, not for optimality of an objective."
+        ]
       },
       "performance": {
         "status": "none"
@@ -117,9 +147,27 @@
         "note": "Whether the search ran its max_generations or stalled first, and how its best fitness moved."
       },
       "validation": {
-        "status": "none",
+        "status": "partial",
+        "checks": [
+          {
+            "claim": "On three jobs of three operations the makespan is never below the best of all 1,680 semi-active schedules and the search reaches it; the schedule's entries are feasible by an independent recomputation and the checker accepts them.",
+            "reference_kind": "literature",
+            "reference": "brute-force enumeration of all operation orders (the optimum by definition)",
+            "method": "six seeded shops, every order of the operations tried",
+            "tolerance": "1e-9 (absolute)",
+            "test": "src/wasm.rs::jobshop_oracle_tests::the_search_reaches_the_best_of_all_semi_active_schedules"
+          },
+          {
+            "claim": "Times scaled by 1e3 and 1e5 reach the optimum of the scaled shop.",
+            "reference_kind": "literature",
+            "reference": "a schedule is unchanged by a change of unit",
+            "method": "three seeded shops at two scales",
+            "tolerance": "1e-9 relative",
+            "test": "src/wasm.rs::jobshop_oracle_tests::the_unit_of_time_does_not_change_the_makespan_the_search_reaches"
+          }
+        ],
         "limits": [
-          "Schedule quality has not been compared against best-known makespans of standard instances (Taillard, Lawrence).",
+          "Optimality is only checked where it can be enumerated (three jobs of three operations); schedule quality has not been compared against best-known makespans of standard instances (Taillard, Lawrence).",
           "Feasibility of a returned schedule is checkable with check_jobshop."
         ]
       },
@@ -156,7 +204,20 @@
         "test": "src/wasm.rs::engine_card_tests::the_crate_reads_no_clock_and_no_unseeded_randomness"
       },
       "validation": {
-        "status": "none"
+        "status": "partial",
+        "checks": [
+          {
+            "claim": "The checker accepts every schedule the solver returns, and a schedule that is not the solver's one names each way it breaks the problem.",
+            "reference_kind": "literature",
+            "reference": "the definition of a feasible job-shop schedule",
+            "method": "solver answers on six seeded shops checked; a broken schedule built per violation kind",
+            "tolerance": "exact (violation kinds)",
+            "test": "src/wasm.rs::jobshop_oracle_tests::the_search_reaches_the_best_of_all_semi_active_schedules"
+          }
+        ],
+        "limits": [
+          "Each violation kind is covered by the unit test a_broken_schedule_names_each_violation; the oracle test covers only acceptance of the solver's own answers."
+        ]
       },
       "performance": {
         "status": "none"
@@ -216,7 +277,17 @@
         "note": "Whether the search ran its generations, stalled or hit the deadline, and how much it gained over the rule alone."
       },
       "validation": {
-        "status": "none",
+        "status": "partial",
+        "checks": [
+          {
+            "claim": "The searched schedule is feasible, its cost is (1 - w) x makespan + w x total tardiness of its entries, dispatching_cost is the rule's own schedule's cost, and the cost is never above it.",
+            "reference_kind": "literature",
+            "reference": "the definition of the cost the operation documents; the rule's schedule as the baseline",
+            "method": "four rule/machine/weight combinations x 3 seeded eight-job shops",
+            "tolerance": "1e-8 relative",
+            "test": "src/wasm.rs::schedule_oracle_tests::the_search_is_feasible_never_above_the_rule_and_reports_true_costs"
+          }
+        ],
         "limits": [
           "Schedule quality has not been compared against best-known solutions of standard instances."
         ]
@@ -254,7 +325,10 @@
         "test": "src/wasm.rs::engine_card_tests::the_crate_reads_no_clock_and_no_unseeded_randomness"
       },
       "validation": {
-        "status": "none"
+        "status": "none",
+        "limits": [
+          "No independent reference: a unit test holds the catalog equal to the rules run_schedule accepts, which is a consistency check of the crate with itself."
+        ]
       },
       "performance": {
         "status": "none",

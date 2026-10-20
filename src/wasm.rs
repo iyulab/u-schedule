@@ -4821,3 +4821,508 @@ mod search_tests {
         assert!(e.to_string().contains("generations"), "{e}");
     }
 }
+
+/// The schedules `run_schedule` and `solve_jobshop` return, held against what
+/// scheduling theory defines: a dispatched schedule is feasible and its
+/// figures are the ones its entries add up to; on one machine the classic
+/// rules are optimal for their objective (Smith 1956, Jackson 1955), found by
+/// trying every order; a job shop's makespan is never below the best of all
+/// semi-active schedules and the search reaches it on small instances; and the
+/// unit of time does not change a schedule.
+#[cfg(test)]
+mod schedule_oracle_tests {
+    use super::*;
+    use serde_json::json;
+
+    const RULES: [&str; 13] = [
+        "SPT", "LPT", "EDD", "FCFS", "CR", "WSPT", "MST", "S/RO", "SRO", "ATC", "LWKR", "MWKR",
+        "PRIORITY",
+    ];
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn rng(seed: u64) -> Rng {
+        Rng(seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            | 1)
+    }
+
+    /// `n` jobs with generic (tie-free) times on the millisecond grid the
+    /// engine schedules in (it rounds every time to a whole millisecond),
+    /// scaled by `unit`.
+    fn jobs(n: usize, seed: u64, releases: bool, unit: f64) -> Vec<serde_json::Value> {
+        let mut r = rng(seed);
+        let ms = |x: f64| (x * 1000.0).round() / 1000.0;
+        (0..n)
+            .map(|i| {
+                let p = ms(1.0 + 9.0 * r.next());
+                let release = if releases { ms(6.0 * r.next()) } else { 0.0 };
+                let due = ms(release + p + 12.0 * r.next());
+                json!({
+                    "id": format!("J{i}"),
+                    "processing_time": p * unit,
+                    "due_date": due * unit,
+                    "release_time": release * unit,
+                    "weight": 0.5 + 3.0 * r.next(),
+                    "priority": (r.next() * 5.0) as i32,
+                })
+            })
+            .collect()
+    }
+
+    fn dispatch(jobs: &[serde_json::Value], rule: &str, machines: i64) -> ScheduleOutput {
+        schedule_jobs(
+            &serde_json::from_value(json!({
+                "jobs": jobs,
+                "config": { "rule": rule, "num_machines": machines },
+            }))
+            .expect("request"),
+        )
+        .unwrap_or_else(|e| panic!("{rule}: {}", e.fields))
+    }
+
+    fn field(job: &serde_json::Value, name: &str) -> f64 {
+        job[name].as_f64().expect("number")
+    }
+
+    fn by_id<'a>(jobs: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+        jobs.iter().find(|j| j["id"] == id).expect("job")
+    }
+
+    /// Every figure of a dispatched schedule recomputed from its entries.
+    fn assert_feasible(
+        jobs: &[serde_json::Value],
+        out: &ScheduleOutput,
+        machines: usize,
+        what: &str,
+    ) {
+        let mut ids: Vec<&str> = out.schedule.iter().map(|j| j.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut want: Vec<&str> = jobs.iter().map(|j| j["id"].as_str().expect("id")).collect();
+        want.sort_unstable();
+        assert_eq!(ids, want, "{what}: every job once");
+        let eps = 1e-9;
+        let mut busy = vec![0.0; machines];
+        let (mut makespan, mut tardiness) = (0.0_f64, 0.0);
+        for e in &out.schedule {
+            let j = by_id(jobs, &e.id);
+            assert!(e.machine < machines, "{what}: machine {}", e.machine);
+            assert!(
+                e.start >= field(j, "release_time") - eps,
+                "{what}: {} early",
+                e.id
+            );
+            let p = field(j, "processing_time");
+            assert!(
+                (e.end - e.start - p).abs() <= eps * p.max(1.0),
+                "{what}: {} duration",
+                e.id
+            );
+            let late = (e.end - field(j, "due_date")).max(0.0);
+            assert!(
+                (e.tardiness - late).abs() <= eps * late.max(1.0),
+                "{what}: {} tardiness",
+                e.id
+            );
+            busy[e.machine] += p;
+            makespan = makespan.max(e.end);
+            tardiness += late;
+        }
+        for a in &out.schedule {
+            for b in &out.schedule {
+                if a.id < b.id && a.machine == b.machine {
+                    assert!(
+                        a.end <= b.start + eps || b.end <= a.start + eps,
+                        "{what}: {} and {} overlap on machine {}",
+                        a.id,
+                        b.id,
+                        a.machine
+                    );
+                }
+            }
+        }
+        assert!(
+            (out.makespan - makespan).abs() <= eps * makespan.max(1.0),
+            "{what}: makespan"
+        );
+        assert!(
+            (out.total_tardiness - tardiness).abs() <= 1e-8 * tardiness.max(1.0),
+            "{what}: tardiness"
+        );
+        assert_eq!(
+            out.machine_utilization.len(),
+            machines,
+            "{what}: one entry per machine"
+        );
+        for u in &out.machine_utilization {
+            assert!(
+                (u.busy_time - busy[u.machine]).abs() <= 1e-8 * busy[u.machine].max(1.0),
+                "{what}: busy"
+            );
+            let share = if makespan > 0.0 {
+                busy[u.machine] / makespan
+            } else {
+                0.0
+            };
+            assert!((u.utilization - share).abs() <= 1e-8, "{what}: utilization");
+        }
+    }
+
+    #[test]
+    fn every_rule_returns_a_feasible_schedule_with_true_figures() {
+        for rule in RULES {
+            for machines in [1_i64, 2, 3] {
+                for seed in 0..3 {
+                    let js = jobs(8, seed, seed % 2 == 0, 1.0);
+                    let out = dispatch(&js, rule, machines);
+                    assert_feasible(
+                        &js,
+                        &out,
+                        machines as usize,
+                        &format!("{rule} m={machines} seed={seed}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// All orders of `0..n`.
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        fn go(cur: &mut Vec<usize>, left: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+            if left.is_empty() {
+                out.push(cur.clone());
+                return;
+            }
+            for i in 0..left.len() {
+                let v = left.remove(i);
+                cur.push(v);
+                go(cur, left, out);
+                cur.pop();
+                left.insert(i, v);
+            }
+        }
+        let mut out = Vec::new();
+        go(&mut Vec::new(), &mut (0..n).collect(), &mut out);
+        out
+    }
+
+    /// Smith (1956): SPT minimises total completion time, WSPT total weighted
+    /// completion time; Jackson (1955): EDD minimises maximum lateness -- on
+    /// one machine with every job ready at 0, against every order.
+    #[test]
+    fn on_one_machine_the_classic_rules_are_optimal_for_their_objective() {
+        let n = 6;
+        for seed in 0..5 {
+            let js = jobs(n, seed, false, 1.0);
+            let p: Vec<f64> = js.iter().map(|j| field(j, "processing_time")).collect();
+            let w: Vec<f64> = js.iter().map(|j| field(j, "weight")).collect();
+            let d: Vec<f64> = js.iter().map(|j| field(j, "due_date")).collect();
+            let (mut sum_c, mut sum_wc, mut max_l) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for order in permutations(n) {
+                let (mut t, mut c, mut wc, mut l) = (0.0, 0.0, 0.0, f64::NEG_INFINITY);
+                for &j in &order {
+                    t += p[j];
+                    c += t;
+                    wc += w[j] * t;
+                    l = l.max(t - d[j]);
+                }
+                sum_c = sum_c.min(c);
+                sum_wc = sum_wc.min(wc);
+                max_l = max_l.min(l);
+            }
+            let ends = |rule: &str| dispatch(&js, rule, 1).schedule;
+            let rel = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+            let spt: f64 = ends("SPT").iter().map(|e| e.end).sum();
+            assert!(rel(spt, sum_c), "SPT seed {seed}: {spt} vs {sum_c}");
+            let wspt: f64 = ends("WSPT")
+                .iter()
+                .map(|e| field(by_id(&js, &e.id), "weight") * e.end)
+                .sum();
+            assert!(rel(wspt, sum_wc), "WSPT seed {seed}: {wspt} vs {sum_wc}");
+            let edd = ends("EDD")
+                .iter()
+                .map(|e| e.end - field(by_id(&js, &e.id), "due_date"))
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(rel(edd, max_l), "EDD seed {seed}: {edd} vs {max_l}");
+        }
+    }
+
+    /// The same shop in other units of time is the same schedule: every rule
+    /// puts the jobs in the same order on the same machines, the times scaled.
+    /// (Scaled up only: a time below a millisecond is rounded, as documented.)
+    #[test]
+    fn the_unit_of_time_does_not_change_a_schedule() {
+        for rule in RULES {
+            for machines in [1_i64, 2] {
+                for seed in 0..3 {
+                    let base = dispatch(&jobs(9, seed, true, 1.0), rule, machines);
+                    for unit in [10.0, 1e3, 1e5] {
+                        let out = dispatch(&jobs(9, seed, true, unit), rule, machines);
+                        for (a, b) in base.schedule.iter().zip(&out.schedule) {
+                            assert_eq!(
+                                (a.id.as_str(), a.machine),
+                                (b.id.as_str(), b.machine),
+                                "{rule} m={machines} seed={seed} unit={unit}"
+                            );
+                            assert!(
+                                (b.start - a.start * unit).abs()
+                                    <= 1e-9 * (a.start * unit).abs().max(unit)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    /// The search keeps its promise on random shops: the schedule is feasible,
+    /// its cost is the cost its entries add up to, `dispatching_cost` is the
+    /// rule's own schedule's, and the search is never above it.
+    #[test]
+    fn the_search_is_feasible_never_above_the_rule_and_reports_true_costs() {
+        for (rule, machines, weight) in [
+            ("FCFS", 1_i64, 0.0),
+            ("SPT", 2, 0.5),
+            ("EDD", 3, 1.0),
+            ("LPT", 2, 0.0),
+        ] {
+            for seed in 0..3u64 {
+                let js = jobs(8, seed + 20, true, 1.0);
+                let out = search_jobs(
+                    &serde_json::from_value(json!({
+                        "jobs": js,
+                        "config": { "rule": rule, "num_machines": machines },
+                    }))
+                    .expect("request"),
+                    &serde_json::from_value(json!({
+                        "seed": seed, "population_size": 12, "max_generations": 25,
+                        "tardiness_weight": weight,
+                    }))
+                    .expect("search"),
+                )
+                .expect("search");
+                let what = format!("{rule} m={machines} w={weight} seed={seed}");
+                assert_feasible(&js, &out.result, machines as usize, &what);
+                let cost =
+                    |o: &ScheduleOutput| (1.0 - weight) * o.makespan + weight * o.total_tardiness;
+                let rule_cost = cost(&dispatch(&js, rule, machines));
+                assert!(
+                    (out.cost - cost(&out.result)).abs() <= 1e-8 * out.cost.max(1.0),
+                    "{what}: cost"
+                );
+                assert!(
+                    (out.dispatching_cost - rule_cost).abs() <= 1e-8 * rule_cost.max(1.0),
+                    "{what}: dispatching_cost"
+                );
+                assert!(
+                    out.cost <= out.dispatching_cost + 1e-9,
+                    "{what}: {} above the rule's {}",
+                    out.cost,
+                    out.dispatching_cost
+                );
+            }
+        }
+    }
+}
+
+/// `solve_jobshop` against the definition of the job-shop makespan: the best of
+/// every semi-active schedule (every order of the operations that keeps each
+/// job's own order), found by trying them all on instances small enough.
+#[cfg(test)]
+mod jobshop_oracle_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `jobs` jobs of `steps` operations each, one per machine in a random
+    /// order, whole-second times from 1 to 9 scaled by `unit`.
+    fn shop(jobs: usize, steps: usize, seed: u64, unit: f64) -> Vec<Vec<(usize, f64)>> {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            | 1;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as usize % n
+        };
+        (0..jobs)
+            .map(|_| {
+                let mut machines: Vec<usize> = (0..steps).collect();
+                for i in (1..steps).rev() {
+                    machines.swap(i, next(i + 1));
+                }
+                machines
+                    .into_iter()
+                    .map(|m| (m, (1 + next(9)) as f64 * unit))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn request(shop: &[Vec<(usize, f64)>], seed: u64) -> serde_json::Value {
+        json!({
+            "jobs": shop.iter().enumerate().map(|(j, ops)| json!({
+                "id": format!("J{j}"),
+                "operations": ops.iter().map(|(m, p)| json!({
+                    "machine": format!("M{m}"),
+                    "processing_time": p,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "ga_config": { "seed": seed, "population_size": 40, "max_generations": 60 },
+        })
+    }
+
+    /// The best makespan over every order of the operations (a sequence of job
+    /// numbers, each appearing once per operation of the job).
+    fn optimum(shop: &[Vec<(usize, f64)>]) -> f64 {
+        fn go(
+            shop: &[Vec<(usize, f64)>],
+            next: &mut Vec<usize>,
+            job_ready: &mut Vec<f64>,
+            machine_ready: &mut Vec<f64>,
+            left: usize,
+            best: &mut f64,
+        ) {
+            if left == 0 {
+                *best = best.min(job_ready.iter().cloned().fold(0.0, f64::max));
+                return;
+            }
+            for j in 0..shop.len() {
+                if next[j] == shop[j].len() {
+                    continue;
+                }
+                let (m, p) = shop[j][next[j]];
+                let (old_job, old_machine) = (job_ready[j], machine_ready[m]);
+                let end = old_job.max(old_machine) + p;
+                job_ready[j] = end;
+                machine_ready[m] = end;
+                next[j] += 1;
+                go(shop, next, job_ready, machine_ready, left - 1, best);
+                next[j] -= 1;
+                job_ready[j] = old_job;
+                machine_ready[m] = old_machine;
+            }
+        }
+        let machines = shop.iter().flatten().map(|(m, _)| m + 1).max().unwrap_or(0);
+        let mut best = f64::INFINITY;
+        go(
+            shop,
+            &mut vec![0; shop.len()],
+            &mut vec![0.0; shop.len()],
+            &mut vec![0.0; machines],
+            shop.iter().map(Vec::len).sum(),
+            &mut best,
+        );
+        best
+    }
+
+    /// The answer's own entries, checked against the problem without the
+    /// crate's checker: each operation once, on its machine, for its time, in
+    /// its job's order, no two at once on a machine, makespan = latest end.
+    fn assert_feasible(shop: &[Vec<(usize, f64)>], out: &JobShopOutput, what: &str) {
+        let eps = 1e-9;
+        let mut latest = 0.0_f64;
+        for (j, ops) in shop.iter().enumerate() {
+            let mut previous_end = 0.0;
+            for (k, (m, p)) in ops.iter().enumerate() {
+                let entries: Vec<&JobShopAssignment> = out
+                    .schedule
+                    .iter()
+                    .filter(|a| a.job_id == format!("J{j}") && a.operation == k + 1)
+                    .collect();
+                assert_eq!(entries.len(), 1, "{what}: J{j} step {} once", k + 1);
+                let a = entries[0];
+                assert_eq!(a.machine, format!("M{m}"), "{what}: machine");
+                assert!((a.end - a.start - p).abs() <= eps, "{what}: duration");
+                assert!(
+                    a.start >= previous_end - eps,
+                    "{what}: J{j} step {} before its predecessor",
+                    k + 1
+                );
+                previous_end = a.end;
+                latest = latest.max(a.end);
+            }
+        }
+        for a in &out.schedule {
+            for b in &out.schedule {
+                if (&a.job_id, a.operation) < (&b.job_id, b.operation) && a.machine == b.machine {
+                    assert!(
+                        a.end <= b.start + eps || b.end <= a.start + eps,
+                        "{what}: overlap on {}",
+                        a.machine
+                    );
+                }
+            }
+        }
+        assert!(
+            (out.makespan - latest).abs() <= eps * latest.max(1.0),
+            "{what}: makespan"
+        );
+    }
+
+    #[test]
+    fn the_search_reaches_the_best_of_all_semi_active_schedules() {
+        for seed in 0..6 {
+            let s = shop(3, 3, seed, 1.0);
+            let best = optimum(&s);
+            let input: JobShopInput = serde_json::from_value(request(&s, seed)).expect("request");
+            let out = jobshop(&input).expect("solve");
+            assert_feasible(&s, &out, &format!("seed {seed}"));
+            assert!(
+                out.makespan >= best - 1e-9,
+                "seed {seed}: {} beats the optimum {best}",
+                out.makespan
+            );
+            assert!(
+                out.makespan <= best + 1e-9,
+                "seed {seed}: makespan {} vs optimum {best}",
+                out.makespan
+            );
+            let check: JobShopCheckInput = serde_json::from_value(json!({
+                "problem": request(&s, seed),
+                "solution": {
+                    "schedule": out.schedule.iter().map(|a| json!({
+                        "job_id": a.job_id, "operation": a.operation,
+                        "machine": a.machine, "start": a.start, "end": a.end,
+                    })).collect::<Vec<_>>(),
+                    "makespan": out.makespan,
+                },
+            }))
+            .expect("check request");
+            let checked = check_jobshop_input(&check).expect("check");
+            assert!(
+                checked.feasible,
+                "seed {seed}: the checker refuses the solver's own answer"
+            );
+        }
+    }
+
+    /// The same shop in seconds or in thousands of seconds has the same shape.
+    #[test]
+    fn the_unit_of_time_does_not_change_the_makespan_the_search_reaches() {
+        for seed in 0..3 {
+            for unit in [1e3, 1e5] {
+                let s = shop(3, 3, seed + 10, unit);
+                let out = jobshop(&serde_json::from_value(request(&s, seed)).expect("request"))
+                    .expect("solve");
+                assert_feasible(&s, &out, &format!("seed {seed} unit {unit}"));
+                let best = optimum(&s);
+                assert!(
+                    (out.makespan - best).abs() <= 1e-9 * best,
+                    "seed {seed} unit {unit}: makespan {} vs optimum {best}",
+                    out.makespan
+                );
+            }
+        }
+    }
+}
