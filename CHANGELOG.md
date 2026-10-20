@@ -10,6 +10,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Fixed
 
+- Times that added up past what the engine's 64-bit milliseconds hold (processing
+  times of a few 1e15 seconds, or a finite value like 1e300 standing in for
+  "never") overflowed: a panic in a debug build and, in a WebAssembly release build,
+  a wrapped negative time. `run_schedule`, `search_schedule`, `solve_jobshop` and
+  `check_jobshop` now refuse a request whose times add up to more than about 2.3e15
+  seconds (73 million years): `parameter_out_of_range`, `parameter: "total_time"`.
 - `RuleEngine` decided that two scores were tied when they differed by less than an
   absolute 1e-9. A ratio rule's score shrinks as the jobs get longer (`WSPT` scores
   `w / p` with `p` in milliseconds, about 4e-9 for a three-day job), so jobs of

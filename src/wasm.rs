@@ -1018,7 +1018,36 @@ fn refuse_job_values(jobs: &[InputJob]) -> Result<(), WireError> {
             fields,
         ));
     }
-    Ok(())
+    let latest_release = jobs
+        .iter()
+        .map(|j| j.release_time.unwrap_or(0.0))
+        .fold(0.0, f64::max);
+    refuse_time_span(jobs.iter().map(|j| j.processing_time).sum::<f64>() + latest_release)
+}
+
+/// The most time, in seconds, a schedule may add up to. The engine counts
+/// milliseconds in 64 bits and adds durations, waits and moves, so what the
+/// times of a request can add up to is held to a quarter of what 64 bits hold
+/// (about 73 million years): a larger sum would overflow -- a panic in a debug
+/// build, a wrapped negative time in one without overflow checks.
+const MAX_SPAN_S: f64 = (i64::MAX / 4) as f64 / 1_000.0;
+
+/// Refuses a request whose times add up to more than [`MAX_SPAN_S`]: every
+/// processing time, plus the latest release, plus (for a job shop) the
+/// longest move between machines once per operation.
+fn refuse_time_span(span: f64) -> Result<(), WireError> {
+    if span <= MAX_SPAN_S {
+        return Ok(());
+    }
+    let mut fields = json!({ "parameter": "total_time", "got": span });
+    Bounds::of(0.0..=MAX_SPAN_S).insert_into(&mut fields);
+    Err(WireError::new(
+        Code::ParameterOutOfRange,
+        format!(
+            "the times given add up to {span} seconds; the engine counts milliseconds in 64 bits,              so they must add up to at most {MAX_SPAN_S}"
+        ),
+        fields,
+    ))
 }
 
 // ── rule selection ──────────────────────────────────────────────────────────
@@ -2012,6 +2041,30 @@ fn jobshop_problem(input: &JobShopInput) -> Result<Problem, WireError> {
         // problem check refuses them.
         from.transport_ms.insert(t.to.clone(), sec_to_ms(t.time));
     }
+
+    let mut span = 0.0;
+    let (mut latest_release, mut operations) = (0.0_f64, 0_usize);
+    for job in &input.jobs {
+        latest_release = latest_release.max(job.release_time.unwrap_or(0.0));
+        for op in &job.operations {
+            operations += 1;
+            latest_release = latest_release.max(op.release_time.unwrap_or(0.0));
+            span += op
+                .machine_times
+                .values()
+                .copied()
+                .fold(op.processing_time, f64::max);
+            if let Some(overlap) = &op.overlap {
+                span += overlap.finish_after.max(0.0);
+            }
+        }
+    }
+    let longest_move = input
+        .transport_times
+        .iter()
+        .map(|t| t.time)
+        .fold(0.0, f64::max);
+    refuse_time_span(span + latest_release + longest_move * operations as f64)?;
 
     Ok(Problem::new(tasks, resources)?)
 }
@@ -5084,6 +5137,71 @@ mod schedule_oracle_tests {
             }
         }
     }
+    /// Times that add up past what the engine's 64-bit milliseconds hold are
+    /// refused with a structured error on every operation that takes them --
+    /// not summed into an overflow (a panic in a debug build, a wrapped
+    /// negative time in one without overflow checks) -- and the largest span
+    /// the engine accepts is scheduled exactly.
+    #[test]
+    fn times_that_overflow_the_engine_are_refused_not_summed() {
+        let refused = |e: WireError, what: &str| {
+            assert_eq!(
+                e.fields["code"], "parameter_out_of_range",
+                "{what}: {}",
+                e.fields
+            );
+            assert_eq!(e.fields["parameter"], "total_time", "{what}");
+            assert_eq!(e.fields["max"], MAX_SPAN_S, "{what}");
+        };
+        let shop = |p: f64| {
+            json!({
+                "jobs": [
+                    { "id": "a", "operations": [{ "machine": "M1", "processing_time": p }, { "machine": "M2", "processing_time": 1.0 }] },
+                    { "id": "b", "operations": [{ "machine": "M1", "processing_time": p }] },
+                ],
+                "transport_times": [{ "from": "M1", "to": "M2", "time": p }],
+                "ga_config": { "seed": 1, "population_size": 4, "max_generations": 2 },
+            })
+        };
+        for p in [1.2e15, 5e15, 1e16, 1e18, 1e300] {
+            let js = vec![
+                json!({"id": "a", "processing_time": p}),
+                json!({"id": "b", "processing_time": p}),
+            ];
+            let input: ScheduleInput =
+                serde_json::from_value(json!({ "jobs": js })).expect("request");
+            refused(
+                schedule_jobs(&input).expect_err("run_schedule"),
+                "run_schedule",
+            );
+            refused(
+                search_jobs(&input, &SearchConfig::default()).expect_err("search_schedule"),
+                "search_schedule",
+            );
+            let problem: JobShopInput = serde_json::from_value(shop(p)).expect("request");
+            refused(
+                jobshop(&problem).expect_err("solve_jobshop"),
+                "solve_jobshop",
+            );
+            let check: JobShopCheckInput = serde_json::from_value(json!({
+                "problem": shop(p), "solution": { "schedule": [] },
+            }))
+            .expect("request");
+            refused(
+                check_jobshop_input(&check).expect_err("check_jobshop"),
+                "check_jobshop",
+            );
+        }
+        // Up to the bound the schedule is exact: two jobs of 1.1e15 s.
+        let js = vec![
+            json!({"id": "a", "processing_time": 1.1e15}),
+            json!({"id": "b", "processing_time": 1.1e15}),
+        ];
+        let ok = dispatch(&js, "SPT", 1);
+        assert_eq!(ok.makespan, 2.2e15);
+        assert_eq!(ok.schedule[1].start, 1.1e15);
+    }
+
     /// The search keeps its promise on random shops: the schedule is feasible,
     /// its cost is the cost its entries add up to, `dispatching_cost` is the
     /// rule's own schedule's, and the search is never above it.
