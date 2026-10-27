@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-10-27
+
+Depends on u-numflow 0.14 and u-metaheur 0.14.
+
 ### Added
 
 - `VERSION`: the crate's own version (`CARGO_PKG_VERSION`) as a constant at the
