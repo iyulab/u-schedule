@@ -61,6 +61,14 @@
 //! - Haupt (1989), "A Survey of Priority Rule-Based Scheduling"
 //! - Kolisch & Hartmann (1999), "Heuristic algorithms for the RCPSP" (serial SGS)
 
+/// This crate's version, as published (`CARGO_PKG_VERSION`) — for a consumer
+/// that reports what it was built against without reading a lock file.
+///
+/// ```
+/// assert!(!u_schedule::VERSION.is_empty());
+/// ```
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod cp;
 pub mod dispatching;
 pub mod ga;
