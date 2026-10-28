@@ -59,30 +59,52 @@ impl ScheduleChromosome {
         }
     }
 
-    /// Creates a load-balanced chromosome (random OSV, least-loaded MAV).
+    /// Creates a load-balanced chromosome: random OSV, and each activity on
+    /// the candidate where it would end the least loaded -- the resource's
+    /// load so far plus the activity's time on it (`time_on(activity index,
+    /// resource)`), which is then added to that load. Tasks are taken in a
+    /// random order, so the population does not share one assignment.
+    ///
+    /// # Reference
+    /// Global selection -- Zhang, Gao & Shi (2011), "An effective genetic
+    /// algorithm for the flexible job-shop scheduling problem", *Expert
+    /// Systems with Applications* 38(4), 3563-3573.
     pub fn with_load_balancing<R: Rng>(
         activities: &[ActivityInfo],
-        _resource_capacity: &HashMap<String, i64>,
+        time_on: impl Fn(usize, &str) -> i64,
         rng: &mut R,
     ) -> Self {
         let (osv, activity_index) = Self::create_random_osv(activities, rng);
-        let mut resource_load: HashMap<String, i64> = HashMap::new();
-        let mut mav = Vec::with_capacity(activities.len());
+        let mut resource_load: HashMap<&str, i64> = HashMap::new();
+        let mut mav = vec![String::new(); activities.len()];
 
+        let mut tasks: Vec<&str> = Vec::new();
         for act in activities {
-            if act.candidates.is_empty() {
-                mav.push(String::new());
-                continue;
+            if !tasks.contains(&act.task_id.as_str()) {
+                tasks.push(&act.task_id);
             }
-            // Select least-loaded candidate
-            let best = act
-                .candidates
-                .iter()
-                .min_by_key(|c| resource_load.get(*c).copied().unwrap_or(0))
-                .expect("candidates checked non-empty above")
-                .clone();
-            *resource_load.entry(best.clone()).or_insert(0) += act.duration.total_ms();
-            mav.push(best);
+        }
+        // With no choice anywhere the order changes nothing: draw nothing.
+        if activities.iter().any(|a| a.candidates.len() > 1) {
+            u_numflow::random::shuffle(&mut tasks, rng);
+        }
+        for task in tasks {
+            for (i, act) in activities.iter().enumerate() {
+                if act.task_id != task || act.candidates.is_empty() {
+                    continue;
+                }
+                let (best, ends) = act
+                    .candidates
+                    .iter()
+                    .map(|c| {
+                        let load = resource_load.get(c.as_str()).copied().unwrap_or(0);
+                        (c, load + time_on(i, c))
+                    })
+                    .min_by_key(|&(_, ends)| ends)
+                    .expect("candidates checked non-empty above");
+                resource_load.insert(best, ends);
+                mav[i] = best.clone();
+            }
         }
 
         Self {
@@ -233,6 +255,25 @@ impl ScheduleChromosome {
 
 // ======================== Crossover operators ========================
 
+/// Uniform crossover of the machine assignments: where the parents differ,
+/// each child takes either parent's resource with even odds (the other child
+/// the other one). An assignment is a choice per activity, independent of the
+/// order the OSV crossover recombines, so it recombines gene by gene.
+///
+/// # Reference
+/// Pezzella, Morganti & Ciaschetti (2008), "A genetic algorithm for the
+/// flexible job-shop scheduling problem", *Computers & Operations Research*
+/// 35(10); Zhang, Gao & Shi (2011), *Expert Systems with Applications* 38(4).
+fn uniform_mav<R: Rng>(p1: &[String], p2: &[String], rng: &mut R) -> (Vec<String>, Vec<String>) {
+    let (mut c1, mut c2) = (p1.to_vec(), p2.to_vec());
+    for i in 0..c1.len().min(c2.len()) {
+        if c1[i] != c2[i] && rng.random_bool(0.5) {
+            std::mem::swap(&mut c1[i], &mut c2[i]);
+        }
+    }
+    (c1, c2)
+}
+
 /// Performs POX (Precedence Operation Crossover).
 ///
 /// Selects a random subset of tasks, preserves their positions from parent 1,
@@ -270,15 +311,16 @@ pub fn pox_crossover<R: Rng>(
     let child1_osv = pox_build_child(&p1.osv, &p2.osv, &selected_set);
     let child2_osv = pox_build_child(&p2.osv, &p1.osv, &selected_set);
 
+    let (mav1, mav2) = uniform_mav(&p1.mav, &p2.mav, rng);
     let child1 = ScheduleChromosome {
         osv: child1_osv,
-        mav: p1.mav.clone(),
+        mav: mav1,
         activity_index: p1.activity_index.clone(),
         fitness: f64::INFINITY,
     };
     let child2 = ScheduleChromosome {
         osv: child2_osv,
-        mav: p2.mav.clone(),
+        mav: mav2,
         activity_index: p2.activity_index.clone(),
         fitness: f64::INFINITY,
     };
@@ -334,15 +376,16 @@ pub fn lox_crossover<R: Rng>(
     let child1_osv = lox_build_child(&p1.osv, &p2.osv, start, end);
     let child2_osv = lox_build_child(&p2.osv, &p1.osv, start, end);
 
+    let (mav1, mav2) = uniform_mav(&p1.mav, &p2.mav, rng);
     let child1 = ScheduleChromosome {
         osv: child1_osv,
-        mav: p1.mav.clone(),
+        mav: mav1,
         activity_index: p1.activity_index.clone(),
         fitness: f64::INFINITY,
     };
     let child2 = ScheduleChromosome {
         osv: child2_osv,
-        mav: p2.mav.clone(),
+        mav: mav2,
         activity_index: p2.activity_index.clone(),
         fitness: f64::INFINITY,
     };
@@ -435,15 +478,16 @@ pub fn jox_crossover<R: Rng>(
     let child1_osv = jox_build_child(&p1.osv, &p2.osv, &selected);
     let child2_osv = jox_build_child(&p2.osv, &p1.osv, &selected);
 
+    let (mav1, mav2) = uniform_mav(&p1.mav, &p2.mav, rng);
     let child1 = ScheduleChromosome {
         osv: child1_osv,
-        mav: p1.mav.clone(),
+        mav: mav1,
         activity_index: p1.activity_index.clone(),
         fitness: f64::INFINITY,
     };
     let child2 = ScheduleChromosome {
         osv: child2_osv,
-        mav: p2.mav.clone(),
+        mav: mav2,
         activity_index: p2.activity_index.clone(),
         fitness: f64::INFINITY,
     };
@@ -599,12 +643,59 @@ mod tests {
     fn test_load_balanced() {
         let acts = sample_activities();
         let mut rng = SmallRng::seed_from_u64(42);
-        let cap: HashMap<String, i64> = [("M1".into(), 1), ("M2".into(), 1), ("M3".into(), 1)]
-            .into_iter()
-            .collect();
-        let ch = ScheduleChromosome::with_load_balancing(&acts, &cap, &mut rng);
-
+        let ch = ScheduleChromosome::with_load_balancing(&acts, |_, _| 1000, &mut rng);
         assert!(ch.is_valid(&acts));
+
+        // Three one-step tasks, 10 on M1 or 12 on M2: whatever the order, the
+        // loads go 10 | 12 | 20 -- two on M1, one on M2.
+        let acts: Vec<ActivityInfo> = (0..3)
+            .map(|t| ActivityInfo {
+                id: format!("T{t}_1"),
+                task_id: format!("T{t}"),
+                sequence: 1,
+                duration: crate::models::ActivityDuration::fixed(12),
+                candidates: vec!["M1".into(), "M2".into()],
+            })
+            .collect();
+        for seed in 0..5 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let ch = ScheduleChromosome::with_load_balancing(
+                &acts,
+                |_, r| if r == "M1" { 10 } else { 12 },
+                &mut rng,
+            );
+            assert_eq!(ch.mav.iter().filter(|m| *m == "M1").count(), 2);
+        }
+    }
+
+    #[test]
+    fn crossover_recombines_the_machine_assignments() {
+        // Parents that differ in every assignment: a child with genes of both.
+        let acts: Vec<ActivityInfo> = (0..20)
+            .map(|t| ActivityInfo {
+                id: format!("T{t}_1"),
+                task_id: format!("T{t}"),
+                sequence: 1,
+                duration: crate::models::ActivityDuration::fixed(5),
+                candidates: vec!["M1".into(), "M2".into()],
+            })
+            .collect();
+        let mut rng = SmallRng::seed_from_u64(7);
+        let mut p1 = ScheduleChromosome::random(&acts, &mut rng);
+        let mut p2 = p1.clone();
+        p1.mav = vec!["M1".into(); 20];
+        p2.mav = vec!["M2".into(); 20];
+        for (c1, c2) in [
+            pox_crossover(&p1, &p2, &acts, &mut rng),
+            lox_crossover(&p1, &p2, &acts, &mut rng),
+            jox_crossover(&p1, &p2, &acts, &mut rng),
+        ] {
+            assert!(c1.mav.contains(&"M1".to_string()) && c1.mav.contains(&"M2".to_string()));
+            // The children split each gene between them.
+            for i in 0..20 {
+                assert_ne!(c1.mav[i], c2.mav[i]);
+            }
+        }
     }
 
     #[test]

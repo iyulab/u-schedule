@@ -889,12 +889,11 @@ impl GaProblem for SchedulingGaProblem {
         if roll < 0.5 {
             ScheduleChromosome::random(&self.activities, rng)
         } else if roll < 0.75 || !self.timed {
-            let cap: HashMap<String, i64> = self
-                .resources
-                .iter()
-                .map(|r| (r.id.clone(), r.capacity as i64))
-                .collect();
-            ScheduleChromosome::with_load_balancing(&self.activities, &cap, rng)
+            ScheduleChromosome::with_load_balancing(
+                &self.activities,
+                |a, r| self.duration_on(a, r).total_ms(),
+                rng,
+            )
         } else {
             ScheduleChromosome::with_shortest_time(
                 &self.activities,

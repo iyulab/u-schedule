@@ -20,6 +20,20 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   names it. `ScheduleCpBuilder::choices` lists the activities that choose and their
   candidates. With u-metaheur's `BranchAndBoundSolver` this solves the flexible job shop
   exactly; `SimpleCpSolver` places each such activity on the candidate that ends first.
+- GA: crossover recombines the machine assignments. Each of POX, LOX and JOX copied the
+  first parent's MAV into its child unchanged, so an assignment changed only by the
+  one-gene MAV mutation; where the parents differ, each child now takes either parent's
+  resource with even odds (uniform crossover). On Brandimarte's flexible job shops mk01-mk10
+  (200 generations, seed 1) the mean gap to the best known makespans drops from 16.5 % to
+  12.1 %. Problems where no activity chooses among resources draw nothing extra and give the
+  same results.
+- **Breaking:** `ga::ScheduleChromosome::with_load_balancing(activities, time_on, rng)` takes
+  the activity's time on a resource instead of the (unread) resource capacities, and puts each
+  activity on the candidate where it would end the least loaded -- that resource's load plus
+  the activity's time on it -- taking tasks in a random order (Zhang, Gao & Shi 2011's global
+  selection). It used to pick the least-loaded candidate and add the activity's base duration
+  whatever the resource. With the crossover above, mk01-mk10's mean gap is 6.9 % (mk01, mk03,
+  mk08 at the optimum).
 
 ### Added
 
