@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-29
+
+Depends on u-metaheur 0.18 and u-numflow 0.16.
+
 ### Changed
 
 - **Breaking** (through u-metaheur): `SchedulingGaProblem::initial_individuals` takes the run's
