@@ -8,6 +8,24 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- Behaviour change: `cp::ScheduleCpBuilder` lets the solver choose an activity's resource. An
+  activity with one requirement that several resources fill becomes one optional interval per
+  candidate, each for the activity's time on it (`duration_on`), under an `Alternative`; the
+  schedule reports it on the candidate the solution chose, with that resource's setup. Before,
+  it ran on its first eligible resource only. An activity keeps its first eligible resource
+  when the choice would change a delay the model fixes -- an overlap with the step before or
+  after it, a transport time that differs between candidates -- or when a user `NoOverlap`
+  names it. `ScheduleCpBuilder::choices` lists the activities that choose and their
+  candidates. With u-metaheur's `BranchAndBoundSolver` this solves the flexible job shop
+  exactly; `SimpleCpSolver` places each such activity on the candidate that ends first.
+
+### Added
+
+- `examples/taillard.rs` reads flexible job-shop instances (`.fjs`, Brandimarte's format) and
+  gives a warm-started exact search the machines the GA chose.
+
 ## [0.31.0] - 2026-10-28
 
 Depends on u-numflow 0.15 and u-metaheur 0.15 (whose CP types `cp::ScheduleCpBuilder::solve`

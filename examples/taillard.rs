@@ -6,7 +6,10 @@
 //! job-shop format (first line `jobs machines`, then one line per job of
 //! `machine time` pairs, machines counted from 0 — e.g. the `ta01` …, `ft06`,
 //! `la01` … files of the JSPLIB collection) into one directory; every file
-//! there without an extension is read:
+//! there without an extension is read. A file ending in `.fjs` is a flexible
+//! job shop (Brandimarte's `mk01` …): first line `jobs machines`, then per job
+//! its operation count and, per operation, how many machines may run it and
+//! that many `machine time` pairs, machines counted from 0:
 //!
 //! ```text
 //! cargo run --release --example taillard -- <dir> [bks.csv] [rules]
@@ -56,8 +59,10 @@ fn engine(rule: &str) -> RuleEngine {
     }
 }
 
-/// Reads one instance: jobs as tasks whose operations each need one machine.
+/// Reads one instance: jobs as tasks whose operations each need one machine
+/// -- in a flexible one, any of several, each for its own time.
 fn read(path: &std::path::Path) -> Problem {
+    let flexible = path.extension().is_some_and(|e| e == "fjs");
     let text = std::fs::read_to_string(path).expect("instance file is readable");
     let mut numbers = text
         .split_whitespace()
@@ -68,16 +73,27 @@ fn read(path: &std::path::Path) -> Problem {
         .map(|j| {
             let id = format!("J{j}");
             let mut task = Task::new(&id).with_category("job");
-            for k in 0..machines {
-                let (machine, time) = (next(), next());
-                task = task.with_activity(
-                    Activity::new(format!("{id}_O{k}"), &id, k as i32)
-                        .with_duration(ActivityDuration::fixed(time))
-                        .with_requirement(
-                            ResourceRequirement::new("Machine")
-                                .with_candidates(vec![format!("M{machine}")]),
-                        ),
-                );
+            let operations = if flexible { next() as usize } else { machines };
+            for k in 0..operations {
+                let choices = if flexible { next() } else { 1 };
+                let options: Vec<(String, i64)> = (0..choices)
+                    .map(|_| (format!("M{}", next()), next()))
+                    .collect();
+                // The base time is the longest: a horizon of every base time
+                // runs everything in turn on any choice.
+                let longest = options.iter().map(|o| o.1).max().expect("a machine");
+                let mut step = Activity::new(format!("{id}_O{k}"), &id, k as i32)
+                    .with_duration(ActivityDuration::fixed(longest))
+                    .with_requirement(
+                        ResourceRequirement::new("Machine")
+                            .with_candidates(options.iter().map(|o| o.0.clone()).collect()),
+                    );
+                if options.len() > 1 {
+                    for (machine, time) in &options {
+                        step = step.with_duration_on(machine, ActivityDuration::fixed(*time));
+                    }
+                }
+                task = task.with_activity(step);
             }
             task
         })
@@ -132,23 +148,33 @@ fn exact(
         time_limit_ms,
         ..SolverConfig::default()
     };
+    let builder = ScheduleCpBuilder::new(problem);
     let mut solver = BranchAndBoundSolver::new();
     if let Some(schedule) = start_from {
+        let choices = builder.choices();
         let mut incumbent = CpSolution::empty(SolverStatus::Feasible);
         for a in &schedule.assignments {
-            incumbent.intervals.insert(
-                a.activity_id.clone(),
-                IntervalSolution {
-                    start: a.start_ms,
-                    end: a.end_ms,
-                    duration: a.end_ms - a.start_ms,
-                    is_present: true,
-                },
-            );
+            let interval = IntervalSolution {
+                start: a.start_ms,
+                end: a.end_ms,
+                duration: a.end_ms - a.start_ms,
+                is_present: true,
+            };
+            // An activity that chooses its machine: the one it ran on.
+            for machine in choices.get(a.activity_id.as_str()).into_iter().flatten() {
+                incumbent.intervals.insert(
+                    format!("{}@{machine}", a.activity_id),
+                    IntervalSolution {
+                        is_present: *machine == a.resource_id,
+                        ..interval.clone()
+                    },
+                );
+            }
+            incumbent.intervals.insert(a.activity_id.clone(), interval);
         }
         solver = solver.with_incumbent(incumbent);
     }
-    let (schedule, solution) = ScheduleCpBuilder::new(problem).solve(&solver, &config, horizon);
+    let (schedule, solution) = builder.solve(&solver, &config, horizon);
     (schedule, format!("{:?}", solution.status))
 }
 
@@ -183,7 +209,7 @@ fn main() {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| !n.contains('.'))
+                .is_some_and(|n| !n.contains('.') || n.ends_with(".fjs"))
         })
         .collect();
     names.sort();

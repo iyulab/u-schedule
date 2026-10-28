@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use u_metaheur::cp::{CpModel, CpSolution, CpSolver, IntervalVar, Objective, SolverConfig};
+use u_metaheur::cp::{
+    Constraint as CpConstraint, CpModel, CpSolution, CpSolver, IntervalVar, Objective, SolverConfig,
+};
 
 use crate::models::{
     transport_between, Assignment, Constraint, Schedule, TransitionMatrixCollection,
@@ -93,9 +95,12 @@ impl<'a> ScheduleCpBuilder<'a> {
     ///
     /// Creates:
     /// - An `IntervalVar` per activity
-    /// - `NoOverlap` constraints per resource, over the activities reported
-    ///   on it (each activity on its first eligible resource -- this
-    ///   formulation does not choose among alternatives)
+    /// - For an activity that [chooses its resource](Self::choices), one
+    ///   optional interval per candidate, for the activity's time on it, and
+    ///   an `Alternative` over them: the solution performs it on one
+    /// - `NoOverlap` constraints per resource, over the activities on it --
+    ///   the optional intervals of those choosing, and each other activity on
+    ///   its first eligible resource
     /// - `Precedence` constraints for intra-task activity ordering and for
     ///   each activity's `predecessors` in other tasks — a step that
     ///   [overlaps](crate::models::Overlap) the one before by a delay that may
@@ -104,38 +109,63 @@ impl<'a> ScheduleCpBuilder<'a> {
     /// - `MinimizeMaxEnd` objective (makespan minimization)
     pub fn build(&self, horizon_ms: i64) -> CpModel {
         let mut model = CpModel::new("scheduling", horizon_ms);
+        let choices = self.choices();
 
         // Create interval variables for each activity
         for task in self.problem.tasks() {
             let release = task.release_time.unwrap_or(0);
 
             for activity in &task.activities {
-                // Setup, processing and teardown: the activity's whole span,
-                // on the resource the solution is reported on.
-                let duration = self.duration_of(activity).total_ms();
                 let release = activity.release_time.map_or(release, |r| release.max(r));
-                let interval = IntervalVar::new(
-                    &activity.id,
-                    release,               // start_min
-                    horizon_ms - duration, // start_max
-                    duration,              // fixed duration
-                    horizon_ms,            // end_max
-                );
-                model.add_interval(interval);
+                // Setup, processing and teardown: the activity's whole span,
+                // on each resource it may be performed on.
+                let interval = |name: &str, duration: i64| {
+                    IntervalVar::new(name, release, horizon_ms - duration, duration, horizon_ms)
+                };
+                match choices.get(activity.id.as_str()) {
+                    None => model.add_interval(interval(
+                        &activity.id,
+                        self.duration_of(activity).total_ms(),
+                    )),
+                    Some(candidates) => {
+                        let spans: Vec<i64> = candidates
+                            .iter()
+                            .map(|r| activity.duration_on([*r]).total_ms())
+                            .collect();
+                        let (shortest, longest) = (
+                            *spans.iter().min().expect("a choice has candidates"),
+                            *spans.iter().max().expect("a choice has candidates"),
+                        );
+                        model.add_interval(
+                            interval(&activity.id, shortest)
+                                .with_variable_duration(shortest, longest),
+                        );
+                        let mut alternatives = Vec::with_capacity(candidates.len());
+                        for (r, span) in candidates.iter().zip(spans) {
+                            let name = Self::alternative(&activity.id, r);
+                            model.add_interval(
+                                interval(&name, span).as_optional(format!("{name}?")),
+                            );
+                            alternatives.push(name);
+                        }
+                        model.add_constraint(CpConstraint::Alternative {
+                            main: activity.id.clone(),
+                            alternatives,
+                        });
+                    }
+                }
             }
 
             // Intra-task precedence: activity[i] before activity[i+1], with
             // the time the work moves between the resources they are
             // reported on.
             for pair in task.activities.windows(2) {
-                let transport = match (self.reported_on(&pair[0]), self.reported_on(&pair[1])) {
-                    (Some(from), Some(to)) => transport_between(
-                        |id| self.problem.resources().iter().find(|r| r.id == id),
-                        [from],
-                        &[to],
-                    ),
-                    _ => 0,
-                };
+                // The same for every choice: an activity chooses only then.
+                let transport = transport_between(
+                    |id| self.problem.resources().iter().find(|r| r.id == id),
+                    self.performed_on(&pair[0], &choices),
+                    &self.performed_on(&pair[1], &choices),
+                );
                 let delay = match &pair[1].overlap {
                     None => transport,
                     // start(b) >= start(a) + share of a's span, and end(b) >=
@@ -164,7 +194,7 @@ impl<'a> ScheduleCpBuilder<'a> {
         }
 
         // No-overlap constraints per resource
-        let resource_activities = self.collect_resource_activities();
+        let resource_activities = self.collect_resource_activities(&choices);
         for activity_ids in resource_activities.values() {
             if activity_ids.len() > 1 {
                 model.add_no_overlap(activity_ids.clone());
@@ -229,13 +259,28 @@ impl<'a> ScheduleCpBuilder<'a> {
         if !solution.is_solution_found() {
             return schedule;
         }
+        let choices = self.choices();
 
         for task in self.problem.tasks() {
             for (step, activity) in task.activities.iter().enumerate() {
                 if let Some(interval_sol) = solution.intervals.get(&activity.id) {
                     if interval_sol.is_present {
-                        let resource_id =
-                            self.reported_on(activity).unwrap_or_default().to_string();
+                        // The candidate whose interval is present, or the
+                        // resource it is reported on.
+                        let resource_id = match choices.get(activity.id.as_str()) {
+                            Some(candidates) => candidates
+                                .iter()
+                                .find(|r| {
+                                    solution
+                                        .intervals
+                                        .get(&Self::alternative(&activity.id, r))
+                                        .is_some_and(|s| s.is_present)
+                                })
+                                .copied(),
+                            None => self.reported_on(activity),
+                        }
+                        .unwrap_or_default()
+                        .to_string();
 
                         schedule.add_assignment(
                             Assignment::new(
@@ -246,7 +291,7 @@ impl<'a> ScheduleCpBuilder<'a> {
                                 interval_sol.end,
                             )
                             .with_sequence(step as i32 + 1)
-                            .with_setup(self.duration_of(activity).setup_ms),
+                            .with_setup(activity.duration_on([resource_id.as_str()]).setup_ms),
                         );
                     }
                 }
@@ -256,9 +301,76 @@ impl<'a> ScheduleCpBuilder<'a> {
         schedule
     }
 
-    /// The resource a solution reports `activity` on — the first eligible
-    /// one (this formulation does not choose among alternatives).
-    fn reported_on<'p>(&'p self, activity: &crate::models::Activity) -> Option<&'p str> {
+    /// The resources each activity chooses among, by activity id: an
+    /// activity with one requirement that several resources fill, unless
+    /// what lies between it and its neighbours would depend on the choice --
+    /// an [overlap](crate::models::Overlap) with the step before or after
+    /// (its delay follows the spans) or a transport time that differs between
+    /// candidates -- or a user `NoOverlap` names it. Every other activity is
+    /// performed on its first eligible resource.
+    pub fn choices(&self) -> HashMap<&'a str, Vec<&'a str>> {
+        let resources = self.problem.resources();
+        let named: std::collections::HashSet<&str> = self
+            .constraints
+            .iter()
+            .flat_map(|c| match c {
+                Constraint::NoOverlap { activity_ids, .. } => activity_ids.as_slice(),
+                _ => &[],
+            })
+            .map(String::as_str)
+            .collect();
+        let mut choices: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+        for task in self.problem.tasks() {
+            for activity in &task.activities {
+                let eligible = activity.eligible_resources(resources);
+                if activity.resource_requirements.len() == 1
+                    && eligible.len() > 1
+                    && !named.contains(activity.id.as_str())
+                {
+                    choices.insert(activity.id.as_str(), eligible);
+                }
+            }
+            for pair in task.activities.windows(2) {
+                let (from, to) = (
+                    pair[0].eligible_resources(resources),
+                    pair[1].eligible_resources(resources),
+                );
+                let lookup = |id: &str| resources.iter().find(|r| r.id == id);
+                let mut moves = from
+                    .iter()
+                    .flat_map(|f| to.iter().map(move |t| (*f, *t)))
+                    .map(|(f, t)| transport_between(lookup, [f], &[t]));
+                let first = moves.next();
+                if pair[1].overlap.is_some() || moves.any(|m| Some(m) != first) {
+                    choices.remove(pair[0].id.as_str());
+                    choices.remove(pair[1].id.as_str());
+                }
+            }
+        }
+        choices
+    }
+
+    /// The name of the optional interval for performing `activity` on
+    /// `resource`.
+    fn alternative(activity: &str, resource: &str) -> String {
+        format!("{activity}@{resource}")
+    }
+
+    /// The resources `activity` may be performed on in the model.
+    fn performed_on(
+        &self,
+        activity: &crate::models::Activity,
+        choices: &HashMap<&'a str, Vec<&'a str>>,
+    ) -> Vec<&'a str> {
+        match choices.get(activity.id.as_str()) {
+            Some(candidates) => candidates.clone(),
+            None => self.reported_on(activity).into_iter().collect(),
+        }
+    }
+
+    /// The resource a solution reports an activity that does not
+    /// [choose](Self::choices) on -- its first eligible one.
+    fn reported_on(&self, activity: &crate::models::Activity) -> Option<&'a str> {
         activity
             .eligible_resources(self.problem.resources())
             .first()
@@ -271,18 +383,34 @@ impl<'a> ScheduleCpBuilder<'a> {
         activity.duration_on(self.reported_on(activity))
     }
 
-    /// Collects activity IDs per resource: each activity on the resource it
-    /// is reported on ([`reported_on`](Self::reported_on)) -- the one its
-    /// duration is taken on, and the only one it occupies.
-    fn collect_resource_activities(&self) -> HashMap<String, Vec<String>> {
+    /// Collects interval names per resource: each candidate's optional
+    /// interval of an activity that [chooses](Self::choices), and every other
+    /// activity on the resource it is reported on
+    /// ([`reported_on`](Self::reported_on)) -- the one its duration is taken
+    /// on, and the only one it occupies.
+    fn collect_resource_activities(
+        &self,
+        choices: &HashMap<&'a str, Vec<&'a str>>,
+    ) -> HashMap<String, Vec<String>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
         for task in self.problem.tasks() {
             for activity in &task.activities {
-                if let Some(resource) = self.reported_on(activity) {
-                    map.entry(resource.to_string())
-                        .or_default()
-                        .push(activity.id.clone());
+                match choices.get(activity.id.as_str()) {
+                    Some(candidates) => {
+                        for r in candidates {
+                            map.entry(r.to_string())
+                                .or_default()
+                                .push(Self::alternative(&activity.id, r));
+                        }
+                    }
+                    None => {
+                        if let Some(resource) = self.reported_on(activity) {
+                            map.entry(resource.to_string())
+                                .or_default()
+                                .push(activity.id.clone());
+                        }
+                    }
                 }
             }
         }
@@ -537,40 +665,111 @@ mod tests {
     }
 
     #[test]
-    fn an_activity_occupies_only_the_resource_it_is_reported_on() {
-        // "flex" may run on M1 or M2 and is reported on M1; "other" needs M2
-        // alone. The two can run together.
-        let tasks = vec![
-            Task::new("F").with_activity(
-                Activity::new("flex", "F", 0)
+    fn an_activity_chooses_the_resource_that_finishes_first() {
+        // "flex" may run on M1 or M2, "other" needs M1 alone: on M2 the two
+        // run together. "slow" runs 4 ms on M3 or 12 ms on M4 (2 / 6 per ms
+        // of its 2 ms base): it takes M3.
+        let one_step = |task: &str, id: &str, candidates: &[&str]| {
+            Task::new(task).with_activity(
+                Activity::new(id, task, 0)
                     .with_process_time(10)
                     .with_requirement(
                         ResourceRequirement::new("Machine")
-                            .with_candidates(vec!["M1".into(), "M2".into()]),
+                            .with_candidates(candidates.iter().map(|c| c.to_string()).collect()),
                     ),
-            ),
-            Task::new("O").with_activity(
-                Activity::new("other", "O", 0)
+            )
+        };
+        let tasks = vec![
+            one_step("F", "flex", &["M1", "M2"]),
+            one_step("O", "other", &["M1"]),
+            Task::new("S").with_activity(
+                Activity::new("slow", "S", 0)
                     .with_process_time(10)
+                    .with_duration_on("M3", ActivityDuration::new(0, 4, 0))
+                    .with_duration_on("M4", ActivityDuration::new(0, 12, 0))
                     .with_requirement(
-                        ResourceRequirement::new("Machine").with_candidates(vec!["M2".into()]),
+                        ResourceRequirement::new("Machine")
+                            .with_candidates(vec!["M3".into(), "M4".into()]),
                     ),
             ),
         ];
-        let resources = vec![
-            Resource::new("M1", "Machine"),
-            Resource::new("M2", "Machine"),
-        ];
+        let resources: Vec<Resource> = ["M1", "M2", "M3", "M4"]
+            .iter()
+            .map(|m| Resource::new(*m, "Machine"))
+            .collect();
         let problem = Problem::new(tasks, resources).expect("valid");
-        let (schedule, solution) = ScheduleCpBuilder::new(&problem).solve(
+        let builder = ScheduleCpBuilder::new(&problem);
+        assert_eq!(builder.choices()["flex"], vec!["M1", "M2"]);
+        assert!(!builder.choices().contains_key("other"));
+        let (schedule, solution) = builder.solve(
             &u_metaheur::cp::BranchAndBoundSolver::new(),
             &SolverConfig::default(),
             1_000,
         );
         assert_eq!(solution.status, u_metaheur::cp::SolverStatus::Optimal);
         assert_eq!(schedule.makespan_ms(), 10);
-        let flex = schedule.assignment_for_activity("flex").expect("placed");
-        assert_eq!(flex.resource_id, "M1");
+        let on = |id: &str| {
+            let a = schedule.assignment_for_activity(id).expect("placed");
+            (a.resource_id.clone(), a.end_ms - a.start_ms)
+        };
+        assert_eq!(on("flex"), ("M2".to_string(), 10));
+        assert_eq!(on("other"), ("M1".to_string(), 10));
+        assert_eq!(on("slow"), ("M3".to_string(), 4));
+        assert!(solution.intervals["flex@M2"].is_present);
+        assert!(!solution.intervals["flex@M1"].is_present);
+    }
+
+    #[test]
+    fn an_activity_keeps_its_first_resource_when_the_choice_would_move_a_delay() {
+        let two_steps = |task: &str, overlap: bool| {
+            let second = Activity::new(format!("{task}2"), task, 1)
+                .with_process_time(10)
+                .with_requirement(
+                    ResourceRequirement::new("Machine")
+                        .with_candidates(vec!["M1".into(), "M2".into()]),
+                );
+            Task::new(task)
+                .with_activity(
+                    Activity::new(format!("{task}1"), task, 0)
+                        .with_process_time(10)
+                        .with_requirement(
+                            ResourceRequirement::new("Machine")
+                                .with_candidates(vec!["M1".into(), "M2".into()]),
+                        ),
+                )
+                .with_activity(if overlap {
+                    second.with_overlap(crate::models::Overlap::new(0.5))
+                } else {
+                    second
+                })
+        };
+        // An overlap: its delay follows the spans on the chosen resources.
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
+        let problem = Problem::new(vec![two_steps("A", true)], resources.clone()).expect("valid");
+        assert!(ScheduleCpBuilder::new(&problem).choices().is_empty());
+        // A transport time from M1 but not from M2.
+        let moving = vec![
+            Resource::new("M1", "Machine").with_transport_to("M2", 5),
+            Resource::new("M2", "Machine"),
+        ];
+        let problem = Problem::new(vec![two_steps("B", false)], moving).expect("valid");
+        assert!(ScheduleCpBuilder::new(&problem).choices().is_empty());
+        // Neither: both steps choose.
+        let problem = Problem::new(vec![two_steps("C", false)], resources).expect("valid");
+        assert_eq!(ScheduleCpBuilder::new(&problem).choices().len(), 2);
+        // A user no-overlap names the first step: it keeps its resource.
+        let builder =
+            ScheduleCpBuilder::new(&problem).with_constraints(vec![Constraint::NoOverlap {
+                resource_id: "M1".into(),
+                activity_ids: vec!["C1".into()],
+            }]);
+        assert_eq!(
+            builder.choices().keys().copied().collect::<Vec<_>>(),
+            vec!["C2"]
+        );
     }
 
     #[test]
