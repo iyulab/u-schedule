@@ -28,6 +28,8 @@
 //! makespan optimal (`Optimal`) or was cut off with the best found
 //! (`Feasible`). `GA+CP@<ms>` runs the GA (200 generations) first and starts
 //! the exact search from its schedule; the time is the two together.
+//! `<RULE>+CP@<ms>` (e.g. `MWKR+CP@1000`) starts it from that rule's schedule
+//! instead.
 //! `DS@<ms>` is `DispatchSearch` (random keys decoded by the dispatcher,
 //! population 50, seed 1) within that time limit (default 5 000 ms).
 
@@ -222,6 +224,18 @@ fn main() {
                         .search(&problem, 0)
                         .expect("valid search settings")
                         .schedule
+                }
+                None if rule.contains("+CP") => {
+                    let (first, limit) = rule.split_once("+CP").expect("checked above");
+                    let limit = limit
+                        .strip_prefix('@')
+                        .map_or(10_000, |ms| ms.parse().expect("<RULE>+CP@<milliseconds>"));
+                    let seed = SimpleScheduler::new()
+                        .with_rule_engine(engine(first))
+                        .schedule(&problem, 0);
+                    let (schedule, s) = exact(&problem, limit, Some(&seed));
+                    status = s;
+                    schedule
                 }
                 None if rule.starts_with("CP") => {
                     let limit = rule
