@@ -21,7 +21,7 @@ u-schedule provides domain models, constraints, validation, dispatching rules, a
 | `dispatching` | Priority dispatching rules and rule engine |
 | `scheduler` | Greedy scheduler and KPI evaluation |
 | `ga` | GA-based scheduling with OSV/MAV dual-vector encoding |
-| `cp` | CP-based scheduling formulation |
+| `cp` | CP formulation (`ScheduleCpBuilder`) — solved exactly by u-metaheur's `BranchAndBoundSolver`, an activity with several candidate resources choosing among them (the flexible job shop) |
 
 ## Dispatching Rules
 
@@ -372,9 +372,10 @@ on different floors, from one site to the next:
 task's next activity runs on `M2`, it starts no earlier than the previous
 activity's end plus the minute; a pair not listed takes none, and over several
 resources the longest pair counts. Every scheduler reads it (the GA on the
-resource it chose, the CP builder on the one it reports), and the feasibility
-check reports an activity that starts before its work arrives as a precedence
-violation.
+resource it chose, the CP builder on the ones it may choose -- an activity
+chooses only when every candidate moves the work in the same time), and the
+feasibility check reports an activity that starts before its work arrives as a
+precedence violation.
 
 ```rust
 use u_schedule::models::{Activity, Resource, ResourceRequirement, Task};
