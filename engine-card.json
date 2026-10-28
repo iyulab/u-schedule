@@ -4,7 +4,7 @@
   "engine": {
     "id": "u-schedule",
     "summary": "Scheduling: orders jobs on identical machines by a dispatching rule, searches job-shop schedules (each job a sequence of operations on machines) with a genetic algorithm, and checks a schedule against its problem's rules.",
-    "version": "0.31.0",
+    "version": "0.32.0",
     "license": "MIT",
     "repository": "https://github.com/iyulab/u-schedule"
   },
@@ -12,16 +12,16 @@
     {
       "kind": "crate",
       "name": "u-schedule",
-      "package_version": "0.31.0",
-      "engine_version": "0.31.0",
+      "package_version": "0.32.0",
+      "engine_version": "0.32.0",
       "note": "The crate is a framework: resource and activity models, dispatching rules, a GA encoding, constraint programming and KPIs; the WebAssembly operations are request-level entry points over it.",
       "error_shape": "Err(...) of the solver's error type for a model or setting it cannot run."
     },
     {
       "kind": "npm",
       "name": "@iyulab/u-schedule",
-      "package_version": "0.31.0",
-      "engine_version": "0.31.0",
+      "package_version": "0.32.0",
+      "engine_version": "0.32.0",
       "wasm": true,
       "note": "Objects in and out, typed in the .d.ts (ScheduleInput, JobShopInput, JobShopCheckInput and their outputs). Bundler and Node targets; no bundler-less browser build.",
       "error_shape": "A thrown Error whose code property is the code, with the fields (parameter, index, min, max, got, expected, ...) as its other properties."

@@ -8,6 +8,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-28
+
+Depends on u-numflow 0.15 and u-metaheur 0.16 (whose `Constraint::Alternative` the CP
+builder now emits and whose solvers now solve).
+
 ### Changed
 
 - Behaviour change: `cp::ScheduleCpBuilder` lets the solver choose an activity's resource. An
