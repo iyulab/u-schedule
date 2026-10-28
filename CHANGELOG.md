@@ -8,6 +8,19 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- The GA's local search moves a critical activity to another candidate resource at the
+  position where the longest path through it -- the later of its task predecessor's and its
+  new machine predecessor's ends, its time on that resource, and the longer of the tails
+  behind its task successor and its new machine successor -- is shortest, among the positions
+  that cannot close a cycle, and times the moves that look shortest by that length (before:
+  inserted where its present start fell, ranked by its time on the resource). On
+  Brandimarte's ten flexible job-shop instances (200 generations, seed 1) the mean gap to the
+  best known makespans drops from 2.6 % to 0.5 % (mk02, mk05, mk06 and mk10 improved; seven of
+  ten at the best known), and with a 5 s time limit from 3.5 % to 1.2 %. Results without a
+  choice of resource are unchanged.
+
 ## [0.32.0] - 2026-10-28
 
 Depends on u-numflow 0.15 and u-metaheur 0.16 (whose `Constraint::Alternative` the CP

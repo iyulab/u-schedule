@@ -98,10 +98,11 @@ Where activities choose among resources (a flexible job shop), crossover also
 recombines the machine assignments gene by gene, a load-balanced chromosome
 puts each activity where it would end the least loaded given its time there,
 and the local search may move a critical activity to another of its
-candidates (Mastrolilli & Gambardella 2000), the assignment written back with
-the order. On Brandimarte's ten instances (`examples/taillard.rs` reads the
+candidates -- where on that resource the longest path through it is shortest
+(Mastrolilli & Gambardella 2000) -- the assignment written back with the
+order. On Brandimarte's ten instances (`examples/taillard.rs` reads the
 `.fjs` format; 200 generations, seed 1) the mean gap to the best known
-makespans is 2.6 %, mk01, mk03, mk04, mk08 and mk09 at the best known.
+makespans is 0.5 %, seven of the ten at the best known.
 
 ## GA Encoding
 

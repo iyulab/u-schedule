@@ -207,9 +207,10 @@ fn main() {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| !n.contains('.') || n.ends_with(".fjs"))
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| !n.contains('.') || n.ends_with(".fjs"))
         })
         .collect();
     names.sort();

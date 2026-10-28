@@ -98,7 +98,7 @@ impl SchedulingGaProblem {
             self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
             let mut moves: Vec<Move> = swaps.into_iter().map(|(r, i)| Move::Swap(r, i)).collect();
             if flexible {
-                moves.extend(self.reassignments(&ix, &seq, &placed, &path));
+                moves.extend(self.reassignments(&view, &ix, &seq, &placed, &links, &path));
             }
             for m in moves {
                 let forbidden = match m {
@@ -190,17 +190,29 @@ impl SchedulingGaProblem {
         }
     }
 
-    /// The moves of a critical activity to another of its candidates, each
-    /// inserted where its present start falls in that resource's sequence:
-    /// those that take least time there, [`TIMED_SWAPS`] of them.
+    /// The moves of a critical activity to another of its candidates that
+    /// look best, [`TIMED_SWAPS`] of them. On each candidate the activity goes
+    /// where the longest path through it -- the later of its task
+    /// predecessor's and its new machine predecessor's ends, its time there,
+    /// and the longer of the tails after its task successor and its new
+    /// machine successor -- is shortest, among the positions that cannot close
+    /// a cycle: after nothing that starts once it ends, before nothing that
+    /// ends before it starts (Mastrolilli & Gambardella 2000). The moves are
+    /// ranked by that length, from the current heads and tails, so with
+    /// setups or transport times it is a ranking, not a bound.
     fn reassignments(
         &self,
+        view: &TaskView<'_>,
         ix: &Indexed,
         seq: &[Vec<usize>],
         placed: &Placed,
+        links: &Links,
         path: &[usize],
     ) -> Vec<Move> {
-        let mut moves: Vec<(i64, Move)> = Vec::new();
+        let tail = Self::tails(seq, placed, links);
+        let span = |a: usize| placed.end[a] - placed.start[a];
+        let after = |x: usize| span(x) + tail[x];
+        let mut moves: Vec<(i64, i64, Move)> = Vec::new();
         for &a in path {
             let Some(from) = ix.resource[a] else {
                 continue;
@@ -208,6 +220,22 @@ impl SchedulingGaProblem {
             let Some(at) = seq[from].iter().position(|&x| x == a) else {
                 continue;
             };
+            let head = links.task_pred[a]
+                .map_or(0, |t| placed.end[t])
+                .max(self.release_of(view, a))
+                .max(
+                    self.predecessors[a]
+                        .iter()
+                        .map(|&p| placed.end[p])
+                        .max()
+                        .unwrap_or(0),
+                );
+            let rest = links.task_succ[a]
+                .into_iter()
+                .chain(links.waiting_on[a].iter().copied())
+                .map(after)
+                .max()
+                .unwrap_or(0);
             for candidate in &self.activities[a].candidates {
                 let Some(&to) = self.resource_index.get(candidate) else {
                     continue;
@@ -215,12 +243,28 @@ impl SchedulingGaProblem {
                 if to == from {
                     continue;
                 }
-                let pos = seq[to]
-                    .iter()
-                    .take_while(|&&x| placed.start[x] < placed.start[a])
-                    .count();
                 let time = self.duration_on(a, candidate).total_ms();
+                let on = &seq[to];
+                let first = on
+                    .iter()
+                    .take_while(|&&x| placed.end[x] <= placed.start[a])
+                    .count();
+                let last = on
+                    .iter()
+                    .take_while(|&&x| placed.start[x] < placed.end[a])
+                    .count();
+                let Some((length, pos)) = (first..=last)
+                    .map(|pos| {
+                        let before = pos.checked_sub(1).map_or(0, |k| placed.end[on[k]]);
+                        let behind = on.get(pos).map_or(0, |&x| after(x));
+                        (head.max(before) + time + rest.max(behind), pos)
+                    })
+                    .min()
+                else {
+                    continue;
+                };
                 moves.push((
+                    length,
                     time,
                     Move::Reassign {
                         activity: a,
@@ -232,12 +276,35 @@ impl SchedulingGaProblem {
                 ));
             }
         }
-        moves.sort_by_key(|&(time, _)| time);
+        moves.sort_by_key(|&(length, time, _)| (length, time));
         moves
             .into_iter()
             .take(TIMED_SWAPS)
-            .map(|(_, m)| m)
+            .map(|(_, _, m)| m)
             .collect()
+    }
+
+    /// The longest path from the end of each activity of the timed sequences
+    /// to the schedule's end, through machine and task successors.
+    fn tails(seq: &[Vec<usize>], placed: &Placed, links: &Links) -> Vec<i64> {
+        let n = placed.start.len();
+        let mut machine_succ: Vec<Option<usize>> = vec![None; n];
+        for s in seq {
+            for pair in s.windows(2) {
+                machine_succ[pair[0]] = Some(pair[1]);
+            }
+        }
+        let mut tail = vec![0i64; n];
+        for &a in placed.order.iter().rev() {
+            tail[a] = [machine_succ[a], links.task_succ[a]]
+                .into_iter()
+                .flatten()
+                .chain(links.waiting_on[a].iter().copied())
+                .map(|succ| placed.end[succ] - placed.start[succ] + tail[succ])
+                .max()
+                .unwrap_or(0);
+        }
+        tail
     }
 
     /// A critical path of the timed sequences, first activity first: walked
@@ -353,24 +420,8 @@ impl SchedulingGaProblem {
         if swaps.len() <= TIMED_SWAPS {
             return;
         }
-        let n = self.activities.len();
         let span = |a: usize| placed.end[a] - placed.start[a];
-        let mut machine_succ: Vec<Option<usize>> = vec![None; n];
-        for s in seq {
-            for pair in s.windows(2) {
-                machine_succ[pair[0]] = Some(pair[1]);
-            }
-        }
-        // The longest path from the end of each activity to the schedule's end.
-        let mut tail = vec![0i64; n];
-        for &a in placed.order.iter().rev() {
-            tail[a] = [machine_succ[a], links.task_succ[a]]
-                .into_iter()
-                .flatten()
-                .map(|succ| span(succ) + tail[succ])
-                .max()
-                .unwrap_or(0);
-        }
+        let tail = Self::tails(seq, placed, links);
         let ends = |x: Option<usize>| x.map_or(0, |x| placed.end[x]);
         let after = |x: Option<usize>| x.map_or(0, |x| span(x) + tail[x]);
         swaps.sort_by_cached_key(|&(r, i)| {
