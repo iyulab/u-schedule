@@ -1476,8 +1476,9 @@ struct SearchOutput {
 }
 
 /// Search the order dispatching takes the jobs in: a biased random-key
-/// genetic algorithm gives each job a key, and each set of keys is decoded by
-/// the dispatcher with the keys deciding (the lower key first). Every
+/// genetic algorithm gives each operation a key, and each set of keys is
+/// decoded by the dispatcher with the keys deciding (the job whose next
+/// operation has the lower key first). Every
 /// schedule it considers is one `run_schedule` could build, and the answer is
 /// the better of the best keyed one and `config.rule`'s own -- never worse
 /// than `run_schedule` on the same `jobs`.

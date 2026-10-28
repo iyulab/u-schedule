@@ -225,7 +225,7 @@
     },
     {
       "id": "search_schedule",
-      "summary": "A better order for the same dispatching: a biased random-key genetic algorithm gives each job a key and the dispatcher decodes each set of keys (the lower key first), so every schedule considered is one run_schedule could build; returns the better of the best keyed schedule and config.rule's own -- never worse than run_schedule -- with its cost ((1 - w) makespan + w total tardiness), the rule's cost, the generations run and why it stopped.",
+      "summary": "A better order for the same dispatching: a biased random-key genetic algorithm gives each operation a key and the dispatcher decodes each set of keys (the job whose next operation has the lower key first), so every schedule considered is one run_schedule could build; returns the better of the best keyed schedule and config.rule's own -- never worse than run_schedule -- with its cost ((1 - w) makespan + w total tardiness), the rule's cost, the generations run and why it stopped.",
       "input": {
         "schema": "schemas/wasm.schema.json#/$defs/search_schedule.input",
         "freshness_test": "src/wasm.rs::engine_card_tests::the_schemas_are_generated_from_the_binding_types"

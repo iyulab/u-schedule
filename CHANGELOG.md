@@ -18,6 +18,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Changed
 
+- `scheduler::DispatchSearch` (and the WASM `search_schedule`) keys each activity instead of each
+  task: at a decision the task whose next activity has the lower key wins, so a task can come
+  early at one step and late at another. The chromosome is one key per activity; its seed keys
+  every activity of a task by the task's priority rank, as before. Through a consumer's request,
+  5 s searches on 8 JSPLIB instances drop from a mean gap of 6.8 % to 5.1 %, and on Brandimarte's
+  instances with one time per operation the makespans drop by up to 21 % (mk04 72 to 57).
+  Searches with the same seed find different schedules than before.
 - The GA's local search moves a critical activity to another candidate resource at the
   position where the longest path through it -- the later of its task predecessor's and its
   new machine predecessor's ends, its time on that resource, and the longer of the tails

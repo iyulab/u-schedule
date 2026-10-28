@@ -119,8 +119,9 @@ It holds one machine per operation and reads no calendars.
 ### Searching the dispatching order
 
 `DispatchSearch` searches the order `SimpleScheduler` takes the tasks in, with a biased random-key
-genetic algorithm (u-metaheur's BRKGA): each task gets a key, and a chromosome is decoded by the
-scheduler with the keys as its rule — the lower key wins each decision. Every schedule it considers
+genetic algorithm (u-metaheur's BRKGA): each activity gets a key, and a chromosome is decoded by
+the scheduler with the keys as its rule — the task whose next activity has the lower key wins each
+decision. Every schedule it considers
 is one the dispatcher builds, so it keeps everything the dispatcher keeps: calendars, several
 requirements at once, usages, companions, transport times, releases. It returns the better of the
 best keyed schedule and the scheduler's own (Hartmann 1998; Gonçalves, Resende & Mendes 2011).
@@ -607,8 +608,8 @@ Every rule `run_schedule` takes, once each (`"SRO"` is accepted as another spell
 #### `search_schedule(input, search?) -> SearchOutput`
 
 Searches the order `run_schedule` dispatches in. A biased random-key genetic
-algorithm gives each job a key, and each set of keys is decoded by the same
-dispatcher with the keys deciding (the lower key first) — so every schedule it
+algorithm gives each operation a key, and each set of keys is decoded by the same
+dispatcher with the keys deciding (the job whose next operation has the lower key first) — so every schedule it
 considers is one `run_schedule` could build, and the answer is the better of
 the best keyed schedule and `config.rule`'s own: never worse than `run_schedule`
 on the same input ([Searching the dispatching order](#searching-the-dispatching-order)).

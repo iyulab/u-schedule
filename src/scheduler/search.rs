@@ -1,8 +1,8 @@
 //! Searching the order dispatching takes the tasks in.
 //!
-//! A biased random-key genetic algorithm gives each task a key; a chromosome
-//! is decoded by [`SimpleScheduler`] with the keys as its rule (the lower key
-//! wins each decision), so every decoded schedule keeps everything the
+//! A biased random-key genetic algorithm gives each activity a key; a
+//! chromosome is decoded by [`SimpleScheduler`] with the keys as its rule (the
+//! task whose next activity has the lower key wins each decision), so every decoded schedule keeps everything the
 //! dispatcher keeps — calendars, several requirements at once, usages,
 //! companions, transport times, releases. The search returns the best of the
 //! keyed schedules and the scheduler's own (its configured rules), so it is
@@ -53,7 +53,7 @@ pub struct DispatchSearch {
 impl DispatchSearch {
     /// A search over `scheduler`'s decisions, with `config`'s population,
     /// generations, seed and time limit (its chromosome length is set from
-    /// the problem: one key per task).
+    /// the problem: one key per activity).
     pub fn new(scheduler: SimpleScheduler, config: BrkgaConfig) -> Self {
         Self {
             scheduler,
@@ -108,7 +108,7 @@ impl DispatchSearch {
             start_time_ms,
         };
         let mut config = self.config.clone();
-        config.chromosome_length = tasks.len();
+        config.chromosome_length = tasks.iter().map(|t| t.activities.len()).sum();
         let found = BrkgaRunner::run(&decoder, &config)?;
         let keyed = decoder.schedule(&found.best_keys);
         let keyed_cost = cost(&keyed, tasks, self.tardiness_weight);
@@ -146,12 +146,17 @@ struct Decoder<'a> {
 
 impl Decoder<'_> {
     fn schedule(&self, keys: &[f64]) -> Schedule {
+        let mut keys = keys.iter().copied();
         let rule = KeyRule(
             self.problem
                 .tasks()
                 .iter()
-                .zip(keys)
-                .map(|(t, &k)| (t.id.clone(), k))
+                .map(|t| {
+                    (
+                        t.id.clone(),
+                        keys.by_ref().take(t.activities.len()).collect(),
+                    )
+                })
                 .collect(),
         );
         self.search
@@ -172,34 +177,50 @@ impl BrkgaDecoder for Decoder<'_> {
     }
 
     /// The tasks by priority — the order the scheduler takes them in without
-    /// a rule.
+    /// a rule: every activity of a task keyed by its task's rank.
     fn seed_chromosome<R: rand::Rng>(&self, _rng: &mut R) -> Option<Vec<f64>> {
         let tasks = self.problem.tasks();
         let mut order: Vec<usize> = (0..tasks.len()).collect();
         order.sort_by_key(|&i| std::cmp::Reverse(tasks[i].priority));
-        let mut keys = vec![0.0; tasks.len()];
-        for (rank, i) in order.into_iter().enumerate() {
-            keys[i] = rank as f64 / tasks.len() as f64;
+        let mut rank = vec![0.0; tasks.len()];
+        for (r, i) in order.into_iter().enumerate() {
+            rank[i] = r as f64 / tasks.len() as f64;
         }
-        Some(keys)
+        Some(
+            tasks
+                .iter()
+                .zip(rank)
+                .flat_map(|(t, r)| std::iter::repeat_n(r, t.activities.len()))
+                .collect(),
+        )
     }
 }
 
-/// The lower key first.
+/// The lower key first: each task's key for the activity it would start
+/// next (its first, when the decision does not say).
 #[derive(Debug)]
-struct KeyRule(HashMap<String, f64>);
+struct KeyRule(HashMap<String, Vec<f64>>);
 
 impl DispatchingRule for KeyRule {
     fn name(&self) -> &'static str {
         "KEY"
     }
 
-    fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
-        self.0.get(&task.id).copied().unwrap_or(f64::INFINITY)
+    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
+        let next = context
+            .imminent_activity
+            .get(&task.id)
+            .copied()
+            .unwrap_or(0);
+        self.0
+            .get(&task.id)
+            .and_then(|keys| keys.get(next))
+            .copied()
+            .unwrap_or(f64::INFINITY)
     }
 
     fn description(&self) -> &'static str {
-        "the task's search key, lower first"
+        "the search key of the task's next activity, lower first"
     }
 }
 

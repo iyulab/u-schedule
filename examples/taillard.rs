@@ -163,6 +163,7 @@ fn main() {
     );
     let best: HashMap<String, f64> = args
         .get(1)
+        .filter(|p| !p.is_empty())
         .map(|p| {
             std::fs::read_to_string(p)
                 .expect("bks.csv is readable")
