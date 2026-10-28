@@ -252,6 +252,48 @@ impl<'a> ScheduleCpBuilder<'a> {
         (schedule, solution)
     }
 
+    /// A schedule of the problem as a solution of the model [`build`](Self::build)
+    /// makes -- to start a solver's search from (a heuristic's schedule as
+    /// `u_metaheur::cp::BranchAndBoundSolver::with_incumbent`). Each activity
+    /// is taken from its assignment; one that [chooses](Self::choices) its
+    /// resource, from its assignment on a candidate, the alternative for that
+    /// candidate present and the others absent. An activity without an
+    /// assignment is left out, and the solver does not use a solution that
+    /// leaves one out or breaks the model.
+    pub fn incumbent(&self, schedule: &Schedule) -> CpSolution {
+        use u_metaheur::cp::{IntervalSolution, SolverStatus};
+        let choices = self.choices();
+        let mut solution = CpSolution::empty(SolverStatus::Feasible);
+        for task in self.problem.tasks() {
+            for activity in &task.activities {
+                let candidates = choices.get(activity.id.as_str());
+                let Some(assignment) = schedule.assignments.iter().find(|a| {
+                    a.activity_id == activity.id
+                        && candidates.is_none_or(|c| c.contains(&a.resource_id.as_str()))
+                }) else {
+                    continue;
+                };
+                let interval = IntervalSolution {
+                    start: assignment.start_ms,
+                    end: assignment.end_ms,
+                    duration: assignment.end_ms - assignment.start_ms,
+                    is_present: true,
+                };
+                for r in candidates.into_iter().flatten() {
+                    solution.intervals.insert(
+                        Self::alternative(&activity.id, r),
+                        IntervalSolution {
+                            is_present: *r == assignment.resource_id,
+                            ..interval.clone()
+                        },
+                    );
+                }
+                solution.intervals.insert(activity.id.clone(), interval);
+            }
+        }
+        solution
+    }
+
     /// Decodes a CP solution into a Schedule.
     fn decode_solution(&self, solution: &CpSolution) -> Schedule {
         let mut schedule = Schedule::new();
@@ -717,6 +759,54 @@ mod tests {
         assert_eq!(on("slow"), ("M3".to_string(), 4));
         assert!(solution.intervals["flex@M2"].is_present);
         assert!(!solution.intervals["flex@M1"].is_present);
+    }
+
+    #[test]
+    fn a_schedule_is_read_back_as_the_solvers_incumbent() {
+        // "a" and "b" each choose M1 or M2; the schedule has them together,
+        // "a" on M2. A search told to stop at its first schedule returns the
+        // incumbent as it is.
+        let step = |task: &str, id: &str| {
+            Task::new(task).with_activity(
+                Activity::new(id, task, 0)
+                    .with_process_time(10)
+                    .with_requirement(
+                        ResourceRequirement::new("Machine")
+                            .with_candidates(vec!["M1".into(), "M2".into()]),
+                    ),
+            )
+        };
+        let resources: Vec<Resource> = ["M1", "M2"]
+            .iter()
+            .map(|m| Resource::new(*m, "Machine"))
+            .collect();
+        let problem = Problem::new(vec![step("A", "a"), step("B", "b")], resources).expect("valid");
+        let builder = ScheduleCpBuilder::new(&problem);
+        let mut schedule = Schedule::new();
+        schedule.add_assignment(Assignment::new("a", "A", "M2", 0, 10));
+        schedule.add_assignment(Assignment::new("b", "B", "M1", 0, 10));
+        let incumbent = builder.incumbent(&schedule);
+        assert!(incumbent.intervals["a@M2"].is_present);
+        assert!(!incumbent.intervals["a@M1"].is_present);
+        assert_eq!(incumbent.intervals["b"].end, 10);
+        let config = SolverConfig {
+            stop_after_first: true,
+            ..SolverConfig::default()
+        };
+        let (found, solution) = builder.solve(
+            &u_metaheur::cp::BranchAndBoundSolver::new().with_incumbent(incumbent),
+            &config,
+            1_000,
+        );
+        assert!(solution.is_solution_found());
+        assert_eq!(found.makespan_ms(), 10);
+        assert_eq!(
+            found
+                .assignment_for_activity("a")
+                .expect("placed")
+                .resource_id,
+            "M2"
+        );
     }
 
     #[test]

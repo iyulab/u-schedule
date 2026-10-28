@@ -8,6 +8,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `cp::ScheduleCpBuilder::incumbent(&schedule)`: a schedule of the problem as a solution of
+  the model the builder makes, to start a solver's search from (`BranchAndBoundSolver::
+  with_incumbent`) -- each activity from its assignment and, for one that chooses its
+  resource, the alternative on the resource it was assigned present and the others absent.
+  Before, a caller had to know how the model names an activity's alternatives.
+
 ### Changed
 
 - The GA's local search moves a critical activity to another candidate resource at the

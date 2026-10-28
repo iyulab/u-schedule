@@ -32,9 +32,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use u_metaheur::cp::{
-    BranchAndBoundSolver, CpSolution, IntervalSolution, SolverConfig, SolverStatus,
-};
+use u_metaheur::cp::{BranchAndBoundSolver, SolverConfig};
 use u_metaheur::ga::{GaConfig, GaRunner};
 use u_schedule::cp::ScheduleCpBuilder;
 use u_schedule::dispatching::{rules, RuleEngine};
@@ -151,28 +149,7 @@ fn exact(
     let builder = ScheduleCpBuilder::new(problem);
     let mut solver = BranchAndBoundSolver::new();
     if let Some(schedule) = start_from {
-        let choices = builder.choices();
-        let mut incumbent = CpSolution::empty(SolverStatus::Feasible);
-        for a in &schedule.assignments {
-            let interval = IntervalSolution {
-                start: a.start_ms,
-                end: a.end_ms,
-                duration: a.end_ms - a.start_ms,
-                is_present: true,
-            };
-            // An activity that chooses its machine: the one it ran on.
-            for machine in choices.get(a.activity_id.as_str()).into_iter().flatten() {
-                incumbent.intervals.insert(
-                    format!("{}@{machine}", a.activity_id),
-                    IntervalSolution {
-                        is_present: *machine == a.resource_id,
-                        ..interval.clone()
-                    },
-                );
-            }
-            incumbent.intervals.insert(a.activity_id.clone(), interval);
-        }
-        solver = solver.with_incumbent(incumbent);
+        solver = solver.with_incumbent(builder.incumbent(schedule));
     }
     let (schedule, solution) = builder.solve(&solver, &config, horizon);
     (schedule, format!("{:?}", solution.status))
