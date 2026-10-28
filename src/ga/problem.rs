@@ -878,7 +878,7 @@ impl GaProblem for SchedulingGaProblem {
     type Individual = ScheduleChromosome;
 
     /// The dispatching rules' schedules seed the population.
-    fn initial_individuals(&self) -> Vec<ScheduleChromosome> {
+    fn initial_individuals(&self, _: &u_metaheur::Deadline) -> Vec<ScheduleChromosome> {
         self.dispatching_seeds()
     }
 
@@ -1125,7 +1125,8 @@ mod tests {
         let decoded = ga.decode(&seed);
         assert!(decoded.makespan_ms() <= dispatched.makespan_ms());
         assert_eq!(
-            ga.initial_individuals().len(),
+            ga.initial_individuals(&u_metaheur::Deadline::start(None))
+                .len(),
             5,
             "no deadlines: five rules"
         );

@@ -8,6 +8,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking** (through u-metaheur): `SchedulingGaProblem::initial_individuals` takes the run's
+  `u_metaheur::Deadline`, as the GA trait now does.
+
 ## [0.33.0] - 2026-10-28
 
 Depends on u-numflow 0.15 and u-metaheur 0.17.
