@@ -8,6 +8,19 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Fixed
+
+- `cp::ScheduleCpBuilder`: an activity eligible for several resources occupies only the one
+  it is reported on (its first eligible resource, whose duration it takes). Each of its
+  eligible resources had a no-overlap constraint over it, so the model kept every one of them
+  busy for its span and delayed the other activities there for nothing.
+
+### Changed
+
+- `cp::ScheduleCpBuilder` documents which models u-metaheur's exact `BranchAndBoundSolver`
+  solves (no overlapping steps, no second no-overlap constraint over an activity), with a
+  runnable example.
+
 ## [0.30.2] - 2026-10-27
 
 Depends on u-numflow 0.14 and u-metaheur 0.14.

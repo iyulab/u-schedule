@@ -22,18 +22,44 @@ use crate::Problem;
 /// Translates tasks, resources, and constraints into a CpModel
 /// suitable for solving with any `CpSolver` implementation.
 ///
-/// # Example
-/// ```no_run
-/// use u_schedule::cp::ScheduleCpBuilder;
-/// use u_schedule::models::{Task, Resource};
-/// use u_schedule::Problem;
-/// use u_metaheur::cp::{SimpleCpSolver, SolverConfig};
+/// `u_metaheur::cp::BranchAndBoundSolver` solves the model exactly when it is
+/// a disjunctive one: no step [overlaps](crate::models::Overlap) the one
+/// before (a negative delay), and no user constraint adds a second
+/// `NoOverlap` over an activity or a constraint of another kind. Otherwise
+/// that solver reports the model not searched (`SolverStatus::Unknown`).
 ///
-/// let tasks: Vec<Task> = vec![/* ... */];
-/// let resources: Vec<Resource> = vec![/* ... */];
+/// # Example
+/// ```
+/// use u_metaheur::cp::{BranchAndBoundSolver, SolverConfig, SolverStatus};
+/// use u_schedule::cp::ScheduleCpBuilder;
+/// use u_schedule::models::{Activity, Resource, ResourceRequirement, Task};
+/// use u_schedule::Problem;
+///
+/// let step = |id: &str, task: &str, seq: i32, ms: i64, machine: &str| {
+///     Activity::new(id, task, seq)
+///         .with_process_time(ms)
+///         .with_requirement(
+///             ResourceRequirement::new("Machine").with_candidates(vec![machine.into()]),
+///         )
+/// };
+/// let tasks = vec![
+///     Task::new("A")
+///         .with_activity(step("A1", "A", 0, 3, "M1"))
+///         .with_activity(step("A2", "A", 1, 2, "M2")),
+///     Task::new("B")
+///         .with_activity(step("B1", "B", 0, 2, "M2"))
+///         .with_activity(step("B2", "B", 1, 4, "M1")),
+/// ];
+/// let resources = vec![Resource::new("M1", "Machine"), Resource::new("M2", "Machine")];
 /// let problem = Problem::new(tasks, resources).expect("valid input");
-/// let builder = ScheduleCpBuilder::new(&problem);
-/// let model = builder.build(100_000);
+///
+/// let (schedule, solution) = ScheduleCpBuilder::new(&problem).solve(
+///     &BranchAndBoundSolver::new(),
+///     &SolverConfig::default(),
+///     1_000,
+/// );
+/// assert_eq!(solution.status, SolverStatus::Optimal);
+/// assert_eq!(schedule.makespan_ms(), 7);
 /// ```
 pub struct ScheduleCpBuilder<'a> {
     problem: &'a Problem,
@@ -67,8 +93,9 @@ impl<'a> ScheduleCpBuilder<'a> {
     ///
     /// Creates:
     /// - An `IntervalVar` per activity
-    /// - `NoOverlap` constraints per resource (over the activities it is
-    ///   eligible for)
+    /// - `NoOverlap` constraints per resource, over the activities reported
+    ///   on it (each activity on its first eligible resource -- this
+    ///   formulation does not choose among alternatives)
     /// - `Precedence` constraints for intra-task activity ordering and for
     ///   each activity's `predecessors` in other tasks — a step that
     ///   [overlaps](crate::models::Overlap) the one before by a delay that may
@@ -244,15 +271,16 @@ impl<'a> ScheduleCpBuilder<'a> {
         activity.duration_on(self.reported_on(activity))
     }
 
-    /// Collects activity IDs per resource (from each activity's eligible
-    /// resources).
+    /// Collects activity IDs per resource: each activity on the resource it
+    /// is reported on ([`reported_on`](Self::reported_on)) -- the one its
+    /// duration is taken on, and the only one it occupies.
     fn collect_resource_activities(&self) -> HashMap<String, Vec<String>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
         for task in self.problem.tasks() {
             for activity in &task.activities {
-                for candidate in activity.eligible_resources(self.problem.resources()) {
-                    map.entry(candidate.to_string())
+                if let Some(resource) = self.reported_on(activity) {
+                    map.entry(resource.to_string())
                         .or_default()
                         .push(activity.id.clone());
                 }
@@ -506,5 +534,92 @@ mod tests {
                 .start_ms
                 >= 4_000
         );
+    }
+
+    #[test]
+    fn an_activity_occupies_only_the_resource_it_is_reported_on() {
+        // "flex" may run on M1 or M2 and is reported on M1; "other" needs M2
+        // alone. The two can run together.
+        let tasks = vec![
+            Task::new("F").with_activity(
+                Activity::new("flex", "F", 0)
+                    .with_process_time(10)
+                    .with_requirement(
+                        ResourceRequirement::new("Machine")
+                            .with_candidates(vec!["M1".into(), "M2".into()]),
+                    ),
+            ),
+            Task::new("O").with_activity(
+                Activity::new("other", "O", 0)
+                    .with_process_time(10)
+                    .with_requirement(
+                        ResourceRequirement::new("Machine").with_candidates(vec!["M2".into()]),
+                    ),
+            ),
+        ];
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
+        let problem = Problem::new(tasks, resources).expect("valid");
+        let (schedule, solution) = ScheduleCpBuilder::new(&problem).solve(
+            &u_metaheur::cp::BranchAndBoundSolver::new(),
+            &SolverConfig::default(),
+            1_000,
+        );
+        assert_eq!(solution.status, u_metaheur::cp::SolverStatus::Optimal);
+        assert_eq!(schedule.makespan_ms(), 10);
+        let flex = schedule.assignment_for_activity("flex").expect("placed");
+        assert_eq!(flex.resource_id, "M1");
+    }
+
+    #[test]
+    fn the_exact_solver_proves_ft06() {
+        // Fisher & Thompson's 6 x 6 job shop, optimum 55.
+        let jobs: [[(usize, i64); 6]; 6] = [
+            [(2, 1), (0, 3), (1, 6), (3, 7), (5, 3), (4, 6)],
+            [(1, 8), (2, 5), (4, 10), (5, 10), (0, 10), (3, 4)],
+            [(2, 5), (3, 4), (5, 8), (0, 9), (1, 1), (4, 7)],
+            [(1, 5), (0, 5), (2, 5), (3, 3), (4, 8), (5, 9)],
+            [(2, 9), (1, 3), (4, 5), (5, 4), (0, 3), (3, 1)],
+            [(1, 3), (3, 3), (5, 9), (0, 10), (4, 4), (2, 1)],
+        ];
+        let tasks = jobs
+            .iter()
+            .enumerate()
+            .map(|(j, ops)| {
+                let id = format!("J{j}");
+                ops.iter()
+                    .enumerate()
+                    .fold(Task::new(&id), |task, (k, &(m, d))| {
+                        task.with_activity(
+                            Activity::new(format!("{id}_{k}"), &id, k as i32)
+                                .with_process_time(d)
+                                .with_requirement(
+                                    ResourceRequirement::new("Machine")
+                                        .with_candidates(vec![format!("M{m}")]),
+                                ),
+                        )
+                    })
+            })
+            .collect();
+        let resources = (0..6)
+            .map(|m| Resource::new(format!("M{m}"), "Machine"))
+            .collect();
+        let problem = Problem::new(tasks, resources).expect("valid");
+        let (schedule, solution) = ScheduleCpBuilder::new(&problem).solve(
+            &u_metaheur::cp::BranchAndBoundSolver::new(),
+            &SolverConfig::default(),
+            1_000,
+        );
+        assert_eq!(solution.status, u_metaheur::cp::SolverStatus::Optimal);
+        assert_eq!(schedule.makespan_ms(), 55);
+        let input = crate::scheduler::FeasibilityInput {
+            tasks: problem.tasks(),
+            resources: problem.resources(),
+            constraints: &[],
+        };
+        let violations = crate::scheduler::check_schedule(&schedule, &input);
+        assert!(violations.is_empty(), "{violations:?}");
     }
 }
