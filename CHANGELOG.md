@@ -8,6 +8,18 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- Behaviour change: the GA's local search on the critical path also moves an activity of a block
+  to the block's front or back (Zhang, Li, Guan & Rao 2007, neighbourhood N6), beside swapping
+  its first two or last two activities. Every move is ranked by the longest path through the
+  stretch of the machine sequence it reorders, from the current heads and tails (Taillard's swap
+  estimate, extended to a stretch), and the three that look best are timed in full, as before.
+  Within 5 s per instance the mean gap to the best known makespan falls from 3.9 % to 3.0 % on
+  20 JSPLIB instances (`ta` · `la` · `abz`) and from 1.1 % to 0.7 % on Brandimarte's ten; with 200
+  generations, from 4.5 % to 3.5 % on Taillard's 40, at about 16 s per instance instead of 12 s.
+  Schedules can differ from earlier results.
+
 ## [0.34.0] - 2026-10-29
 
 Depends on u-metaheur 0.18 and u-numflow 0.16.

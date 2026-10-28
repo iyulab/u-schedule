@@ -6,7 +6,12 @@
 //! only at the edges of a *block* (a run of the path on one machine): swapping
 //! two activities inside a block leaves the block as long as before
 //! (Nowicki & Smutnicki 1996, "A fast taboo search algorithm for the job shop
-//! problem", neighbourhood N5). A chromosome improved this way is written back
+//! problem", neighbourhood N5). Moving an activity inside a block to the
+//! block's front or back -- past every other activity of the block at once --
+//! is the extension of N5 to N6 (Zhang, Li, Guan & Rao 2007, "A tabu search
+//! algorithm with a new neighborhood structure for the job shop scheduling
+//! problem"); a move that would close a cycle with the tasks' order is found
+//! when the sequences are timed, and skipped. A chromosome improved this way is written back
 //! as the order the improved schedule was built in (Lamarckian), so the search
 //! the GA runs next starts from it.
 //!
@@ -18,7 +23,7 @@
 
 use super::*;
 
-/// How many of the swaps estimated best are timed in full at each step.
+/// How many of the block moves estimated best are timed in full at each step.
 const TIMED_SWAPS: usize = 3;
 
 /// How many steps undoing a swap stays forbidden. Nowicki & Smutnicki use 8
@@ -94,16 +99,15 @@ impl SchedulingGaProblem {
             left.retain(|&(_, _, until)| until > step);
             let mut best: Option<(f64, Move)> = None;
             let path = self.critical_path(&view, &ix, &seq, &placed, &links);
-            let mut swaps = Self::block_edge_swaps(&ix, &seq, &path);
-            self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
-            let mut moves: Vec<Move> = swaps.into_iter().map(|(r, i)| Move::Swap(r, i)).collect();
+            let mut moves = Self::block_moves(&ix, &seq, &path);
+            self.keep_best_estimated(&view, &seq, &placed, &links, &mut moves);
             if flexible {
                 moves.extend(self.reassignments(&view, &ix, &seq, &placed, &links, &path));
             }
             for m in moves {
                 let forbidden = match m {
-                    Move::Swap(r, i) => {
-                        let (u, v) = (seq[r][i], seq[r][i + 1]);
+                    Move::Swap(..) | Move::Shift { .. } => {
+                        let (u, v) = m.pair(&seq).expect("a block move has a pair");
                         taboo
                             .iter()
                             .any(|&(a, b, _)| (a, b) == (u, v) || (a, b) == (v, u))
@@ -126,7 +130,10 @@ impl SchedulingGaProblem {
                 break;
             };
             match m {
-                Move::Swap(r, i) => taboo.push((seq[r][i], seq[r][i + 1], step + TABOO_STEPS)),
+                Move::Swap(..) | Move::Shift { .. } => {
+                    let (u, v) = m.pair(&seq).expect("a block move has a pair");
+                    taboo.push((u, v, step + TABOO_STEPS));
+                }
                 Move::Reassign { activity, from, .. } => {
                     left.push((activity, from, step + TABOO_STEPS));
                 }
@@ -170,6 +177,11 @@ impl SchedulingGaProblem {
     fn apply(&self, ix: &mut Indexed, seq: &mut [Vec<usize>], m: Move, undo: bool) {
         match m {
             Move::Swap(r, i) => seq[r].swap(i, i + 1),
+            Move::Shift { resource, from, to } => {
+                let (a, b) = if undo { (to, from) } else { (from, to) };
+                let activity = seq[resource].remove(a);
+                seq[resource].insert(b, activity);
+            }
             Move::Reassign {
                 activity,
                 from,
@@ -368,17 +380,24 @@ impl SchedulingGaProblem {
         path
     }
 
-    /// The swaps of two neighbours in a machine sequence that can shorten the
-    /// critical `path`: the first two and the last two activities of every
-    /// block of at least two, as `(machine, position of the first)`.
-    fn block_edge_swaps(ix: &Indexed, seq: &[Vec<usize>], path: &[usize]) -> Vec<(usize, usize)> {
+    /// The moves at the critical blocks of `path` (runs of it next to one
+    /// another on one machine): swapping the first two or the last two
+    /// activities of a block (N5), and moving an activity of a block of three
+    /// or more to the block's front or back (N6) -- the moves that a swap of
+    /// neighbours already gives are left out.
+    fn block_moves(ix: &Indexed, seq: &[Vec<usize>], path: &[usize]) -> Vec<Move> {
         let mut position = vec![0usize; ix.resource.len()];
         for s in seq {
             for (i, &a) in s.iter().enumerate() {
                 position[a] = i;
             }
         }
-        let mut swaps: Vec<(usize, usize)> = Vec::new();
+        let mut moves: Vec<Move> = Vec::new();
+        let push = |m: Move, moves: &mut Vec<Move>| {
+            if !moves.contains(&m) {
+                moves.push(m);
+            }
+        };
         let mut i = 0;
         while i < path.len() {
             let r = ix.resource[path[i]].expect("a placed activity has a resource");
@@ -390,55 +409,85 @@ impl SchedulingGaProblem {
                 j += 1;
             }
             if j > i {
-                for swap in [(r, position[path[i]]), (r, position[path[j]] - 1)] {
-                    if !swaps.contains(&swap) {
-                        swaps.push(swap);
-                    }
+                let (first, last) = (position[path[i]], position[path[j]]);
+                push(Move::Swap(r, first), &mut moves);
+                push(Move::Swap(r, last - 1), &mut moves);
+                for at in first + 2..=last {
+                    push(
+                        Move::Shift {
+                            resource: r,
+                            from: at,
+                            to: first,
+                        },
+                        &mut moves,
+                    );
+                }
+                for at in first..last - 1 {
+                    push(
+                        Move::Shift {
+                            resource: r,
+                            from: at,
+                            to: last,
+                        },
+                        &mut moves,
+                    );
                 }
             }
             i = j + 1;
         }
-        swaps
+        moves
     }
 
-    /// Cuts `swaps` to the few that look best, so that only those are timed in
-    /// full. A swap of `u` and `v` (neighbours on a machine) changes the heads
-    /// and tails of just those two, which gives the longest path through them
-    /// from the current heads and tails without timing the sequences again
-    /// (Taillard 1994, "Parallel taboo search techniques for the job shop
-    /// scheduling problem"). The estimate follows the processing times as they
-    /// are, so with sequence-dependent setups or transport times it is a
-    /// ranking, not a bound.
+    /// Cuts `moves` to the few that look best, so that only those are timed in
+    /// full. A block move reorders one stretch of a machine sequence and
+    /// changes the heads and tails of just the activities in it, which gives
+    /// the longest path through the stretch from the current heads before it
+    /// and tails after it without timing the sequences again -- for a swap of
+    /// two neighbours, Taillard's estimate (1994, "Parallel taboo search
+    /// techniques for the job shop scheduling problem"). The estimate follows
+    /// the processing times as they are, so with sequence-dependent setups or
+    /// transport times it is a ranking, not a bound.
     fn keep_best_estimated(
         &self,
         view: &TaskView<'_>,
         seq: &[Vec<usize>],
         placed: &Placed,
         links: &Links,
-        swaps: &mut Vec<(usize, usize)>,
+        moves: &mut Vec<Move>,
     ) {
-        if swaps.len() <= TIMED_SWAPS {
+        if moves.len() <= TIMED_SWAPS {
             return;
         }
         let span = |a: usize| placed.end[a] - placed.start[a];
         let tail = Self::tails(seq, placed, links);
         let ends = |x: Option<usize>| x.map_or(0, |x| placed.end[x]);
         let after = |x: Option<usize>| x.map_or(0, |x| span(x) + tail[x]);
-        swaps.sort_by_cached_key(|&(r, i)| {
-            let (u, v) = (seq[r][i], seq[r][i + 1]);
-            let before_u = i.checked_sub(1).map(|k| seq[r][k]);
-            let after_v = seq[r].get(i + 2).copied();
-            let head_v = ends(links.task_pred[v])
-                .max(ends(before_u))
-                .max(self.release_of(view, v));
-            let head_u = ends(links.task_pred[u])
-                .max(head_v + span(v))
-                .max(self.release_of(view, u));
-            let tail_u = after(links.task_succ[u]).max(after(after_v));
-            let tail_v = after(links.task_succ[v]).max(span(u) + tail_u);
-            (head_v + span(v) + tail_v).max(head_u + span(u) + tail_u)
+        // The longest path through a stretch `lo..=hi` of machine `r` put in
+        // `order`, from the heads before it and the tails after it.
+        let through = |r: usize, lo: usize, hi: usize, order: &[usize]| {
+            let mut head = ends(lo.checked_sub(1).map(|k| seq[r][k]));
+            let mut heads = Vec::with_capacity(order.len());
+            for &x in order {
+                let h = ends(links.task_pred[x])
+                    .max(head)
+                    .max(self.release_of(view, x));
+                heads.push(h);
+                head = h + span(x);
+            }
+            let mut next = after(seq[r].get(hi + 1).copied());
+            let mut longest = 0;
+            for (&x, &h) in order.iter().zip(&heads).rev() {
+                let t = after(links.task_succ[x]).max(next);
+                longest = longest.max(h + span(x) + t);
+                next = span(x) + t;
+            }
+            longest
+        };
+        moves.sort_by_cached_key(|&m| {
+            let (r, lo, hi, order) = m.stretch(seq);
+            through(r, lo, hi, &order)
         });
-        swaps.truncate(TIMED_SWAPS);
+        moves.truncate(TIMED_SWAPS);
     }
 
     /// Times the machine sequences `seq` into `scratch.placed`: every activity
@@ -515,10 +564,17 @@ impl SchedulingGaProblem {
 }
 
 /// A step of the local search.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Move {
     /// Swap the activities at `.1` and `.1 + 1` of machine `.0`'s sequence.
     Swap(usize, usize),
+    /// Move the activity at position `from` of `resource`'s sequence to
+    /// position `to` of it.
+    Shift {
+        resource: usize,
+        from: usize,
+        to: usize,
+    },
     /// Move `activity` from position `at` of resource `from` to position
     /// `pos` of resource `to`.
     Reassign {
@@ -528,6 +584,45 @@ enum Move {
         to: usize,
         pos: usize,
     },
+}
+
+impl Move {
+    /// The activity a block move moves and the one it ends up next to in its
+    /// place -- what undoing it would swap back.
+    fn pair(self, seq: &[Vec<usize>]) -> Option<(usize, usize)> {
+        match self {
+            Move::Swap(r, i) => Some((seq[r][i], seq[r][i + 1])),
+            Move::Shift { resource, from, to } => Some((seq[resource][from], seq[resource][to])),
+            Move::Reassign { .. } => None,
+        }
+    }
+
+    /// The stretch of a machine sequence a block move reorders, `(resource,
+    /// lo, hi, its activities afterwards)`.
+    fn stretch(self, seq: &[Vec<usize>]) -> (usize, usize, usize, Vec<usize>) {
+        match self {
+            Move::Swap(r, i) => (r, i, i + 1, vec![seq[r][i + 1], seq[r][i]]),
+            Move::Shift {
+                resource: r,
+                from,
+                to,
+            } if to < from => {
+                let mut order = vec![seq[r][from]];
+                order.extend_from_slice(&seq[r][to..from]);
+                (r, to, from, order)
+            }
+            Move::Shift {
+                resource: r,
+                from,
+                to,
+            } => {
+                let mut order = seq[r][from + 1..=to].to_vec();
+                order.push(seq[r][from]);
+                (r, from, to, order)
+            }
+            Move::Reassign { .. } => unreachable!("a reassignment is not estimated"),
+        }
+    }
 }
 
 /// The neighbours of each activity in its task, and the activities of other
@@ -556,5 +651,71 @@ impl Scratch {
             ready: Vec::with_capacity(n),
             placed: Placed::new(n),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn indexed(resource: Vec<Option<usize>>) -> Indexed {
+        Indexed {
+            order: Vec::new(),
+            resource,
+            duration: Vec::new(),
+            extra: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_block_of_four_gives_its_edge_swaps_and_the_moves_to_its_ends() {
+        // One machine runs 0..4 in that order, all on the critical path.
+        let ix = indexed(vec![Some(0); 4]);
+        let seq = vec![vec![0, 1, 2, 3]];
+        let moves = SchedulingGaProblem::block_moves(&ix, &seq, &[0, 1, 2, 3]);
+        let shift = |from, to| Move::Shift {
+            resource: 0,
+            from,
+            to,
+        };
+        assert_eq!(
+            moves,
+            vec![
+                Move::Swap(0, 0),
+                Move::Swap(0, 2),
+                shift(2, 0),
+                shift(3, 0),
+                shift(0, 3),
+                shift(1, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_of_two_gives_one_swap_and_no_shift() {
+        let ix = indexed(vec![Some(0), Some(0), Some(1)]);
+        let seq = vec![vec![0, 1], vec![2]];
+        let moves = SchedulingGaProblem::block_moves(&ix, &seq, &[0, 1, 2]);
+        assert_eq!(moves, vec![Move::Swap(0, 0)]);
+    }
+
+    #[test]
+    fn a_shift_names_the_stretch_it_reorders_and_the_pair_it_makes() {
+        let seq = vec![vec![5, 6, 7, 8]];
+        let front = Move::Shift {
+            resource: 0,
+            from: 3,
+            to: 1,
+        };
+        assert_eq!(front.stretch(&seq), (0, 1, 3, vec![8, 6, 7]));
+        assert_eq!(front.pair(&seq), Some((8, 6)));
+        let back = Move::Shift {
+            resource: 0,
+            from: 0,
+            to: 2,
+        };
+        assert_eq!(back.stretch(&seq), (0, 0, 2, vec![6, 7, 5]));
+        // A swap is the stretch of two put the other way round.
+        assert_eq!(Move::Swap(0, 2).stretch(&seq), (0, 2, 3, vec![8, 7]));
     }
 }

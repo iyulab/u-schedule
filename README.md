@@ -73,9 +73,9 @@ makespan gap to the optimum or best known upper bound, mean over instances
 | LPUL | 42.0 % |
 | LPT | 44.2 % |
 | LWKR | 47.9 % |
-| GA (population 50, 200 generations, seed 1) | 4.5 % |
+| GA (population 50, 200 generations, seed 1) | 3.5 % |
 
-The rules take milliseconds; the GA about 12 s per instance here. Its first
+The rules take milliseconds; the GA about 16 s per instance here. Its first
 population holds the rules' schedules (MWKR, SPT, LPT, FIFO, LWKR, and EDD and
 ATC when tasks have deadlines) beside random ones, and it keeps its best, so it
 never ends worse than the best rule — on all 40 instances it was at least as
@@ -84,11 +84,13 @@ kept: in the order its OSV gives, and as an *active* schedule
 (Giffler–Thompson) that lets an activity use idle time before a longer one
 when that delays nothing. Decoding only in the OSV's order left the same GA at
 19.7 %. Each child of a crossover and each mutated chromosome is then improved
-by a local search on the critical path: swapping the first two or the last two
-activities of a block of the longest chain on one machine is the only
-rearrangement that can shorten it (Nowicki & Smutnicki 1996), so the search
-tries those and makes the best, even when it lengthens the schedule, forbidding
-the undoing of a swap for six steps (taboo search) so that it leaves the local
+by a local search on the critical path: only rearranging a *block* -- a run of
+the longest chain on one machine -- at its edges can shorten it, by swapping
+its first two or last two activities (Nowicki & Smutnicki 1996) or by moving one
+of its activities to its front or back (Zhang et al. 2007), so the search
+estimates those moves from the current heads and tails, times the three that
+look best and makes the best, even when it lengthens the schedule, forbidding
+the undoing of a move for six steps (taboo search) so that it leaves the local
 optimum a plain descent stops in; it writes the best order seen back. Without
 the local search (`local_search_steps` 0) the same GA was at 16.4 %, with a
 descent that stops at its first optimum (20 swaps) at 10.0 %. The run is
@@ -102,7 +104,7 @@ candidates -- where on that resource the longest path through it is shortest
 (Mastrolilli & Gambardella 2000) -- the assignment written back with the
 order. On Brandimarte's ten instances (`examples/taillard.rs` reads the
 `.fjs` format; 200 generations, seed 1) the mean gap to the best known
-makespans is 0.5 %, seven of the ten at the best known.
+makespans is 0.45 %, six of the ten at the best known.
 
 ## GA Encoding
 
