@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-28
+
+Depends on u-numflow 0.15 and u-metaheur 0.17.
+
 ### Added
 
 - `cp::ScheduleCpBuilder::incumbent(&schedule)`: a schedule of the problem as a solution of

@@ -158,7 +158,7 @@ assert_eq!(found.cost, 0.0);
 
 ```toml
 [dependencies]
-u-schedule = "0.32"
+u-schedule = "0.33"
 ```
 
 ```rust
