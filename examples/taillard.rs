@@ -28,17 +28,20 @@
 //! makespan optimal (`Optimal`) or was cut off with the best found
 //! (`Feasible`). `GA+CP@<ms>` runs the GA (200 generations) first and starts
 //! the exact search from its schedule; the time is the two together.
+//! `DS@<ms>` is `DispatchSearch` (random keys decoded by the dispatcher,
+//! population 50, seed 1) within that time limit (default 5 000 ms).
 
 use std::collections::HashMap;
 use std::time::Instant;
 
+use u_metaheur::brkga::BrkgaConfig;
 use u_metaheur::cp::{BranchAndBoundSolver, SolverConfig};
 use u_metaheur::ga::{GaConfig, GaRunner};
 use u_schedule::cp::ScheduleCpBuilder;
 use u_schedule::dispatching::{rules, RuleEngine};
 use u_schedule::ga::SchedulingGaProblem;
 use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
-use u_schedule::scheduler::SimpleScheduler;
+use u_schedule::scheduler::{DispatchSearch, SimpleScheduler};
 use u_schedule::Problem;
 
 const RULES: [&str; 7] = ["SPT", "LPT", "LWKR", "MWKR", "FIFO", "WINQ", "LPUL"];
@@ -206,6 +209,20 @@ fn main() {
             let started = Instant::now();
             let mut status = String::new();
             let schedule = match rule.strip_prefix("GA") {
+                None if rule.starts_with("DS") => {
+                    let limit = rule
+                        .strip_prefix("DS@")
+                        .map_or(5_000, |ms| ms.parse().expect("DS@<milliseconds>"));
+                    let config = BrkgaConfig::new(1)
+                        .with_population_size(50)
+                        .with_max_generations(usize::MAX)
+                        .with_time_limit_ms(limit)
+                        .with_seed(1);
+                    DispatchSearch::new(SimpleScheduler::new(), config)
+                        .search(&problem, 0)
+                        .expect("valid search settings")
+                        .schedule
+                }
                 None if rule.starts_with("CP") => {
                     let limit = rule
                         .strip_prefix("CP@")
