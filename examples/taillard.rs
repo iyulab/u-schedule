@@ -4,8 +4,9 @@
 //!
 //! The instances are not in this repository. Download them in the standard
 //! job-shop format (first line `jobs machines`, then one line per job of
-//! `machine time` pairs, machines counted from 0 — e.g. the `ta01` … files of
-//! the JSPLIB collection) into one directory:
+//! `machine time` pairs, machines counted from 0 — e.g. the `ta01` …, `ft06`,
+//! `la01` … files of the JSPLIB collection) into one directory; every file
+//! there without an extension is read:
 //!
 //! ```text
 //! cargo run --release --example taillard -- <dir> [bks.csv] [rules]
@@ -18,11 +19,21 @@
 //! 50, 200 generations, seed 1). `GA@<ms>` gives it a time limit instead of the
 //! generation budget, e.g. `GA@10000`; `GA:<n>` sets the local search's swaps
 //! per improved chromosome (`GA:0` turns it off), e.g. `GA:5@10000`.
+//! `CP@<ms>` solves the instance exactly (`ScheduleCpBuilder` with
+//! u-metaheur's `BranchAndBoundSolver`) within that time limit (default
+//! 10 000 ms); the `status` column says whether the search proved its
+//! makespan optimal (`Optimal`) or was cut off with the best found
+//! (`Feasible`). `GA+CP@<ms>` runs the GA (200 generations) first and starts
+//! the exact search from its schedule; the time is the two together.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
+use u_metaheur::cp::{
+    BranchAndBoundSolver, CpSolution, IntervalSolution, SolverConfig, SolverStatus,
+};
 use u_metaheur::ga::{GaConfig, GaRunner};
+use u_schedule::cp::ScheduleCpBuilder;
 use u_schedule::dispatching::{rules, RuleEngine};
 use u_schedule::ga::SchedulingGaProblem;
 use u_schedule::models::{Activity, ActivityDuration, Resource, ResourceRequirement, Task};
@@ -103,6 +114,44 @@ fn genetic(
     ga.decode(&result.best)
 }
 
+/// The exact solver within `time_limit_ms`, on a horizon of the instance's
+/// total work (a schedule that runs everything in turn): the schedule and
+/// the solver's status.
+fn exact(
+    problem: &Problem,
+    time_limit_ms: i64,
+    start_from: Option<&u_schedule::models::Schedule>,
+) -> (u_schedule::models::Schedule, String) {
+    let horizon: i64 = problem
+        .tasks()
+        .iter()
+        .flat_map(|t| &t.activities)
+        .map(|a| a.duration.total_ms())
+        .sum();
+    let config = SolverConfig {
+        time_limit_ms,
+        ..SolverConfig::default()
+    };
+    let mut solver = BranchAndBoundSolver::new();
+    if let Some(schedule) = start_from {
+        let mut incumbent = CpSolution::empty(SolverStatus::Feasible);
+        for a in &schedule.assignments {
+            incumbent.intervals.insert(
+                a.activity_id.clone(),
+                IntervalSolution {
+                    start: a.start_ms,
+                    end: a.end_ms,
+                    duration: a.end_ms - a.start_ms,
+                    is_present: true,
+                },
+            );
+        }
+        solver = solver.with_incumbent(incumbent);
+    }
+    let (schedule, solution) = ScheduleCpBuilder::new(problem).solve(&solver, &config, horizon);
+    (schedule, format!("{:?}", solution.status))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::path::Path::new(
@@ -134,12 +183,12 @@ fn main() {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("ta") && !n.contains('.'))
+                .is_some_and(|n| !n.contains('.'))
         })
         .collect();
     names.sort();
 
-    println!("instance,size,rule,makespan,best,gap_pct,violations,ms");
+    println!("instance,size,rule,makespan,best,gap_pct,violations,ms,status");
     let mut gaps: HashMap<&str, Vec<f64>> = HashMap::new();
     for path in &names {
         let name = path
@@ -150,7 +199,25 @@ fn main() {
         let size = format!("{}x{}", problem.tasks().len(), problem.resources().len());
         for rule in &chosen {
             let started = Instant::now();
+            let mut status = String::new();
             let schedule = match rule.strip_prefix("GA") {
+                None if rule.starts_with("CP") => {
+                    let limit = rule
+                        .strip_prefix("CP@")
+                        .map_or(10_000, |ms| ms.parse().expect("CP@<milliseconds>"));
+                    let (schedule, s) = exact(&problem, limit, None);
+                    status = s;
+                    schedule
+                }
+                Some(cp) if cp.starts_with("+CP") => {
+                    let limit = cp
+                        .strip_prefix("+CP@")
+                        .map_or(10_000, |ms| ms.parse().expect("GA+CP@<milliseconds>"));
+                    let seed = genetic(&problem, None, None);
+                    let (schedule, s) = exact(&problem, limit, Some(&seed));
+                    status = s;
+                    schedule
+                }
                 Some(options) => {
                     let (steps, limit) = options
                         .split_once('@')
@@ -169,16 +236,29 @@ fn main() {
             };
             let ms = started.elapsed().as_millis();
             let makespan = schedule.makespan_ms() as f64;
+            // The CP path reports no violations of its own: check it.
+            let violations = if status.is_empty() {
+                schedule.violations.len()
+            } else {
+                u_schedule::scheduler::check_schedule(
+                    &schedule,
+                    &u_schedule::scheduler::FeasibilityInput {
+                        tasks: problem.tasks(),
+                        resources: problem.resources(),
+                        constraints: &[],
+                    },
+                )
+                .len()
+            };
             let reference = best.get(name).copied();
             let gap = reference.map(|b| 100.0 * (makespan - b) / b);
             if let Some(g) = gap {
                 gaps.entry(rule.as_str()).or_default().push(g);
             }
             println!(
-                "{name},{size},{rule},{makespan},{},{},{},{ms}",
+                "{name},{size},{rule},{makespan},{},{},{violations},{ms},{status}",
                 reference.map_or(String::new(), |b| b.to_string()),
                 gap.map_or(String::new(), |g| format!("{g:.1}")),
-                schedule.violations.len(),
             );
         }
     }
