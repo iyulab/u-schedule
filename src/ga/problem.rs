@@ -931,10 +931,6 @@ impl GaProblem for SchedulingGaProblem {
     }
 }
 
-// Make SchedulingGaProblem Send + Sync (all fields are owned data)
-unsafe impl Send for SchedulingGaProblem {}
-unsafe impl Sync for SchedulingGaProblem {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
