@@ -1384,6 +1384,99 @@ mod tests {
         );
     }
 
+    /// Two one-step jobs both put on M1, either of which M2 could run: the
+    /// local search moves one of them, and the chromosome takes the move.
+    #[test]
+    fn the_local_search_moves_a_critical_activity_to_another_candidate() {
+        let resources = vec![
+            Resource::new("M1", "Machine"),
+            Resource::new("M2", "Machine"),
+        ];
+        let tasks: Vec<Task> = ["J1", "J2"]
+            .iter()
+            .map(|j| {
+                Task::new(*j).with_activity(
+                    Activity::new(format!("{j}-O1"), *j, 1)
+                        .with_process_time(10)
+                        .with_requirement(
+                            ResourceRequirement::new("Machine")
+                                .with_candidates(vec!["M1".into(), "M2".into()]),
+                        ),
+                )
+            })
+            .collect();
+        let ga = SchedulingGaProblem::new(&valid(&tasks, &resources))
+            .with_tardiness_weight(0.0)
+            .expect("a weight in [0, 1]");
+        let mut chromosome = ScheduleChromosome {
+            osv: vec!["J1".into(), "J2".into()],
+            mav: vec!["M1".into(), "M1".into()],
+            activity_index: ga.activity_index.clone(),
+            fitness: f64::INFINITY,
+        };
+        assert_eq!(ga.decode_semi_active(&chromosome).makespan_ms(), 20);
+        ga.improve(&mut chromosome);
+        assert_eq!(ga.decode_semi_active(&chromosome).makespan_ms(), 10);
+        assert!(chromosome.mav.contains(&"M2".to_string()));
+    }
+
+    /// On random flexible job shops -- each step on either of two machines,
+    /// for its own time on each -- the local search never lengthens the
+    /// schedule and leaves one the feasibility check passes.
+    #[test]
+    fn the_local_search_keeps_flexible_schedules_valid() {
+        let mut rng = SmallRng::seed_from_u64(5);
+        let machines = 3;
+        let resources: Vec<Resource> = (0..machines)
+            .map(|m| Resource::new(format!("M{m}"), "Machine"))
+            .collect();
+        let mut shortened = 0;
+        for _ in 0..15 {
+            let tasks: Vec<Task> = (0..4)
+                .map(|j| {
+                    let id = format!("J{j}");
+                    (0..3).fold(Task::new(&id), |task, k| {
+                        let first = rng.random_range(0..machines);
+                        let second = (first + 1) % machines;
+                        let (a, b) = (rng.random_range(1..20), rng.random_range(1..20));
+                        task.with_activity(
+                            Activity::new(format!("{id}-O{k}"), &id, k)
+                                .with_process_time(a.max(b))
+                                .with_duration_on(format!("M{first}"), ActivityDuration::fixed(a))
+                                .with_duration_on(format!("M{second}"), ActivityDuration::fixed(b))
+                                .with_requirement(
+                                    ResourceRequirement::new("Machine").with_candidates(vec![
+                                        format!("M{first}"),
+                                        format!("M{second}"),
+                                    ]),
+                                ),
+                        )
+                    })
+                })
+                .collect();
+            let problem = valid(&tasks, &resources);
+            let ga = SchedulingGaProblem::new(&problem)
+                .with_tardiness_weight(0.0)
+                .expect("a weight in [0, 1]");
+            let input = crate::scheduler::FeasibilityInput {
+                tasks: problem.tasks(),
+                resources: problem.resources(),
+                constraints: &[],
+            };
+            for _ in 0..5 {
+                let mut chromosome = ga.create_individual(&mut rng);
+                let before = ga.decode_semi_active(&chromosome).makespan_ms();
+                ga.improve(&mut chromosome);
+                let schedule = ga.decode_semi_active(&chromosome);
+                assert!(schedule.makespan_ms() <= before);
+                let violations = crate::scheduler::check_schedule(&schedule, &input);
+                assert!(violations.is_empty(), "{violations:?}");
+                shortened += usize::from(schedule.makespan_ms() < before);
+            }
+        }
+        assert!(shortened > 0);
+    }
+
     /// With the steps at 0 the local search leaves the chromosome as it is.
     #[test]
     fn no_local_search_steps_leave_the_chromosome_alone() {

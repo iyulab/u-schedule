@@ -9,6 +9,12 @@
 //! problem", neighbourhood N5). A chromosome improved this way is written back
 //! as the order the improved schedule was built in (Lamarckian), so the search
 //! the GA runs next starts from it.
+//!
+//! Where activities choose among resources, a critical activity may also move
+//! to another of its candidates -- the flexible job shop's assignment move
+//! (Mastrolilli & Gambardella 2000, "Effective neighbourhood functions for the
+//! flexible job shop problem") -- inserted where its start falls in that
+//! resource's sequence; the chromosome then takes the new assignment too.
 
 use super::*;
 
@@ -35,7 +41,7 @@ impl SchedulingGaProblem {
             return;
         }
         let view = self.view();
-        let ix = self.indexed(chromosome);
+        let mut ix = self.indexed(chromosome);
         let n = self.activities.len();
         if ix.order.len() != n || ix.resource.iter().any(Option::is_none) {
             return;
@@ -78,44 +84,66 @@ impl SchedulingGaProblem {
         // in. The best sequences seen are the result.
         let mut best_fitness = fitness;
         let mut best_order: Option<Vec<usize>> = None;
+        let mut best_resource: Option<Vec<Option<usize>>> = None;
         let mut taboo: Vec<(usize, usize, usize)> = Vec::new();
+        // (activity, the resource it left, until): moving it back is forbidden.
+        let mut left: Vec<(usize, usize, usize)> = Vec::new();
+        let flexible = self.activities.iter().any(|a| a.candidates.len() > 1);
         for step in 0..self.local_search_steps {
             taboo.retain(|&(_, _, until)| until > step);
-            let mut best: Option<(f64, usize, usize)> = None;
-            let mut swaps = self.block_edge_swaps(&view, &ix, &seq, &placed, &links);
+            left.retain(|&(_, _, until)| until > step);
+            let mut best: Option<(f64, Move)> = None;
+            let path = self.critical_path(&view, &ix, &seq, &placed, &links);
+            let mut swaps = Self::block_edge_swaps(&ix, &seq, &path);
             self.keep_best_estimated(&view, &seq, &placed, &links, &mut swaps);
-            for (r, i) in swaps {
-                let (u, v) = (seq[r][i], seq[r][i + 1]);
-                let forbidden = taboo
-                    .iter()
-                    .any(|&(a, b, _)| (a, b) == (u, v) || (a, b) == (v, u));
-                seq[r].swap(i, i + 1);
+            let mut moves: Vec<Move> = swaps.into_iter().map(|(r, i)| Move::Swap(r, i)).collect();
+            if flexible {
+                moves.extend(self.reassignments(&ix, &seq, &placed, &path));
+            }
+            for m in moves {
+                let forbidden = match m {
+                    Move::Swap(r, i) => {
+                        let (u, v) = (seq[r][i], seq[r][i + 1]);
+                        taboo
+                            .iter()
+                            .any(|&(a, b, _)| (a, b) == (u, v) || (a, b) == (v, u))
+                    }
+                    Move::Reassign { activity, to, .. } => {
+                        left.iter().any(|&(a, r, _)| (a, r) == (activity, to))
+                    }
+                };
+                self.apply(&mut ix, &mut seq, m, false);
                 if self.time_sequences(&view, &ix, &seq, &links, &mut scratch) {
                     let f = self.fitness_of(&view, &scratch.placed);
-                    // A forbidden swap is allowed when it beats the best so far.
-                    if (!forbidden || f < best_fitness) && best.is_none_or(|(b, ..)| f < b) {
-                        best = Some((f, r, i));
+                    // A forbidden move is allowed when it beats the best so far.
+                    if (!forbidden || f < best_fitness) && best.is_none_or(|(b, _)| f < b) {
+                        best = Some((f, m));
                     }
                 }
-                seq[r].swap(i, i + 1);
+                self.apply(&mut ix, &mut seq, m, true);
             }
-            let Some((f, r, i)) = best else {
+            let Some((f, m)) = best else {
                 break;
             };
-            let (u, v) = (seq[r][i], seq[r][i + 1]);
-            seq[r].swap(i, i + 1);
-            // The best swap's timing was in `scratch` only until the next
+            match m {
+                Move::Swap(r, i) => taboo.push((seq[r][i], seq[r][i + 1], step + TABOO_STEPS)),
+                Move::Reassign { activity, from, .. } => {
+                    left.push((activity, from, step + TABOO_STEPS));
+                }
+            }
+            self.apply(&mut ix, &mut seq, m, false);
+            // The best move's timing was in `scratch` only until the next
             // candidate overwrote it.
             let timed = self.time_sequences(&view, &ix, &seq, &links, &mut scratch);
-            debug_assert!(timed, "a swap that was timed once is timed again");
+            debug_assert!(timed, "a move that was timed once is timed again");
             fitness = f;
             std::mem::swap(&mut placed, &mut scratch.placed);
-            taboo.push((u, v, step + TABOO_STEPS));
             if fitness < best_fitness {
                 best_fitness = fitness;
                 // `placed.order` is a topological order of the sequences just
                 // timed, so placing in it reproduces them.
                 best_order = Some(placed.order.clone());
+                best_resource = Some(ix.resource.clone());
             }
         }
 
@@ -125,19 +153,104 @@ impl SchedulingGaProblem {
                 .map(|&a| self.task_ids[self.task_of[a]].clone())
                 .collect();
         }
+        if let Some(resource) = best_resource {
+            for (a, r) in resource.into_iter().enumerate() {
+                if let (Some(r), Some(gene)) = (r, chromosome.mav.get_mut(a)) {
+                    *gene = match self.resources.get(r) {
+                        Some(listed) => listed.id.clone(),
+                        None => ix.extra[r - self.resources.len()].clone(),
+                    };
+                }
+            }
+        }
     }
 
-    /// The swaps of two neighbours in a machine sequence that can shorten the
-    /// critical path: the first two and the last two activities of every block
-    /// of at least two, as `(machine, position of the first)`.
-    fn block_edge_swaps(
+    /// Makes `m` on the sequences and the assignment -- or, with `undo`,
+    /// takes it back.
+    fn apply(&self, ix: &mut Indexed, seq: &mut [Vec<usize>], m: Move, undo: bool) {
+        match m {
+            Move::Swap(r, i) => seq[r].swap(i, i + 1),
+            Move::Reassign {
+                activity,
+                from,
+                at,
+                to,
+                pos,
+            } => {
+                let ((r1, i1), (r2, i2)) = if undo {
+                    ((to, pos), (from, at))
+                } else {
+                    ((from, at), (to, pos))
+                };
+                seq[r1].remove(i1);
+                seq[r2].insert(i2, activity);
+                ix.resource[activity] = Some(r2);
+                ix.duration[activity] = self.duration_on(activity, &self.resources[r2].id);
+            }
+        }
+    }
+
+    /// The moves of a critical activity to another of its candidates, each
+    /// inserted where its present start falls in that resource's sequence:
+    /// those that take least time there, [`TIMED_SWAPS`] of them.
+    fn reassignments(
+        &self,
+        ix: &Indexed,
+        seq: &[Vec<usize>],
+        placed: &Placed,
+        path: &[usize],
+    ) -> Vec<Move> {
+        let mut moves: Vec<(i64, Move)> = Vec::new();
+        for &a in path {
+            let Some(from) = ix.resource[a] else {
+                continue;
+            };
+            let Some(at) = seq[from].iter().position(|&x| x == a) else {
+                continue;
+            };
+            for candidate in &self.activities[a].candidates {
+                let Some(&to) = self.resource_index.get(candidate) else {
+                    continue;
+                };
+                if to == from {
+                    continue;
+                }
+                let pos = seq[to]
+                    .iter()
+                    .take_while(|&&x| placed.start[x] < placed.start[a])
+                    .count();
+                let time = self.duration_on(a, candidate).total_ms();
+                moves.push((
+                    time,
+                    Move::Reassign {
+                        activity: a,
+                        from,
+                        at,
+                        to,
+                        pos,
+                    },
+                ));
+            }
+        }
+        moves.sort_by_key(|&(time, _)| time);
+        moves
+            .into_iter()
+            .take(TIMED_SWAPS)
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    /// A critical path of the timed sequences, first activity first: walked
+    /// back from the one that ends last, preferring a machine predecessor that
+    /// ends where an activity starts, so a block grows as far as it can.
+    fn critical_path(
         &self,
         view: &TaskView<'_>,
         ix: &Indexed,
         seq: &[Vec<usize>],
         placed: &Placed,
         links: &Links,
-    ) -> Vec<(usize, usize)> {
+    ) -> Vec<usize> {
         let Some(last) = placed.order.iter().copied().max_by_key(|&a| placed.end[a]) else {
             return Vec::new();
         };
@@ -185,7 +298,19 @@ impl SchedulingGaProblem {
             a = next;
         }
         path.reverse();
+        path
+    }
 
+    /// The swaps of two neighbours in a machine sequence that can shorten the
+    /// critical `path`: the first two and the last two activities of every
+    /// block of at least two, as `(machine, position of the first)`.
+    fn block_edge_swaps(ix: &Indexed, seq: &[Vec<usize>], path: &[usize]) -> Vec<(usize, usize)> {
+        let mut position = vec![0usize; ix.resource.len()];
+        for s in seq {
+            for (i, &a) in s.iter().enumerate() {
+                position[a] = i;
+            }
+        }
         let mut swaps: Vec<(usize, usize)> = Vec::new();
         let mut i = 0;
         while i < path.len() {
@@ -336,6 +461,22 @@ impl SchedulingGaProblem {
         }
         placed.order.len() == n
     }
+}
+
+/// A step of the local search.
+#[derive(Debug, Clone, Copy)]
+enum Move {
+    /// Swap the activities at `.1` and `.1 + 1` of machine `.0`'s sequence.
+    Swap(usize, usize),
+    /// Move `activity` from position `at` of resource `from` to position
+    /// `pos` of resource `to`.
+    Reassign {
+        activity: usize,
+        from: usize,
+        at: usize,
+        to: usize,
+        pos: usize,
+    },
 }
 
 /// The neighbours of each activity in its task, and the activities of other

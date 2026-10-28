@@ -34,6 +34,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   selection). It used to pick the least-loaded candidate and add the activity's base duration
   whatever the resource. With the crossover above, mk01-mk10's mean gap is 6.9 % (mk01, mk03,
   mk08 at the optimum).
+- GA: where activities choose among resources, the local search may also move a critical
+  activity to another of its candidates (inserted where its start falls in that resource's
+  sequence; moving it back is taboo for six steps), and the chromosome takes the new
+  assignment with the order (Mastrolilli & Gambardella 2000's assignment move). mk01-mk10's
+  mean gap drops to 2.6 % (mk04 and mk09 now at the best known); a 200-generation run takes
+  longer on large instances (mk10: 3 s -> 60 s) -- a time limit bounds it as before. Problems
+  without a choice of resource search exactly as before.
 
 ### Added
 
