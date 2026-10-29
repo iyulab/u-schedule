@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-29
+
+Depends on u-metaheur 0.19 and u-numflow 0.16.
+
 ### Changed
 
 - Behaviour change: the GA's local search on the critical path also moves an activity of a block
@@ -19,6 +23,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   20 JSPLIB instances (`ta` · `la` · `abz`) and from 1.1 % to 0.7 % on Brandimarte's ten; with 200
   generations, from 4.5 % to 3.5 % on Taillard's 40, at about 16 s per instance instead of 12 s.
   Schedules can differ from earlier results.
+- A CP formulation (`ScheduleCpBuilder`) is solved by u-metaheur 0.19's `BranchAndBoundSolver`,
+  which now searches in rounds of limited discrepancy: within 1 s the mean gap on Brandimarte's
+  ten falls from 22.6 % to 18.3 % (from 18.8 % to 17.2 % starting from MWKR's schedule), and a
+  search that runs to the end still proves its makespan optimal.
 
 ## [0.34.0] - 2026-10-29
 
