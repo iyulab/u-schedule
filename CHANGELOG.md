@@ -8,6 +8,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Changed
+
+- Requires u-numflow 0.17.
+
 ## [0.35.0] - 2026-10-29
 
 Depends on u-metaheur 0.19 and u-numflow 0.16.
