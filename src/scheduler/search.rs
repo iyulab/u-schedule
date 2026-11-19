@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use u_metaheur::brkga::{BrkgaConfig, BrkgaDecoder, BrkgaRunner};
-use u_metaheur::{ConfigError, StopReason};
+use u_metaheur::{ConfigError, Deadline, StopReason};
 
 use super::SimpleScheduler;
 use crate::dispatching::{DispatchingRule, RuleEngine, RuleScore, SchedulingContext};
@@ -90,6 +90,9 @@ impl DispatchSearch {
                 range: "in [0, 1]",
             });
         }
+        // The time limit covers the whole search, the dispatching it starts from included: the
+        // search that follows gets what that leaves.
+        let deadline = Deadline::start(self.config.time_limit_ms);
         let own = self.scheduler.schedule(problem, start_time_ms);
         let dispatching_cost = cost(&own, problem.tasks(), self.tardiness_weight);
         let tasks = problem.tasks();
@@ -109,6 +112,20 @@ impl DispatchSearch {
         };
         let mut config = self.config.clone();
         config.chromosome_length = tasks.iter().map(|t| t.activities.len()).sum();
+        config.validate()?;
+        // Dispatching alone used up the budget: it is the answer, as good as the search could
+        // promise (never worse than it) -- a search that began now would decode at least one
+        // more schedule, and one more to hand the best back, each as long as the first.
+        if deadline.passed() {
+            return Ok(DispatchSearchResult {
+                schedule: own,
+                cost: dispatching_cost,
+                dispatching_cost,
+                generations: 0,
+                stop_reason: StopReason::TimeLimit,
+            });
+        }
+        config.time_limit_ms = deadline.remaining_ms().map(|ms| ms.max(1));
         let found = BrkgaRunner::run(&decoder, &config)?;
         let keyed = decoder.schedule(&found.best_keys);
         let keyed_cost = cost(&keyed, tasks, self.tardiness_weight);
@@ -289,5 +306,58 @@ mod tests {
             .with_tardiness_weight(1.5)
             .search(&problem(), 0);
         assert!(refused.is_err());
+    }
+
+    /// Many tasks on one machine, so that dispatching alone takes longer than the limit.
+    fn crowded(tasks: usize) -> Problem {
+        let tasks = (0..tasks)
+            .map(|i| {
+                Task::new(format!("T{i}")).with_activity(
+                    Activity::new(format!("A{i}"), format!("T{i}"), 0)
+                        .with_process_time(1_000 + (i as i64 % 7) * 100)
+                        .with_requirement(ResourceRequirement::new("Machine")),
+                )
+            })
+            .collect();
+        Problem::new(tasks, vec![Resource::new("M", "Machine")]).expect("a valid problem")
+    }
+
+    /// The limit counts the dispatching the search starts from: when that alone takes longer
+    /// than the limit the search does not begin, and the answer is the dispatching one.
+    #[test]
+    fn a_limit_spent_by_dispatching_ends_the_search_there() {
+        let problem = crowded(300);
+        let started = std::time::Instant::now();
+        let alone = SimpleScheduler::new().schedule(&problem, 0);
+        let dispatching = started.elapsed();
+        assert_eq!(alone.assignments.len(), 300);
+
+        let started = std::time::Instant::now();
+        let found = DispatchSearch::new(SimpleScheduler::new(), config().with_time_limit_ms(1))
+            .search(&problem, 0)
+            .expect("a valid search");
+        let searched = started.elapsed();
+        assert_eq!(found.stop_reason, StopReason::TimeLimit);
+        assert_eq!(found.generations, 0);
+        assert_eq!(found.cost, found.dispatching_cost);
+        assert_eq!(found.schedule.assignments.len(), 300);
+        // Dispatching once, not that and then two more decodes of the same length (about three
+        // times as long before the limit covered it).
+        assert!(
+            searched < dispatching * 2,
+            "{searched:?} for a dispatching of {dispatching:?}"
+        );
+    }
+
+    /// A limit the dispatching leaves room under still lets the search run.
+    #[test]
+    fn a_limit_with_room_left_runs_the_search() {
+        let found =
+            DispatchSearch::new(SimpleScheduler::new(), config().with_time_limit_ms(60_000))
+                .with_tardiness_weight(1.0)
+                .search(&problem(), 0)
+                .expect("a valid search");
+        assert!(found.generations > 0);
+        assert_eq!(found.cost, 0.0);
     }
 }

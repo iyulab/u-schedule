@@ -12,6 +12,15 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 - Requires u-numflow 0.17.
 
+### Fixed
+
+- `search_schedule` / `DispatchSearch`: `time_limit_ms` did not count the dispatching the search starts from. The search
+  dispatches once with the configured rule (its answer if nothing beats it), and only then started the limit's clock for
+  the genetic search, which decodes at least one more schedule and decodes the best again to hand it back: on one machine
+  with 1,000 jobs and a limit of 500 ms it took 2.9 s, with 2,000 jobs 15 s. The limit is now one budget for the whole
+  search, and a limit already spent by the dispatching ends the search there with `stop_reason` `"time_limit"` and the
+  dispatching schedule (1,000 jobs: 1.0 s, 2,000 jobs: 4.9 s -- the time of the one dispatching).
+
 ## [0.35.0] - 2026-10-29
 
 Depends on u-metaheur 0.19 and u-numflow 0.16.
