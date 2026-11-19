@@ -52,6 +52,10 @@ use crate::models::{
 };
 use crate::Problem;
 
+// TODO(feat/dispatch-symbolic): the dispatcher reads it next; drop the allow when it does.
+#[allow(dead_code)]
+mod proposal;
+
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
 
