@@ -21,7 +21,9 @@ use u_metaheur::brkga::{BrkgaConfig, BrkgaDecoder, BrkgaRunner};
 use u_metaheur::{ConfigError, StopReason};
 
 use super::SimpleScheduler;
-use crate::dispatching::{DispatchingRule, RuleEngine, RuleScore, SchedulingContext};
+use crate::dispatching::{
+    ContextFields, DispatchingRule, RuleEngine, RuleScore, SchedulingContext,
+};
 use crate::models::{Schedule, Task};
 use crate::Problem;
 
@@ -204,6 +206,10 @@ struct KeyRule(HashMap<String, Vec<f64>>);
 impl DispatchingRule for KeyRule {
     fn name(&self) -> &'static str {
         "KEY"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {

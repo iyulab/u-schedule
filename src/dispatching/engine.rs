@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::{DispatchingRule, RuleScore, SchedulingContext};
+use super::{ContextFields, DispatchingRule, RuleScore, SchedulingContext};
 use crate::models::Task;
 
 /// How multiple rules are combined.
@@ -64,6 +64,13 @@ pub struct RuleEngine {
 }
 
 impl RuleEngine {
+    /// The parts of the [`SchedulingContext`] its rules read ([`DispatchingRule::reads`]).
+    pub fn reads(&self) -> ContextFields {
+        self.rules.iter().fold(ContextFields::NONE, |fields, r| {
+            fields.union(r.rule.reads())
+        })
+    }
+
     /// Creates an empty rule engine.
     pub fn new() -> Self {
         Self {

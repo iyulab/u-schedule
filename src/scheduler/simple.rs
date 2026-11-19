@@ -45,12 +45,18 @@ use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
 use crate::dispatching::policy::SharedPolicy;
-use crate::dispatching::{rules, Decision, RuleEngine, RulePolicy, SchedulingContext};
+use crate::dispatching::{
+    rules, ContextFields, Decision, RuleEngine, RulePolicy, SchedulingContext,
+};
 use crate::models::{
     transport_between, Activity, Assignment, Part, Resource, Schedule, Task, TimeOnlySpan,
     TransitionMatrixCollection,
 };
 use crate::Problem;
+
+mod proposal;
+
+use proposal::{Cheap, Start};
 
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
@@ -138,6 +144,10 @@ pub struct SimpleScheduler {
     transition_matrices: TransitionMatrixCollection,
     rules: Rules,
     fixed: Vec<Assignment>,
+    /// Whether an offer's start is found without placing the activity
+    /// ([`proposal`]) where that is exact. Off only in tests, as the reference the
+    /// dispatcher must agree with.
+    cheap_offers: bool,
 }
 
 /// What decides each conflict.
@@ -152,12 +162,21 @@ enum Rules {
 }
 
 impl SimpleScheduler {
+    /// The scheduler placing every offer in full, as it did before offers' starts were
+    /// found without placing: what [`schedule`](Self::schedule) must agree with.
+    #[cfg(test)]
+    fn without_cheap_offers(mut self) -> Self {
+        self.cheap_offers = false;
+        self
+    }
+
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
             transition_matrices: TransitionMatrixCollection::new(),
             rules: Rules::Priority,
             fixed: Vec::new(),
+            cheap_offers: true,
         }
     }
 
@@ -350,6 +369,17 @@ impl SimpleScheduler {
         // Per task: its offer, kept until a booking can change it, and the
         // resources whose booking can (`Self::read_by`).
         let mut kept: Vec<Option<(Placement, Vec<&str>)>> = vec![None; tasks.len()];
+        // Per task: the start its offer would have, found without placing the activity, kept
+        // until a booking on a resource the activity may use can change it ([`proposal`]).
+        let cheap = self.cheap_offers.then(|| Cheap::new(self, resources));
+        // What the rules deciding read of the context: only that is built for a decision (a
+        // policy reads it itself to choose the rules, so it gets all of it).
+        let fields = match &self.rules {
+            Rules::Priority => ContextFields::NONE,
+            Rules::Engine(engine) => engine.reads(),
+            Rules::Policy(_) => ContextFields::ALL,
+        };
+        let mut quick: Vec<Option<i64>> = vec![None; tasks.len()];
         // Every activity passed so far, with when it ended — `None` for one
         // left unplaced, which its successors go on without (as the next step
         // of its own task does). An activity waits for its `predecessors`
@@ -362,6 +392,10 @@ impl SimpleScheduler {
             // reads only the start of each, and takes the one placement it chooses).
             let mut offers: Vec<(usize, i64)> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
+                if let Some(start) = quick[i] {
+                    offers.push((i, start));
+                    continue;
+                }
                 if let Some((placement, _)) = &kept[i] {
                     offers.push((i, placement.start_ms));
                     continue;
@@ -429,6 +463,28 @@ impl SimpleScheduler {
                         cursor[i] += 1;
                         continue;
                     }
+                    if let Some(cheap) = cheap.as_ref().filter(|_| finish_floor.is_none()) {
+                        match cheap.start(
+                            activity,
+                            own.get(activity.id.as_str()),
+                            &timelines,
+                            resources,
+                            ready[i],
+                        ) {
+                            Start::At(start) => {
+                                quick[i] = Some(start);
+                                offers.push((i, start));
+                                break;
+                            }
+                            Start::Never => {
+                                previous[i] = None;
+                                settled.insert(&activity.id, None);
+                                cursor[i] += 1;
+                                continue;
+                            }
+                            Start::Declined => {}
+                        }
+                    }
                     match self.place_ending_after(
                         activity,
                         task,
@@ -472,6 +528,7 @@ impl SimpleScheduler {
                 .map(|(k, _)| k)
                 .collect();
             let context = decision_context(
+                fields,
                 tasks,
                 &eligible,
                 &timelines,
@@ -506,8 +563,28 @@ impl SimpleScheduler {
                 .position(|(i, _)| *i == chosen)
                 .expect("the chosen task made an offer");
             let (i, _) = offers.swap_remove(k);
-            let (placement, _) = kept[i].take().expect("the chosen task made an offer");
             let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
+            let placement = match quick[i].take() {
+                // Its start was found without placing it: place it now, where it said.
+                Some(start) => {
+                    let placement = self
+                        .place_ending_after(
+                            activity,
+                            task,
+                            &timelines,
+                            own.get(activity.id.as_str()),
+                            &last_category,
+                            resources,
+                            ready[i],
+                            &came_from[i],
+                            None,
+                        )
+                        .expect("a start found for an offer is the start of a placement");
+                    debug_assert_eq!(placement.start_ms, start);
+                    placement
+                }
+                None => kept[i].take().expect("the chosen task made an offer").0,
+            };
 
             // The activity whole, or each of its parts.
             let pieces: Vec<(Option<Part>, &Placement)> = if placement.parts.is_empty() {
@@ -542,6 +619,20 @@ impl SimpleScheduler {
                 }
             }
             // The offers that read a resource just booked are made again.
+            if cheap.is_some() {
+                let booked = ResourceSet::of(
+                    resources.len(),
+                    placement
+                        .selections
+                        .iter()
+                        .map(|(rid, _, _)| position[rid.as_str()]),
+                );
+                for (j, start) in quick.iter_mut().enumerate() {
+                    if start.is_some() && eligible[j][cursor[j]].meets(&booked) {
+                        *start = None;
+                    }
+                }
+            }
             kept[i] = None;
             for offer in kept.iter_mut() {
                 if offer.as_ref().is_some_and(|(_, read)| {
@@ -1025,6 +1116,7 @@ impl SimpleScheduler {
             transition_matrices: request.transition_matrices.clone(),
             rules: self.rules.clone(),
             fixed: self.fixed.clone(),
+            cheap_offers: self.cheap_offers,
         };
         let mut schedule = scheduler.schedule(&request.problem, request.start_time_ms);
         let input = super::feasibility::FeasibilityInput {
@@ -1072,6 +1164,7 @@ fn time_only_span(
 /// planned span so far, per unit of capacity (LPUL).
 #[allow(clippy::too_many_arguments)]
 fn decision_context(
+    fields: ContextFields,
     tasks: &[Task],
     eligible: &[Vec<ResourceSet>],
     timelines: &HashMap<String, ResourceTimeline>,
@@ -1089,59 +1182,83 @@ fn decision_context(
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
 
-    let wanted: Vec<(usize, &ResourceSet)> = offers
-        .iter()
-        .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
-        .collect();
+    let wanted: Vec<(usize, &ResourceSet)> = if fields.contains(ContextFields::NEXT_QUEUE) {
+        offers
+            .iter()
+            .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // The rules judge the competing tasks only, so their entries are the
     // ones filled.
-    for &k in conflict {
-        let i = offers[k].0;
-        let (task, c) = (&tasks[i], cursor[i]);
-        let remaining: i64 = task.activities[c..]
-            .iter()
-            .map(|a| a.duration.total_ms())
-            .sum();
-        let next_queue = task.activities[c + 1..]
-            .iter()
-            .position(|a| !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str()))
-            .map(|n| {
-                let usable = &eligible[i][c + 1 + n];
-                wanted
+    let per_task = ContextFields::REMAINING_WORK
+        .union(ContextFields::NEXT_QUEUE)
+        .union(ContextFields::ARRIVALS)
+        .union(ContextFields::IMMINENT_ACTIVITY);
+    if fields.intersects(per_task) {
+        for &k in conflict {
+            let i = offers[k].0;
+            let (task, c) = (&tasks[i], cursor[i]);
+            if fields.contains(ContextFields::REMAINING_WORK) {
+                let remaining: i64 = task.activities[c..]
                     .iter()
-                    .filter(|(j, rs)| *j != i && rs.meets(usable))
-                    .count()
-            })
-            .unwrap_or(0);
-        context.imminent_activity.insert(task.id.clone(), c);
-        context.remaining_work.insert(task.id.clone(), remaining);
-        context.arrival_times.insert(task.id.clone(), ready[i]);
-        context
-            .next_queue_length
-            .insert(task.id.clone(), next_queue);
+                    .map(|a| a.duration.total_ms())
+                    .sum();
+                context.remaining_work.insert(task.id.clone(), remaining);
+            }
+            if fields.contains(ContextFields::NEXT_QUEUE) {
+                let next_queue = task.activities[c + 1..]
+                    .iter()
+                    .position(|a| {
+                        !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str())
+                    })
+                    .map(|n| {
+                        let usable = &eligible[i][c + 1 + n];
+                        wanted
+                            .iter()
+                            .filter(|(j, rs)| *j != i && rs.meets(usable))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                context
+                    .next_queue_length
+                    .insert(task.id.clone(), next_queue);
+            }
+            if fields.contains(ContextFields::IMMINENT_ACTIVITY) {
+                context.imminent_activity.insert(task.id.clone(), c);
+            }
+            if fields.contains(ContextFields::ARRIVALS) {
+                context.arrival_times.insert(task.id.clone(), ready[i]);
+            }
+        }
     }
 
-    let competing: i64 = conflict
-        .iter()
-        .map(|&k| {
-            let i = offers[k].0;
-            tasks[i].activities[cursor[i]].duration.total_ms()
-        })
-        .sum();
-    context.average_processing_time = Some(competing as f64 / conflict.len() as f64);
+    if fields.contains(ContextFields::AVERAGE_PROCESSING_TIME) {
+        let competing: i64 = conflict
+            .iter()
+            .map(|&k| {
+                let i = offers[k].0;
+                tasks[i].activities[cursor[i]].duration.total_ms()
+            })
+            .sum();
+        context.average_processing_time = Some(competing as f64 / conflict.len() as f64);
+    }
 
-    let span = timelines
-        .values()
-        .filter_map(ResourceTimeline::latest_end)
-        .max()
-        .map_or(0, |end| end - start_time_ms);
-    for (id, tl) in timelines {
-        let load = if span > 0 {
-            (tl.booked_ms() as f64 / (f64::from(tl.capacity()) * span as f64)).min(1.0)
-        } else {
-            0.0
-        };
-        context.resource_utilization.insert(id.clone(), load);
+    if fields.contains(ContextFields::UTILIZATION) {
+        let span = timelines
+            .values()
+            .filter_map(ResourceTimeline::latest_end)
+            .max()
+            .map_or(0, |end| end - start_time_ms);
+        for (id, tl) in timelines {
+            let load = if span > 0 {
+                (tl.booked_ms() as f64 / (f64::from(tl.capacity()) * span as f64)).min(1.0)
+            } else {
+                0.0
+            };
+            context.resource_utilization.insert(id.clone(), load);
+        }
     }
     context
 }

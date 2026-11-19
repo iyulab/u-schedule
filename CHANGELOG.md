@@ -8,6 +8,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+### Added
+
+- `DispatchingRule::reads` and `ContextFields`: a rule says which parts of the `SchedulingContext` it reads (the default
+  is all of it). `SimpleScheduler` builds only those for each decision; the built-in rules and the search's own key rule
+  declare theirs, and a policy that chooses the rules per decision gets the whole context. A rule that reads a part it
+  did not declare sees it empty, so declare every field the rule touches.
+
 ### Changed
 
 - Requires u-numflow 0.17.
@@ -16,6 +23,19 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   buffers, borrows resource ids instead of copying them and no longer copies every pending offer at each decision. The schedules are unchanged (pinned by a test on 24 random
   problems under five rules). With many machines this is about twice as fast (2,000 jobs on 50 machines 45 s → 23 s,
   on 10 machines 11 s → 8.5 s); the work still grows with the square of the number of jobs.
+- Dispatching finds when each offer would start without placing the activity, where its resources allow it (no
+  transition matrix, companion or transport, and an activity that is not resumable, split or overlapped, with no
+  calendar of its own and the same time on every resource), and places only the activity it picks; the rest are
+  placed in full as before. A resource of capacity one with no calendar finds the earliest gap in one step through
+  a long run of bookings that leave no gap. The schedules are unchanged (the pinned schedules are, and random
+  problems with every kind of activity mixed agree with placing every offer in full). It also builds only the parts
+  of the scheduling context the rules deciding read (see `DispatchingRule::reads`), where it built all of it for
+  every competing job at every decision. 3,000 jobs on one machine 12.3 s → 1.5 s, on 10 machines 20.7 s → 5.1 s.
+
+### Fixed
+
+- `Schedule::violations` lists capacity violations in resource-id order. With two or more resources over capacity their
+  order used to change from one run to the next on the same input.
 
 ## [0.35.0] - 2026-10-29
 

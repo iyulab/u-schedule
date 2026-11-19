@@ -590,7 +590,8 @@ fn check_capacity(
         .collect();
     // Each assignment takes its activity's usage of the resource; an
     // external booking, one unit.
-    let mut by_resource: HashMap<&str, Vec<(i64, i64, i32)>> = HashMap::new();
+    // By resource id: the violations come out in one order, whatever the hasher.
+    let mut by_resource: BTreeMap<&str, Vec<(i64, i64, i32)>> = BTreeMap::new();
     for a in &schedule.assignments {
         let usage = match (
             activities.get(a.activity_id.as_str()),
@@ -1602,6 +1603,35 @@ mod tests {
         assert_eq!(together.len(), 1, "{together:?}");
         assert_eq!(together[0].violation_type, ViolationType::CapacityExceeded);
         assert!(at(1_000).is_empty());
+    }
+
+    #[test]
+    fn capacity_violations_come_out_in_resource_order() {
+        let resources: Vec<Resource> = (0..8)
+            .map(|k| Resource::new(format!("R{k}"), "Machine"))
+            .collect();
+        let input = FeasibilityInput {
+            tasks: &[],
+            resources: &resources,
+            constraints: &[],
+        };
+        let mut schedule = Schedule::new();
+        for r in &resources {
+            schedule.add_assignment(Assignment::new("A", "T", &r.id, 0, 1_000));
+            schedule.add_assignment(Assignment::new("B", "T", &r.id, 500, 1_500));
+        }
+        let ids: Vec<String> = check_schedule(&schedule, &input)
+            .into_iter()
+            .filter(|v| v.violation_type == ViolationType::CapacityExceeded)
+            .map(|v| v.entity_id)
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids.len(), 8);
+        assert_eq!(
+            ids, sorted,
+            "the same input reports its violations in one order"
+        );
     }
 
     /// J1: 1 s on A, then 1 s on B released at 5 s.
