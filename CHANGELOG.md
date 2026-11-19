@@ -17,6 +17,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   problems under five rules). With many machines this is about twice as fast (2,000 jobs on 50 machines 45 s → 23 s,
   on 10 machines 11 s → 8.5 s); the work still grows with the square of the number of jobs.
 
+### Fixed
+
+- `Schedule::violations` lists capacity violations in resource-id order. With two or more resources over capacity their
+  order used to change from one run to the next on the same input.
+
 ## [0.35.0] - 2026-10-29
 
 Depends on u-metaheur 0.19 and u-numflow 0.16.
