@@ -34,6 +34,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   10 machines 20.7 s → 5.1 s; with one to three operations per job on a machine pool and a small operator pool, 2,000
   jobs on 5 machines 8.1 s → 4.1 s and on 20 machines 14.6 s → 12.6 s (the work still grows with the square of the
   number of jobs, and with the machines).
+- The queue at a task's next step (`SchedulingContext::next_queue_length`, read by WINQ) is counted over the distinct
+  sets of resources the waiting offers may use, not offer by offer for every competing job: the work at a decision
+  grew with competing jobs times waiting offers, and now with the offers plus the distinct sets. The schedules are
+  unchanged (a test compares the count with its definition on 600 random problems). With one to three operations per
+  job on a machine pool and a small operator pool, WINQ then SPT on 2,000 jobs: 5 machines 11.6 s → 4.8 s, 20 machines
+  14.6 s → 9.9 s.
 
 ### Fixed
 

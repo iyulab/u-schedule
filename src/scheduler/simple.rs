@@ -1190,14 +1190,24 @@ fn decision_context(
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
 
-    let wanted: Vec<(usize, &ResourceSet)> = if fields.contains(ContextFields::NEXT_QUEUE) {
-        offers
-            .iter()
-            .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // The offers by the resources their activity may use, counted: a queue is asked of a few
+    // distinct sets of resources, never of every offer (that would be competing tasks times
+    // offers at each decision), and each distinct set is asked once.
+    let mut wanted: Vec<(&ResourceSet, usize)> = Vec::new();
+    let mut queue_of: HashMap<&[u64], usize> = HashMap::new();
+    if fields.contains(ContextFields::NEXT_QUEUE) {
+        let mut at: HashMap<&[u64], usize> = HashMap::new();
+        for &(i, _) in offers {
+            let set = &eligible[i][cursor[i]];
+            match at.get(set.0.as_slice()) {
+                Some(&g) => wanted[g].1 += 1,
+                None => {
+                    at.insert(set.0.as_slice(), wanted.len());
+                    wanted.push((set, 1));
+                }
+            }
+        }
+    }
     // The rules judge the competing tasks only, so their entries are the
     // ones filled.
     let per_task = ContextFields::REMAINING_WORK
@@ -1223,10 +1233,15 @@ fn decision_context(
                     })
                     .map(|n| {
                         let usable = &eligible[i][c + 1 + n];
-                        wanted
-                            .iter()
-                            .filter(|(j, rs)| *j != i && rs.meets(usable))
-                            .count()
+                        let ahead = *queue_of.entry(usable.0.as_slice()).or_insert_with(|| {
+                            wanted
+                                .iter()
+                                .filter(|(set, _)| set.meets(usable))
+                                .map(|&(_, offers)| offers)
+                                .sum()
+                        });
+                        // The task's own offer is not in the queue ahead of it.
+                        ahead - usize::from(eligible[i][c].meets(usable))
                     })
                     .unwrap_or(0);
                 context
@@ -2294,6 +2309,116 @@ mod tests {
         assert_eq!(start_of(&lwkr, "J2_O1"), 0, "LWKR: 30 < 105");
         let mwkr = by_rule(rules::Mwkr, &tasks, &resources);
         assert_eq!(start_of(&mwkr, "J1_O1"), 0, "MWKR: 105 > 30");
+    }
+
+    /// The queue ahead of a task is the number of the other offers whose activity may use a
+    /// resource the task's next activity may. The count is made over sets of resources, not
+    /// offer by offer, and must be what the definition gives.
+    #[test]
+    fn the_queue_at_the_next_step_counts_what_the_definition_counts() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut below = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let kinds = ["A", "B", "C"];
+        let (mut asked, mut waiting) = (0, 0);
+        for _ in 0..600 {
+            let resources: Vec<Resource> = (0..2 + below(7))
+                .map(|k| Resource::new(format!("R{k}"), kinds[below(3) as usize]))
+                .collect();
+            let tasks: Vec<Task> = (0..2 + below(30))
+                .map(|t| {
+                    let mut task = Task::new(format!("T{t}"));
+                    for s in 0..1 + below(3) {
+                        let mut a = Activity::new(format!("T{t}-{s}"), format!("T{t}"), s as i32)
+                            .with_process_time(100);
+                        for _ in 0..below(3) {
+                            let mut req = ResourceRequirement::new(kinds[below(3) as usize]);
+                            if below(4) == 0 {
+                                let pick = format!("R{}", below(resources.len() as u64));
+                                req = req.with_candidates(vec![pick]);
+                            }
+                            a = a.with_requirement(req);
+                        }
+                        task = task.with_activity(a);
+                    }
+                    task
+                })
+                .collect();
+            let position: HashMap<&str, usize> = resources
+                .iter()
+                .enumerate()
+                .map(|(k, r)| (r.id.as_str(), k))
+                .collect();
+            let eligible: Vec<Vec<ResourceSet>> = tasks
+                .iter()
+                .map(|t| {
+                    t.activities
+                        .iter()
+                        .map(|a| {
+                            ResourceSet::of(
+                                resources.len(),
+                                a.eligible_resources(&resources)
+                                    .iter()
+                                    .map(|id| position[id]),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            let cursor: Vec<usize> = tasks
+                .iter()
+                .map(|t| below(t.activities.len() as u64) as usize)
+                .collect();
+            let offers: Vec<(usize, i64)> = (0..tasks.len())
+                .filter(|_| below(3) != 0)
+                .map(|i| (i, 0))
+                .collect();
+            if offers.is_empty() {
+                continue;
+            }
+            let conflict: Vec<usize> = (0..offers.len()).filter(|_| below(2) == 0).collect();
+            if conflict.is_empty() {
+                continue;
+            }
+            let context = decision_context(
+                ContextFields::NEXT_QUEUE,
+                &tasks,
+                &eligible,
+                &HashMap::new(),
+                &HashMap::new(),
+                &cursor,
+                &vec![0; tasks.len()],
+                &offers,
+                &conflict,
+                0,
+            );
+            for &k in &conflict {
+                let i = offers[k].0;
+                let c = cursor[i];
+                let want = tasks[i].activities[c + 1..]
+                    .iter()
+                    .position(|a| !a.resource_requirements.is_empty())
+                    .map_or(0, |n| {
+                        let usable = &eligible[i][c + 1 + n];
+                        offers
+                            .iter()
+                            .filter(|&&(j, _)| j != i && eligible[j][cursor[j]].meets(usable))
+                            .count()
+                    });
+                assert_eq!(context.next_queue_length[&tasks[i].id], want, "task {i}");
+                asked += 1;
+                waiting += usize::from(want > 0);
+            }
+        }
+        // The comparison must have met both an empty queue and a waiting one.
+        assert!(
+            asked > 1_000 && waiting > 200,
+            "{asked} asked, {waiting} waiting"
+        );
     }
 
     #[test]
