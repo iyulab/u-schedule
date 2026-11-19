@@ -11,9 +11,12 @@ use crate::models::{Activity, Task};
 ///
 /// All times are in milliseconds relative to the scheduling epoch (t=0).
 ///
-/// [`SimpleScheduler`](crate::scheduler::SimpleScheduler) fills every field
-/// at each decision point. A context built by hand may leave fields empty;
-/// each rule then falls back to the task's static data (see the rule).
+/// [`SimpleScheduler`](crate::scheduler::SimpleScheduler) fills, at each
+/// decision point, the fields the rules deciding say they read
+/// ([`DispatchingRule::reads`](super::DispatchingRule::reads)) — every field
+/// when a rule does not say, or when a policy chooses the rules. A context
+/// built by hand may leave fields empty; each rule then falls back to the
+/// task's static data (see the rule).
 #[derive(Debug, Clone, Default)]
 pub struct SchedulingContext {
     /// Current simulation time (ms).
@@ -34,7 +37,74 @@ pub struct SchedulingContext {
     pub imminent_activity: HashMap<String, usize>,
 }
 
+/// The parts of a [`SchedulingContext`] a rule reads (the clock, `current_time_ms`, is
+/// always there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextFields(u8);
+
+impl ContextFields {
+    /// Nothing but the clock.
+    pub const NONE: Self = Self(0);
+    /// [`SchedulingContext::remaining_work`].
+    pub const REMAINING_WORK: Self = Self(1);
+    /// [`SchedulingContext::next_queue_length`].
+    pub const NEXT_QUEUE: Self = Self(1 << 1);
+    /// [`SchedulingContext::resource_utilization`].
+    pub const UTILIZATION: Self = Self(1 << 2);
+    /// [`SchedulingContext::arrival_times`].
+    pub const ARRIVALS: Self = Self(1 << 3);
+    /// [`SchedulingContext::average_processing_time`].
+    pub const AVERAGE_PROCESSING_TIME: Self = Self(1 << 4);
+    /// [`SchedulingContext::imminent_activity`] (and what is read through it:
+    /// [`SchedulingContext::imminent`], [`processing_time_ms`](SchedulingContext::processing_time_ms),
+    /// [`remaining_operations`](SchedulingContext::remaining_operations)).
+    pub const IMMINENT_ACTIVITY: Self = Self(1 << 5);
+    /// Every field.
+    pub const ALL: Self = Self(0b11_1111);
+
+    /// These fields and those.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every field of `other` is among these.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether any field of `other` is among these.
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
 impl SchedulingContext {
+    /// The context with only `fields` kept (the rest empty, as in a context built by hand).
+    #[cfg(test)]
+    pub(crate) fn restricted_to(&self, fields: ContextFields) -> Self {
+        let mut kept = Self::at_time(self.current_time_ms);
+        if fields.contains(ContextFields::REMAINING_WORK) {
+            kept.remaining_work = self.remaining_work.clone();
+        }
+        if fields.contains(ContextFields::NEXT_QUEUE) {
+            kept.next_queue_length = self.next_queue_length.clone();
+        }
+        if fields.contains(ContextFields::UTILIZATION) {
+            kept.resource_utilization = self.resource_utilization.clone();
+        }
+        if fields.contains(ContextFields::ARRIVALS) {
+            kept.arrival_times = self.arrival_times.clone();
+        }
+        if fields.contains(ContextFields::AVERAGE_PROCESSING_TIME) {
+            kept.average_processing_time = self.average_processing_time;
+        }
+        if fields.contains(ContextFields::IMMINENT_ACTIVITY) {
+            kept.imminent_activity = self.imminent_activity.clone();
+        }
+        kept
+    }
+
     /// Creates a context at the given time.
     pub fn at_time(current_time_ms: i64) -> Self {
         Self {

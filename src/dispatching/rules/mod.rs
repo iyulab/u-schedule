@@ -14,7 +14,7 @@
 //! - Pinedo (2016), "Scheduling: Theory, Algorithms, and Systems", Ch. 4
 //! - Haupt (1989), "A Survey of Priority Rule-Based Scheduling"
 
-use super::{DispatchingRule, RuleScore, SchedulingContext};
+use super::{ContextFields, DispatchingRule, RuleScore, SchedulingContext};
 use crate::models::Task;
 
 // ======================== Time-based rules ========================
@@ -34,6 +34,10 @@ pub struct Spt;
 impl DispatchingRule for Spt {
     fn name(&self) -> &'static str {
         "SPT"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -57,6 +61,10 @@ impl DispatchingRule for Lpt {
         "LPT"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         -(context.processing_time_ms(task) as f64)
     }
@@ -78,6 +86,10 @@ impl DispatchingRule for Lwkr {
         "LWKR"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         context.remaining_work_ms(task) as f64
     }
@@ -97,6 +109,10 @@ pub struct Mwkr;
 impl DispatchingRule for Mwkr {
     fn name(&self) -> &'static str {
         "MWKR"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -123,6 +139,10 @@ pub struct Wspt;
 impl DispatchingRule for Wspt {
     fn name(&self) -> &'static str {
         "WSPT"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -155,6 +175,10 @@ impl DispatchingRule for Edd {
         "EDD"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::NONE
+    }
+
     fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
         task.deadline.map(|d| d as f64).unwrap_or(f64::MAX)
     }
@@ -176,6 +200,10 @@ pub struct Mst;
 impl DispatchingRule for Mst {
     fn name(&self) -> &'static str {
         "MST"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -211,6 +239,10 @@ impl DispatchingRule for Cr {
         "CR"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         let deadline = match task.deadline {
             Some(d) => d,
@@ -242,6 +274,10 @@ pub struct Sro;
 impl DispatchingRule for Sro {
     fn name(&self) -> &'static str {
         "S/RO"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK.union(ContextFields::IMMINENT_ACTIVITY)
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -301,6 +337,12 @@ impl DispatchingRule for Atc {
         "ATC"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY
+            .union(ContextFields::REMAINING_WORK)
+            .union(ContextFields::AVERAGE_PROCESSING_TIME)
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         let processing_time = context.processing_time_ms(task) as f64;
         if processing_time <= 0.0 {
@@ -349,6 +391,10 @@ impl DispatchingRule for Fifo {
         "FIFO"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::ARRIVALS
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         context
             .arrival_times
@@ -375,6 +421,10 @@ impl DispatchingRule for Winq {
         "WINQ"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::NEXT_QUEUE
+    }
+
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
         context
             .next_queue_length
@@ -399,6 +449,10 @@ pub struct Lpul;
 impl DispatchingRule for Lpul {
     fn name(&self) -> &'static str {
         "LPUL"
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::IMMINENT_ACTIVITY.union(ContextFields::UTILIZATION)
     }
 
     fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
@@ -436,6 +490,10 @@ impl DispatchingRule for Priority {
         "PRIORITY"
     }
 
+    fn reads(&self) -> ContextFields {
+        ContextFields::NONE
+    }
+
     fn evaluate(&self, task: &Task, _context: &SchedulingContext) -> RuleScore {
         -(task.priority as f64)
     }
@@ -449,6 +507,74 @@ impl DispatchingRule for Priority {
 mod tests {
     use super::*;
     use crate::models::{Activity, ActivityDuration, ResourceRequirement};
+
+    /// A rule that says it reads some of the context scores the same on that part alone: what a
+    /// scheduler builds for it is all it sees. Checked on random tasks and contexts for every
+    /// rule here, since a rule reading what it did not declare would see an empty context and
+    /// quietly rank by its fallback.
+    #[test]
+    fn a_rule_scores_the_same_on_the_part_of_the_context_it_declares() {
+        let rules: Vec<Box<dyn DispatchingRule>> = vec![
+            Box::new(Spt),
+            Box::new(Lpt),
+            Box::new(Lwkr),
+            Box::new(Mwkr),
+            Box::new(Wspt),
+            Box::new(Edd),
+            Box::new(Mst),
+            Box::new(Cr),
+            Box::new(Sro),
+            Box::new(Atc::default()),
+            Box::new(Fifo),
+            Box::new(Winq),
+            Box::new(Lpul),
+            Box::new(Priority),
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..400 {
+            let activities = 1 + next(3) as usize;
+            let mut task = Task::new("T")
+                .with_priority(next(5) as i32)
+                .with_weight(1.0 + next(4) as f64)
+                .with_release_time(next(50) as i64 * 10);
+            if next(4) != 0 {
+                task = task.with_deadline(1_000 + next(5_000) as i64);
+            }
+            for s in 0..activities {
+                task = task.with_activity(
+                    Activity::new(format!("T-{s}"), "T", s as i32)
+                        .with_process_time(50 + next(900) as i64)
+                        .with_requirement(ResourceRequirement::new("Machine").with_candidates(
+                            vec![format!("R{}", next(3)), format!("R{}", next(3))],
+                        )),
+                );
+            }
+            let mut context = SchedulingContext::at_time(next(2_000) as i64)
+                .with_remaining_work("T", next(3_000) as i64)
+                .with_next_queue("T", next(9) as usize)
+                .with_arrival_time("T", next(1_500) as i64)
+                .with_average_processing_time(50.0 + next(700) as f64)
+                .with_imminent_activity("T", next(activities as u64) as usize);
+            for r in 0..3 {
+                context = context.with_utilization(format!("R{r}"), next(100) as f64 / 100.0);
+            }
+            for rule in &rules {
+                let all = rule.evaluate(&task, &context);
+                let part = rule.evaluate(&task, &context.restricted_to(rule.reads()));
+                assert!(
+                    all.to_bits() == part.to_bits(),
+                    "{} scored {all} on the whole context and {part} on what it declares",
+                    rule.name()
+                );
+            }
+        }
+    }
 
     fn make_task(id: &str, duration_ms: i64, deadline: Option<i64>, priority: i32) -> Task {
         let mut task = Task::new(id).with_priority(priority).with_activity(

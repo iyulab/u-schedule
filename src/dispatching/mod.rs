@@ -27,7 +27,7 @@ mod engine;
 pub(crate) mod policy;
 pub mod rules;
 
-pub use context::SchedulingContext;
+pub use context::{ContextFields, SchedulingContext};
 pub use engine::{EvaluationMode, RuleEngine, TieBreaker};
 pub use policy::{Decision, RulePolicy};
 
@@ -60,5 +60,13 @@ pub trait DispatchingRule: Send + Sync + Debug {
     /// Rule description.
     fn description(&self) -> &'static str {
         self.name()
+    }
+
+    /// The parts of the [`SchedulingContext`] [`evaluate`](Self::evaluate) reads. A scheduler
+    /// builds only these for a decision: what it does not ask for comes empty, and filling it
+    /// costs as much as the competing tasks are many. The default is every field; a rule that
+    /// reads fewer says so.
+    fn reads(&self) -> ContextFields {
+        ContextFields::ALL
     }
 }

@@ -45,7 +45,9 @@ use std::collections::HashMap;
 
 use super::timeline::ResourceTimeline;
 use crate::dispatching::policy::SharedPolicy;
-use crate::dispatching::{rules, Decision, RuleEngine, RulePolicy, SchedulingContext};
+use crate::dispatching::{
+    rules, ContextFields, Decision, RuleEngine, RulePolicy, SchedulingContext,
+};
 use crate::models::{
     transport_between, Activity, Assignment, Part, Resource, Schedule, Task, TimeOnlySpan,
     TransitionMatrixCollection,
@@ -370,6 +372,13 @@ impl SimpleScheduler {
         // Per task: the start its offer would have, found without placing the activity, kept
         // until a booking on a resource the activity may use can change it ([`proposal`]).
         let cheap = self.cheap_offers.then(|| Cheap::new(self, resources));
+        // What the rules deciding read of the context: only that is built for a decision (a
+        // policy reads it itself to choose the rules, so it gets all of it).
+        let fields = match &self.rules {
+            Rules::Priority => ContextFields::NONE,
+            Rules::Engine(engine) => engine.reads(),
+            Rules::Policy(_) => ContextFields::ALL,
+        };
         let mut quick: Vec<Option<i64>> = vec![None; tasks.len()];
         // Every activity passed so far, with when it ended — `None` for one
         // left unplaced, which its successors go on without (as the next step
@@ -519,6 +528,7 @@ impl SimpleScheduler {
                 .map(|(k, _)| k)
                 .collect();
             let context = decision_context(
+                fields,
                 tasks,
                 &eligible,
                 &timelines,
@@ -1154,6 +1164,7 @@ fn time_only_span(
 /// planned span so far, per unit of capacity (LPUL).
 #[allow(clippy::too_many_arguments)]
 fn decision_context(
+    fields: ContextFields,
     tasks: &[Task],
     eligible: &[Vec<ResourceSet>],
     timelines: &HashMap<String, ResourceTimeline>,
@@ -1171,59 +1182,83 @@ fn decision_context(
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
 
-    let wanted: Vec<(usize, &ResourceSet)> = offers
-        .iter()
-        .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
-        .collect();
+    let wanted: Vec<(usize, &ResourceSet)> = if fields.contains(ContextFields::NEXT_QUEUE) {
+        offers
+            .iter()
+            .map(|&(i, _)| (i, &eligible[i][cursor[i]]))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // The rules judge the competing tasks only, so their entries are the
     // ones filled.
-    for &k in conflict {
-        let i = offers[k].0;
-        let (task, c) = (&tasks[i], cursor[i]);
-        let remaining: i64 = task.activities[c..]
-            .iter()
-            .map(|a| a.duration.total_ms())
-            .sum();
-        let next_queue = task.activities[c + 1..]
-            .iter()
-            .position(|a| !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str()))
-            .map(|n| {
-                let usable = &eligible[i][c + 1 + n];
-                wanted
+    let per_task = ContextFields::REMAINING_WORK
+        .union(ContextFields::NEXT_QUEUE)
+        .union(ContextFields::ARRIVALS)
+        .union(ContextFields::IMMINENT_ACTIVITY);
+    if fields.intersects(per_task) {
+        for &k in conflict {
+            let i = offers[k].0;
+            let (task, c) = (&tasks[i], cursor[i]);
+            if fields.contains(ContextFields::REMAINING_WORK) {
+                let remaining: i64 = task.activities[c..]
                     .iter()
-                    .filter(|(j, rs)| *j != i && rs.meets(usable))
-                    .count()
-            })
-            .unwrap_or(0);
-        context.imminent_activity.insert(task.id.clone(), c);
-        context.remaining_work.insert(task.id.clone(), remaining);
-        context.arrival_times.insert(task.id.clone(), ready[i]);
-        context
-            .next_queue_length
-            .insert(task.id.clone(), next_queue);
+                    .map(|a| a.duration.total_ms())
+                    .sum();
+                context.remaining_work.insert(task.id.clone(), remaining);
+            }
+            if fields.contains(ContextFields::NEXT_QUEUE) {
+                let next_queue = task.activities[c + 1..]
+                    .iter()
+                    .position(|a| {
+                        !a.resource_requirements.is_empty() && !fixed.contains_key(a.id.as_str())
+                    })
+                    .map(|n| {
+                        let usable = &eligible[i][c + 1 + n];
+                        wanted
+                            .iter()
+                            .filter(|(j, rs)| *j != i && rs.meets(usable))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                context
+                    .next_queue_length
+                    .insert(task.id.clone(), next_queue);
+            }
+            if fields.contains(ContextFields::IMMINENT_ACTIVITY) {
+                context.imminent_activity.insert(task.id.clone(), c);
+            }
+            if fields.contains(ContextFields::ARRIVALS) {
+                context.arrival_times.insert(task.id.clone(), ready[i]);
+            }
+        }
     }
 
-    let competing: i64 = conflict
-        .iter()
-        .map(|&k| {
-            let i = offers[k].0;
-            tasks[i].activities[cursor[i]].duration.total_ms()
-        })
-        .sum();
-    context.average_processing_time = Some(competing as f64 / conflict.len() as f64);
+    if fields.contains(ContextFields::AVERAGE_PROCESSING_TIME) {
+        let competing: i64 = conflict
+            .iter()
+            .map(|&k| {
+                let i = offers[k].0;
+                tasks[i].activities[cursor[i]].duration.total_ms()
+            })
+            .sum();
+        context.average_processing_time = Some(competing as f64 / conflict.len() as f64);
+    }
 
-    let span = timelines
-        .values()
-        .filter_map(ResourceTimeline::latest_end)
-        .max()
-        .map_or(0, |end| end - start_time_ms);
-    for (id, tl) in timelines {
-        let load = if span > 0 {
-            (tl.booked_ms() as f64 / (f64::from(tl.capacity()) * span as f64)).min(1.0)
-        } else {
-            0.0
-        };
-        context.resource_utilization.insert(id.clone(), load);
+    if fields.contains(ContextFields::UTILIZATION) {
+        let span = timelines
+            .values()
+            .filter_map(ResourceTimeline::latest_end)
+            .max()
+            .map_or(0, |end| end - start_time_ms);
+        for (id, tl) in timelines {
+            let load = if span > 0 {
+                (tl.booked_ms() as f64 / (f64::from(tl.capacity()) * span as f64)).min(1.0)
+            } else {
+                0.0
+            };
+            context.resource_utilization.insert(id.clone(), load);
+        }
     }
     context
 }
