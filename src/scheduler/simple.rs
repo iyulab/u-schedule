@@ -358,10 +358,12 @@ impl SimpleScheduler {
         let mut settled: HashMap<&str, Option<i64>> = HashMap::new();
 
         loop {
-            let mut offers: Vec<(usize, Placement)> = Vec::new();
+            // Who offers, and from when: the placements themselves stay in `kept` (a decision
+            // reads only the start of each, and takes the one placement it chooses).
+            let mut offers: Vec<(usize, i64)> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
                 if let Some((placement, _)) = &kept[i] {
-                    offers.push((i, placement.clone()));
+                    offers.push((i, placement.start_ms));
                     continue;
                 }
                 while let Some(activity) = task.activities.get(cursor[i]) {
@@ -440,8 +442,8 @@ impl SimpleScheduler {
                     ) {
                         Some(placement) => {
                             let read = self.read_by(activity, &placement, resources);
-                            kept[i] = Some((placement.clone(), read));
-                            offers.push((i, placement));
+                            offers.push((i, placement.start_ms));
+                            kept[i] = Some((placement, read));
                             break;
                         }
                         // 충족 불가 — feasibility 검사가 RequirementUnfilled로 보고
@@ -460,13 +462,13 @@ impl SimpleScheduler {
             // Non-delay: decide at the earliest start, among what can start then.
             let now = offers
                 .iter()
-                .map(|(_, p)| p.start_ms)
+                .map(|&(_, start)| start)
                 .min()
                 .expect("offers is non-empty");
             let conflict: Vec<usize> = offers
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, p))| p.start_ms == now)
+                .filter(|(_, &(_, start))| start == now)
                 .map(|(k, _)| k)
                 .collect();
             let context = decision_context(
@@ -503,7 +505,8 @@ impl SimpleScheduler {
                 .iter()
                 .position(|(i, _)| *i == chosen)
                 .expect("the chosen task made an offer");
-            let (i, placement) = offers.swap_remove(k);
+            let (i, _) = offers.swap_remove(k);
+            let (placement, _) = kept[i].take().expect("the chosen task made an offer");
             let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
 
             // The activity whole, or each of its parts.
@@ -1075,13 +1078,13 @@ fn decision_context(
     fixed: &HashMap<&str, Vec<&Assignment>>,
     cursor: &[usize],
     ready: &[i64],
-    offers: &[(usize, Placement)],
+    offers: &[(usize, i64)],
     conflict: &[usize],
     start_time_ms: i64,
 ) -> SchedulingContext {
     let time = conflict
         .iter()
-        .map(|&k| offers[k].1.start_ms)
+        .map(|&k| offers[k].1)
         .min()
         .expect("the conflict set is non-empty");
     let mut context = SchedulingContext::at_time(time);
