@@ -166,7 +166,13 @@ impl ResourceTimeline {
     /// The earliest start from `from_ms` of a gap `duration_ms` long, at
     /// capacity 1 and with no calendar.
     fn earliest_gap(&self, from_ms: i64, duration_ms: i64) -> i64 {
-        let first = self.bookings.partition_point(|(b, _)| b.start_ms < from_ms);
+        // Asked from before the first booking, or after the last one starts, is the usual question
+        // of a dispatcher: the search for where `from_ms` falls is not needed.
+        let first = match (self.bookings.first(), self.bookings.last()) {
+            (Some((b, _)), _) if b.start_ms >= from_ms => 0,
+            (_, Some((b, _))) if b.start_ms < from_ms => self.bookings.len(),
+            _ => self.bookings.partition_point(|(b, _)| b.start_ms < from_ms),
+        };
         let mut t = first
             .checked_sub(1)
             .map_or(from_ms, |i| from_ms.max(self.latest_end_to[i]));
@@ -296,10 +302,15 @@ mod tests {
                 tl.book(start, end, 1);
             }
             for _ in 0..12 {
-                let (from, duration) = (
-                    next(3_000),
-                    [0, 1, next(150), next(1_500)][next(4) as usize],
-                );
+                // Half the questions begin at a booking's start or end, or next to one.
+                let from = match booked.is_empty() || next(2) == 0 {
+                    true => next(3_000),
+                    false => {
+                        let (start, end) = booked[next(booked.len() as i64) as usize];
+                        [start, end][next(2) as usize] + next(3) - 1
+                    }
+                };
+                let duration = [0, 1, next(150), next(1_500)][next(4) as usize];
                 assert_eq!(
                     tl.earliest_fit(from, duration, 1),
                     Some(earliest_by_trying(&booked, from, duration)),

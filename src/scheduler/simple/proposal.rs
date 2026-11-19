@@ -80,20 +80,25 @@ impl Cheap {
                     continue;
                 }
                 let wanted = req.quantity as usize;
-                fits.clear();
-                fits.extend(req.eligible(resources).filter_map(|r| {
+                let fit_of = req.eligible(resources).filter_map(|r| {
                     timelines
                         .get(r.id.as_str())?
                         .earliest_fit(t, span, req.usage)
-                }));
-                if fits.len() < wanted {
-                    return Start::Never;
-                }
-                // The resources are taken in order of their fit, so the requirement is ready
-                // when the `wanted`-th earliest is.
+                });
                 let fit = if wanted == 1 {
-                    *fits.iter().min().expect("at least one fit")
+                    // The one resource that can start it first: nothing to collect.
+                    match fit_of.min() {
+                        Some(fit) => fit,
+                        None => return Start::Never,
+                    }
                 } else {
+                    fits.clear();
+                    fits.extend(fit_of);
+                    if fits.len() < wanted {
+                        return Start::Never;
+                    }
+                    // The resources are taken in order of their fit, so the requirement is
+                    // ready when the `wanted`-th earliest is.
                     let (_, nth, _) = fits.select_nth_unstable(wanted - 1);
                     *nth
                 };
