@@ -959,17 +959,25 @@ impl SimpleScheduler {
                             let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
                             let tl = timelines.get(rid)?;
                             let from = t.max(arrival(rid));
+                            // What an earlier requirement of this activity already takes of the
+                            // resource counts: two requirements overload a resource of capacity
+                            // one, which then fills only one of them.
+                            let usage = req.usage
+                                + selections
+                                    .iter()
+                                    .filter(|(taken, _)| *taken == rid)
+                                    .map(|&(_, units)| units)
+                                    .sum::<i32>();
                             let fit = if activity.resumable {
-                                tl.earliest_resumable(from, span, req.usage)
-                                    .map(|(fit, _)| fit)
+                                tl.earliest_resumable(from, span, usage).map(|(fit, _)| fit)
                             } else {
-                                tl.earliest_fit(from, span, req.usage)
+                                tl.earliest_fit(from, span, usage)
                             };
                             // With its companions free over the same span.
                             let fit = with_companions(
                                 fit?,
                                 span,
-                                (rid, req.usage),
+                                (rid, usage),
                                 resources,
                                 any_companions,
                                 timelines,
@@ -1025,10 +1033,10 @@ impl SimpleScheduler {
         }
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
-            for (rid, _, usage) in &selections {
+            for (rid, _, _) in &selections {
                 let tl = timelines.get(rid).expect("selected resource has timeline");
                 // None: 캘린더가 D를 영원히 못 담음
-                let fit = tl.earliest_fit(t, d, *usage)?;
+                let fit = tl.earliest_fit(t, d, taken_of(&selections, rid))?;
                 t_next = t_next.max(fit);
             }
             // Within the activity's own working time.
@@ -1063,10 +1071,10 @@ impl SimpleScheduler {
     ) -> Option<Placement> {
         let selected: Vec<(&ResourceTimeline, i32)> = selections
             .iter()
-            .map(|(rid, _, usage)| {
+            .map(|(rid, _, _)| {
                 (
                     timelines.get(rid).expect("selected resource has timeline"),
-                    *usage,
+                    taken_of(&selections, rid),
                 )
             })
             .collect();
@@ -1341,6 +1349,15 @@ fn balanced_works(
         .zip(&trial.parts)
         .any(|(w, (p, _))| *w != p.work_ms);
     (works.iter().all(|&w| w >= floor) && changed).then_some(works)
+}
+
+/// The units of `resource_id` the selected requirements take together.
+fn taken_of(selections: &[(String, i64, i32)], resource_id: &str) -> i32 {
+    selections
+        .iter()
+        .filter(|(rid, _, _)| rid == resource_id)
+        .map(|&(_, _, usage)| usage)
+        .sum()
 }
 
 /// The companions `resource_id` declares ([`Resource::companions`]).
@@ -2797,5 +2814,62 @@ mod tests {
         assert_eq!(span_of(&s, "cut"), (0, 1_000));
         assert_eq!(span_of(&s, "bend"), (1_000, 2_000));
         assert!(s.violations.is_empty(), "{:?}", s.violations);
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    use crate::models::{ResourceRequirement, ViolationType};
+
+    fn two_requirements(resources: Vec<Resource>) -> Schedule {
+        let activity = Activity::new("A", "T", 0)
+            .with_process_time(100)
+            .with_requirement(ResourceRequirement::new("Machine"))
+            .with_requirement(ResourceRequirement::new("Machine"));
+        let problem =
+            Problem::new(vec![Task::new("T").with_activity(activity)], resources).expect("valid");
+        SimpleScheduler::new().schedule(&problem, 0)
+    }
+
+    fn on(schedule: &Schedule) -> Vec<&str> {
+        let mut ids: Vec<&str> = schedule
+            .assignments
+            .iter()
+            .map(|a| a.resource_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn two_requirements_of_one_type_take_two_resources() {
+        let schedule = two_requirements(vec![
+            Resource::new("M0", "Machine"),
+            Resource::new("M1", "Machine"),
+        ]);
+        assert_eq!(on(&schedule), ["M0", "M1"]);
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
+    }
+
+    #[test]
+    fn one_resource_cannot_fill_two_requirements_that_overload_it() {
+        let schedule = two_requirements(vec![Resource::new("M0", "Machine")]);
+        assert!(
+            schedule.assignments.is_empty(),
+            "{:?}",
+            schedule.assignments
+        );
+        assert!(schedule
+            .violations
+            .iter()
+            .any(|v| v.violation_type == ViolationType::RequirementUnfilled));
+    }
+
+    #[test]
+    fn a_resource_with_room_for_both_usages_may_fill_both() {
+        let schedule = two_requirements(vec![Resource::new("M0", "Machine").with_capacity(2)]);
+        assert_eq!(on(&schedule), ["M0", "M0"]);
+        assert!(schedule.violations.is_empty(), "{:?}", schedule.violations);
     }
 }

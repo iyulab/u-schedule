@@ -71,36 +71,60 @@ impl Cheap {
         let ready = activity.release_time.map_or(ready, |r| ready.max(r));
         let d = activity.duration;
         let span = d.setup_ms + d.process_ms + d.teardown_ms;
-        let mut fits: Vec<i64> = Vec::new();
+        // The fits of the candidates of one requirement, and what the requirements before it
+        // in the same pass take of each resource (kept only when there is a later one to see it).
+        let mut fits: Vec<(i64, &str)> = Vec::new();
+        let mut taken: Vec<(&str, i32)> = Vec::new();
+        let several = activity.resource_requirements.len() > 1;
         let mut t = ready;
         for _ in 0..MAX_FIXED_POINT_ITERS {
             let mut t_next = t;
+            taken.clear();
             for req in &activity.resource_requirements {
                 if req.quantity <= 0 {
                     continue;
                 }
                 let wanted = req.quantity as usize;
                 let fit_of = req.eligible(resources).filter_map(|r| {
-                    timelines
-                        .get(r.id.as_str())?
-                        .earliest_fit(t, span, req.usage)
+                    let rid = r.id.as_str();
+                    // What an earlier requirement of this activity takes of the resource adds.
+                    let usage = req.usage
+                        + taken
+                            .iter()
+                            .filter(|(held, _)| *held == rid)
+                            .map(|&(_, units)| units)
+                            .sum::<i32>();
+                    let fit = timelines.get(rid)?.earliest_fit(t, span, usage)?;
+                    Some((fit, rid))
                 });
                 let fit = if wanted == 1 {
-                    // The one resource that can start it first: nothing to collect.
-                    match fit_of.min() {
-                        Some(fit) => fit,
-                        None => return Start::Never,
+                    // The one resource that can start it first, the first declared on a tie.
+                    let mut best: Option<(i64, &str)> = None;
+                    for candidate in fit_of {
+                        if best.is_none_or(|(fit, _)| candidate.0 < fit) {
+                            best = Some(candidate);
+                        }
                     }
+                    let Some((fit, rid)) = best else {
+                        return Start::Never;
+                    };
+                    if several {
+                        taken.push((rid, req.usage));
+                    }
+                    fit
                 } else {
                     fits.clear();
                     fits.extend(fit_of);
                     if fits.len() < wanted {
                         return Start::Never;
                     }
-                    // The resources are taken in order of their fit, so the requirement is
-                    // ready when the `wanted`-th earliest is.
-                    let (_, nth, _) = fits.select_nth_unstable(wanted - 1);
-                    *nth
+                    // The resources are taken in order of their fit (the first declared on a
+                    // tie), so the requirement is ready when the `wanted`-th earliest is.
+                    fits.sort_by_key(|&(fit, _)| fit);
+                    if several {
+                        taken.extend(fits[..wanted].iter().map(|&(_, rid)| (rid, req.usage)));
+                    }
+                    fits[wanted - 1].0
                 };
                 t_next = t_next.max(fit);
             }

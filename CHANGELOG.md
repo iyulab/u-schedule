@@ -34,6 +34,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ### Fixed
 
+- An activity with two requirements of one type (two `Machine` requirements, say) is no longer placed on one resource
+  twice while another is free. What the requirements before one take of a resource now counts toward it, so a resource
+  of capacity one fills only one of them (the activity is left unplaced and reported as unfilled when no second
+  resource can take it), and a resource with room for both usages may fill both. Before, both requirements picked the
+  same resource and the schedule overloaded it.
 - `Schedule::violations` lists capacity violations in resource-id order. With two or more resources over capacity their
   order used to change from one run to the next on the same input.
 
