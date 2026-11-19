@@ -443,6 +443,54 @@ mod tests {
         }
     }
 
+    /// A shop floor: `n` jobs of one to three activities each, every activity on a machine of
+    /// one pool of `m` and a third of them also needing one of three operators, all released at
+    /// once. The shape [`dispatch_at_scale`] leaves out: activities that follow one another, and
+    /// a second pool that the first one's offers also read.
+    fn factory(n: usize, m: usize) -> Problem {
+        let mut rng = Lcg(n as u64 * 37 + m as u64);
+        let mut resources: Vec<Resource> = (0..m)
+            .map(|k| Resource::new(format!("M{k}"), "Machine"))
+            .collect();
+        resources.extend((0..3).map(|k| Resource::new(format!("W{k}"), "Operator")));
+        let tasks: Vec<Task> = (0..n)
+            .map(|i| {
+                let mut task = Task::new(format!("T{i}")).with_priority(rng.below(5) as i32);
+                for s in 0..1 + rng.below(3) {
+                    let mut activity =
+                        Activity::new(format!("T{i}-{s}"), format!("T{i}"), s as i32)
+                            .with_process_time(300 + rng.below(30) as i64 * 100)
+                            .with_requirement(ResourceRequirement::new("Machine"));
+                    if rng.chance(3) {
+                        activity = activity.with_requirement(ResourceRequirement::new("Operator"));
+                    }
+                    task = task.with_activity(activity);
+                }
+                task
+            })
+            .collect();
+        Problem::new(tasks, resources).expect("a valid problem")
+    }
+
+    /// How long the dispatcher takes on [`factory`] jobs under three rule sets. A measurement:
+    /// `cargo test --release --lib dispatch_at_scale_factory -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn dispatch_at_scale_factory() {
+        for (n, m) in [(1_000, 5), (2_000, 5), (2_000, 20)] {
+            let problem = factory(n, m);
+            for (rule, name) in [(0, "priority"), (1, "SPT"), (2, "WINQ+SPT")] {
+                let started = std::time::Instant::now();
+                let schedule = dispatcher(rule, false, false).schedule(&problem, 0);
+                eprintln!(
+                    "n={n:>5} m={m:>2} {name:<9} {:>7.2} s  ({} assignments)",
+                    started.elapsed().as_secs_f64(),
+                    schedule.assignments.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn what_it_cannot_answer_it_declines() {
         let r = vec![
