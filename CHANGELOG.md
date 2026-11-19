@@ -11,6 +11,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 ### Changed
 
 - Requires u-numflow 0.17.
+- Dispatching (`run_schedule`, `SimpleScheduler::schedule`) does less work per placement: it no longer scans every resource
+  by name to look for companions when none has one, skips the transition-matrix lookup when there is none, and reuses its
+  buffers, borrows resource ids instead of copying them and no longer copies every pending offer at each decision. The schedules are unchanged (pinned by a test on 24 random
+  problems under five rules). With many machines this is about twice as fast (2,000 jobs on 50 machines 45 s → 23 s,
+  on 10 machines 11 s → 8.5 s); the work still grows with the square of the number of jobs.
 
 ## [0.35.0] - 2026-10-29
 
