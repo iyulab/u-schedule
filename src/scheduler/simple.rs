@@ -830,7 +830,11 @@ impl SimpleScheduler {
         };
         // The setup a resource charges for this activity, given the activity's
         // own setup on the resources it runs on.
+        let any_matrix = !self.transition_matrices.is_empty();
         let setup_for = |resource_id: &str, own_setup_ms: i64| -> i64 {
+            if !any_matrix {
+                return own_setup_ms;
+            }
             self.transition_matrices.setup_ms(
                 resource_id,
                 last_category.get(resource_id).map(String::as_str),
@@ -839,42 +843,47 @@ impl SimpleScheduler {
             )
         };
 
+        let any_companions = resources.iter().any(|r| !r.companions.is_empty());
+
         // Phase 1: 고정점 — 모든 requirement가 t에서 시작 가능한 최소 t.
         // Each candidate is judged on its own time there; at the same start
         // the one that processes faster is taken (non-delay first, then the
         // shorter processing).
         let mut t = ready;
-        let mut selections: Vec<(String, i32)> = Vec::new();
+        let mut selections: Vec<(&str, i32)> = Vec::new();
+        let mut fits: Vec<(i64, i64, &str)> = Vec::new();
         for _ in 0..MAX_FIXED_POINT_ITERS {
             selections.clear();
             let mut t_next = t;
             for req in &activity.resource_requirements {
-                let mut fits: Vec<(i64, i64, &str)> = req
-                    .eligible(resources)
-                    .map(|r| r.id.as_str())
-                    .filter_map(|rid| {
-                        let d = activity.duration_on([rid]);
-                        let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
-                        let tl = timelines.get(rid)?;
-                        let from = t.max(arrival(rid));
-                        let fit = if activity.resumable {
-                            tl.earliest_resumable(from, span, req.usage)
-                                .map(|(fit, _)| fit)
-                        } else {
-                            tl.earliest_fit(from, span, req.usage)
-                        };
-                        // With its companions free over the same span.
-                        let fit = with_companions(
-                            fit?,
-                            span,
-                            (rid, req.usage),
-                            resources,
-                            timelines,
-                            activity.resumable,
-                        )?;
-                        Some((fit, d.process_ms, rid))
-                    })
-                    .collect();
+                fits.clear();
+                fits.extend(
+                    req.eligible(resources)
+                        .map(|r| r.id.as_str())
+                        .filter_map(|rid| {
+                            let d = activity.duration_on([rid]);
+                            let span = setup_for(rid, d.setup_ms) + d.process_ms + d.teardown_ms;
+                            let tl = timelines.get(rid)?;
+                            let from = t.max(arrival(rid));
+                            let fit = if activity.resumable {
+                                tl.earliest_resumable(from, span, req.usage)
+                                    .map(|(fit, _)| fit)
+                            } else {
+                                tl.earliest_fit(from, span, req.usage)
+                            };
+                            // With its companions free over the same span.
+                            let fit = with_companions(
+                                fit?,
+                                span,
+                                (rid, req.usage),
+                                resources,
+                                any_companions,
+                                timelines,
+                                activity.resumable,
+                            )?;
+                            Some((fit, d.process_ms, rid))
+                        }),
+                );
                 // 동시각이면 짧은 처리, 그다음 자원 선언 순서 (stable sort)
                 fits.sort_by_key(|&(fit, process, _)| (fit, process));
                 if (fits.len() as i32) < req.quantity {
@@ -882,7 +891,7 @@ impl SimpleScheduler {
                 }
                 for &(fit, _, rid) in fits.iter().take(req.quantity as usize) {
                     t_next = t_next.max(fit);
-                    selections.push((rid.to_string(), req.usage));
+                    selections.push((rid, req.usage));
                 }
             }
             if t_next == t {
@@ -893,12 +902,12 @@ impl SimpleScheduler {
 
         // Phase 2: the time on the chosen resources together, with a common
         // span D (the largest setup), re-checked on every resource.
-        let d = activity.duration_on(selections.iter().map(|(rid, _)| rid.as_str()));
+        let d = activity.duration_on(selections.iter().map(|&(rid, _)| rid));
         let selections: Vec<(String, i64, i32)> = selections
             .into_iter()
             .map(|(rid, usage)| {
-                let setup = setup_for(&rid, d.setup_ms);
-                (rid, setup, usage)
+                let setup = setup_for(rid, d.setup_ms);
+                (rid.to_string(), setup, usage)
             })
             .collect();
         let max_setup = selections.iter().map(|&(_, s, _)| s).max().unwrap_or(0);
@@ -908,6 +917,7 @@ impl SimpleScheduler {
         let mut companions: Vec<String> = Vec::new();
         for c in selections
             .iter()
+            .filter(|_| any_companions)
             .flat_map(|(rid, _, _)| companions_of(rid, resources))
         {
             if selections.iter().all(|(s, _, _)| s != c) && !companions.contains(c) {
@@ -1229,9 +1239,15 @@ fn with_companions(
     span: i64,
     (resource_id, usage): (&str, i32),
     resources: &[Resource],
+    any_companions: bool,
     timelines: &HashMap<String, ResourceTimeline>,
     resumable: bool,
 ) -> Option<i64> {
+    // Finding the resource by name is a scan of them all, once for every candidate of every
+    // placement: when no resource has a companion there is nothing to find.
+    if !any_companions {
+        return Some(fit);
+    }
     let companions = companions_of(resource_id, resources);
     if companions.is_empty() {
         return Some(fit);
