@@ -34,6 +34,9 @@ pub struct ResourceTimeline {
     bookings: Vec<(TimeWindow, i32)>,
     /// The latest end among `bookings[..=i]`.
     latest_end_to: Vec<i64>,
+    /// How many of the first `bookings` run on without a gap: each starts no later than the
+    /// latest end before it. Where a span of positive length can start is past that run.
+    gapless: usize,
     /// Booked time × units, over every booking.
     booked: i64,
 }
@@ -47,6 +50,7 @@ impl ResourceTimeline {
             calendar: resource.calendar.clone(),
             bookings: Vec::new(),
             latest_end_to: Vec::new(),
+            gapless: 0,
             booked: 0,
         }
     }
@@ -143,6 +147,14 @@ impl ResourceTimeline {
             latest = latest.max(b.end_ms);
             self.latest_end_to.push(latest);
         }
+        // The run before `at` is as it was; carry on from there.
+        let mut run = at.min(self.gapless).max(1);
+        while run < self.bookings.len()
+            && self.bookings[run].0.start_ms <= self.latest_end_to[run - 1]
+        {
+            run += 1;
+        }
+        self.gapless = run;
     }
 
     /// Whether a booking overlaps `[start_ms, end_ms)`.
@@ -158,7 +170,25 @@ impl ResourceTimeline {
         let mut t = first
             .checked_sub(1)
             .map_or(from_ms, |i| from_ms.max(self.latest_end_to[i]));
-        for (b, _) in &self.bookings[first..] {
+        let mut at = first;
+        if at == 0 {
+            // Room before the first booking is the one gap the run does not rule out.
+            let Some((b, _)) = self.bookings.first() else {
+                return t;
+            };
+            if b.start_ms >= t + duration_ms {
+                return t;
+            }
+            t = t.max(b.end_ms);
+            at = 1;
+        }
+        if duration_ms > 0 && at < self.gapless {
+            // Each booking in the run starts by the time the ones before it have ended, so
+            // no span of positive length fits between them: on to where the run ends.
+            t = t.max(self.latest_end_to[self.gapless - 1]);
+            at = self.gapless;
+        }
+        for (b, _) in &self.bookings[at..] {
             if b.start_ms >= t + duration_ms {
                 break;
             }
@@ -218,6 +248,66 @@ impl ResourceTimeline {
 mod tests {
     use super::*;
     use crate::models::{Calendar, Resource};
+
+    /// The earliest start from `from` of `duration` on a resource of capacity one with no
+    /// calendar, by trying each instant a gap can open at.
+    fn earliest_by_trying(bookings: &[(i64, i64)], from: i64, duration: i64) -> i64 {
+        let mut candidates: Vec<i64> = vec![from];
+        candidates.extend(bookings.iter().map(|&(_, end)| end).filter(|&e| e >= from));
+        candidates.sort_unstable();
+        candidates
+            .into_iter()
+            .find(|&t| {
+                !bookings.iter().any(|&(start, end)| {
+                    start < t + duration.max(0) && t < end && (start < t || duration > 0)
+                })
+            })
+            .expect("the end of the last booking is free")
+    }
+
+    #[test]
+    fn the_earliest_gap_is_the_first_instant_where_nothing_overlaps() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as i64
+        };
+        for _ in 0..3_000 {
+            let mut tl = ResourceTimeline::new(&Resource::new("M1", "Machine"));
+            let mut booked: Vec<(i64, i64)> = Vec::new();
+            // Runs that touch or overlap, with the odd gap, laid in any order.
+            let mut at = next(200);
+            for _ in 0..next(14) {
+                let len = 1 + next(400);
+                let step = if next(5) == 0 {
+                    len + next(600)
+                } else {
+                    next(len) + 1
+                };
+                booked.push((at, at + len));
+                at += step;
+            }
+            for k in (1..booked.len()).rev() {
+                booked.swap(k, next(k as i64 + 1) as usize);
+            }
+            for &(start, end) in &booked {
+                tl.book(start, end, 1);
+            }
+            for _ in 0..12 {
+                let (from, duration) = (
+                    next(3_000),
+                    [0, 1, next(150), next(1_500)][next(4) as usize],
+                );
+                assert_eq!(
+                    tl.earliest_fit(from, duration, 1),
+                    Some(earliest_by_trying(&booked, from, duration)),
+                    "{booked:?} from {from} for {duration}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_earliest_fit_empty() {
