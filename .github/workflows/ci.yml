@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Topic branches (`<kind>/<slug>`) too: a branch is built on every platform before it is merged.
+    branches: [main, 'feat/**', 'fix/**']
   pull_request:
     branches: [main]
 
