@@ -52,9 +52,9 @@ use crate::models::{
 };
 use crate::Problem;
 
-// TODO(feat/dispatch-symbolic): the dispatcher reads it next; drop the allow when it does.
-#[allow(dead_code)]
 mod proposal;
+
+use proposal::{Cheap, Start};
 
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
@@ -142,6 +142,10 @@ pub struct SimpleScheduler {
     transition_matrices: TransitionMatrixCollection,
     rules: Rules,
     fixed: Vec<Assignment>,
+    /// Whether an offer's start is found without placing the activity
+    /// ([`proposal`]) where that is exact. Off only in tests, as the reference the
+    /// dispatcher must agree with.
+    cheap_offers: bool,
 }
 
 /// What decides each conflict.
@@ -156,12 +160,21 @@ enum Rules {
 }
 
 impl SimpleScheduler {
+    /// The scheduler placing every offer in full, as it did before offers' starts were
+    /// found without placing: what [`schedule`](Self::schedule) must agree with.
+    #[cfg(test)]
+    fn without_cheap_offers(mut self) -> Self {
+        self.cheap_offers = false;
+        self
+    }
+
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
             transition_matrices: TransitionMatrixCollection::new(),
             rules: Rules::Priority,
             fixed: Vec::new(),
+            cheap_offers: true,
         }
     }
 
@@ -354,6 +367,10 @@ impl SimpleScheduler {
         // Per task: its offer, kept until a booking can change it, and the
         // resources whose booking can (`Self::read_by`).
         let mut kept: Vec<Option<(Placement, Vec<&str>)>> = vec![None; tasks.len()];
+        // Per task: the start its offer would have, found without placing the activity, kept
+        // until a booking on a resource the activity may use can change it ([`proposal`]).
+        let cheap = self.cheap_offers.then(|| Cheap::new(self, resources));
+        let mut quick: Vec<Option<i64>> = vec![None; tasks.len()];
         // Every activity passed so far, with when it ended — `None` for one
         // left unplaced, which its successors go on without (as the next step
         // of its own task does). An activity waits for its `predecessors`
@@ -366,6 +383,10 @@ impl SimpleScheduler {
             // reads only the start of each, and takes the one placement it chooses).
             let mut offers: Vec<(usize, i64)> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
+                if let Some(start) = quick[i] {
+                    offers.push((i, start));
+                    continue;
+                }
                 if let Some((placement, _)) = &kept[i] {
                     offers.push((i, placement.start_ms));
                     continue;
@@ -432,6 +453,28 @@ impl SimpleScheduler {
                         settled.insert(&activity.id, end_ms);
                         cursor[i] += 1;
                         continue;
+                    }
+                    if let Some(cheap) = cheap.as_ref().filter(|_| finish_floor.is_none()) {
+                        match cheap.start(
+                            activity,
+                            own.get(activity.id.as_str()),
+                            &timelines,
+                            resources,
+                            ready[i],
+                        ) {
+                            Start::At(start) => {
+                                quick[i] = Some(start);
+                                offers.push((i, start));
+                                break;
+                            }
+                            Start::Never => {
+                                previous[i] = None;
+                                settled.insert(&activity.id, None);
+                                cursor[i] += 1;
+                                continue;
+                            }
+                            Start::Declined => {}
+                        }
                     }
                     match self.place_ending_after(
                         activity,
@@ -510,8 +553,28 @@ impl SimpleScheduler {
                 .position(|(i, _)| *i == chosen)
                 .expect("the chosen task made an offer");
             let (i, _) = offers.swap_remove(k);
-            let (placement, _) = kept[i].take().expect("the chosen task made an offer");
             let (task, activity) = (&tasks[i], &tasks[i].activities[cursor[i]]);
+            let placement = match quick[i].take() {
+                // Its start was found without placing it: place it now, where it said.
+                Some(start) => {
+                    let placement = self
+                        .place_ending_after(
+                            activity,
+                            task,
+                            &timelines,
+                            own.get(activity.id.as_str()),
+                            &last_category,
+                            resources,
+                            ready[i],
+                            &came_from[i],
+                            None,
+                        )
+                        .expect("a start found for an offer is the start of a placement");
+                    debug_assert_eq!(placement.start_ms, start);
+                    placement
+                }
+                None => kept[i].take().expect("the chosen task made an offer").0,
+            };
 
             // The activity whole, or each of its parts.
             let pieces: Vec<(Option<Part>, &Placement)> = if placement.parts.is_empty() {
@@ -546,6 +609,20 @@ impl SimpleScheduler {
                 }
             }
             // The offers that read a resource just booked are made again.
+            if cheap.is_some() {
+                let booked = ResourceSet::of(
+                    resources.len(),
+                    placement
+                        .selections
+                        .iter()
+                        .map(|(rid, _, _)| position[rid.as_str()]),
+                );
+                for (j, start) in quick.iter_mut().enumerate() {
+                    if start.is_some() && eligible[j][cursor[j]].meets(&booked) {
+                        *start = None;
+                    }
+                }
+            }
             kept[i] = None;
             for offer in kept.iter_mut() {
                 if offer.as_ref().is_some_and(|(_, read)| {
@@ -1029,6 +1106,7 @@ impl SimpleScheduler {
             transition_matrices: request.transition_matrices.clone(),
             rules: self.rules.clone(),
             fixed: self.fixed.clone(),
+            cheap_offers: self.cheap_offers,
         };
         let mut schedule = scheduler.schedule(&request.problem, request.start_time_ms);
         let input = super::feasibility::FeasibilityInput {

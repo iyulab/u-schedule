@@ -16,6 +16,13 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   buffers, borrows resource ids instead of copying them and no longer copies every pending offer at each decision. The schedules are unchanged (pinned by a test on 24 random
   problems under five rules). With many machines this is about twice as fast (2,000 jobs on 50 machines 45 s → 23 s,
   on 10 machines 11 s → 8.5 s); the work still grows with the square of the number of jobs.
+- Dispatching finds when each offer would start without placing the activity, where its resources allow it (no
+  transition matrix, companion or transport, and an activity that is not resumable, split or overlapped, with no
+  calendar of its own and the same time on every resource), and places only the activity it picks; the rest are
+  placed in full as before. A resource of capacity one with no calendar finds the earliest gap in one step through
+  a long run of bookings that leave no gap. The schedules are unchanged (the pinned schedules are, and random
+  problems with every kind of activity mixed agree with placing every offer in full). 3,000 jobs on one machine
+  12.3 s → 5.2 s, on 10 machines 20.7 s → 11.3 s.
 
 ### Fixed
 

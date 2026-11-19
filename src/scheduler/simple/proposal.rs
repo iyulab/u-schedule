@@ -111,9 +111,11 @@ impl Cheap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatching::{rules, RuleEngine};
     use crate::models::{
-        ActivityDuration, Calendar, ResourceRequirement, ResourceTiming, Split, Task,
+        ActivityDuration, Calendar, Overlap, ResourceRequirement, ResourceTiming, Split, Task,
     };
+    use crate::Problem;
 
     struct Lcg(u64);
 
@@ -247,6 +249,169 @@ mod tests {
         // The comparison must have exercised both answers, or it proves nothing.
         assert!(at > 5_000, "only {at} placed");
         assert!(never > 100, "only {never} unplaceable");
+    }
+
+    /// A problem of tasks of one to three activities on [`world`]'s resources, with now and
+    /// then an activity of a kind the cheap query declines, a predecessor across tasks, an
+    /// activity that holds no resource, or a world that declines everything.
+    fn problem(rng: &mut Lcg) -> Option<(Problem, bool)> {
+        let (mut resources, _) = world(rng);
+        let kind = rng.below(10);
+        if kind == 0 && resources.len() > 1 {
+            let other = resources[1].id.clone();
+            resources[0] = resources[0].clone().with_companion(other);
+        }
+        if kind == 1 && resources.len() > 1 {
+            let other = resources[1].id.clone();
+            resources[0] = resources[0].clone().with_transport_to(other, 20);
+        }
+        let matrix = kind == 2;
+        let ids: Vec<String> = resources.iter().map(|r| r.id.clone()).collect();
+        let tasks_n = 5 + rng.below(26) as usize;
+        let tasks: Vec<Task> = (0..tasks_n)
+            .map(|t| {
+                let mut task = Task::new(format!("T{t}"))
+                    .with_priority(rng.below(5) as i32)
+                    .with_category(format!("c{}", rng.below(3)))
+                    .with_release_time(rng.below(80) as i64 * 50)
+                    .with_deadline(2_000 + rng.below(4_000) as i64 * 10);
+                for s in 0..=rng.below(3) {
+                    let mut a = activity(rng);
+                    a.id = format!("T{t}-{s}");
+                    a.task_id = format!("T{t}");
+                    a.sequence = s as i32;
+                    // Only the resources that exist.
+                    for req in &mut a.resource_requirements {
+                        req.candidates.retain(|c| ids.contains(c));
+                    }
+                    if rng.chance(8) {
+                        a = a.resumable();
+                    }
+                    if rng.chance(8) {
+                        a = a.with_split(Split {
+                            max_parts: 2 + rng.below(2) as i32,
+                            min_part_ms: 150,
+                            part_overhead_ms: rng.below(3) as i64 * 20,
+                        });
+                    }
+                    if s > 0 && rng.chance(8) {
+                        a = a.with_overlap(Overlap::new(0.5));
+                    }
+                    if rng.chance(10) {
+                        a = a.with_speed_on("Machine0", 2.0);
+                    }
+                    if rng.chance(12) {
+                        // Working time of its own that binds: two windows, some work does not fit.
+                        let at = rng.below(1_500) as i64;
+                        let (first, gap) = (600 + rng.below(2_000) as i64, rng.below(1_500) as i64);
+                        a = a.with_calendar(
+                            Calendar::new("own")
+                                .with_window(at, at + first)
+                                .with_window(at + first + gap + 100, 100_000),
+                        );
+                    }
+                    if s == 0 && t > 0 && rng.chance(6) {
+                        a = a.with_predecessor(format!("T{}-0", rng.below(t as u64)));
+                    }
+                    if rng.chance(12) {
+                        a.resource_requirements.clear();
+                    }
+                    task = task.with_activity(a);
+                }
+                task
+            })
+            .collect();
+        Problem::new(tasks, resources).ok().map(|p| (p, matrix))
+    }
+
+    fn dispatcher(rule: usize, matrix: bool, reference: bool) -> SimpleScheduler {
+        let mut scheduler = match rule {
+            0 => SimpleScheduler::new(),
+            1 => SimpleScheduler::new().with_rule_engine(RuleEngine::new().with_rule(rules::Spt)),
+            _ => SimpleScheduler::new().with_rule_engine(
+                RuleEngine::new()
+                    .with_rule(rules::Winq)
+                    .with_rule(rules::Spt),
+            ),
+        };
+        if matrix {
+            let matrices = crate::models::TransitionMatrixCollection::new().with_matrix(
+                crate::models::TransitionMatrix::new("m", "Machine0").with_default(30),
+            );
+            scheduler = scheduler.with_transition_matrices(matrices);
+        }
+        if reference {
+            scheduler = scheduler.without_cheap_offers();
+        }
+        scheduler
+    }
+
+    #[test]
+    fn the_dispatcher_with_cheap_offers_schedules_what_the_reference_does() {
+        let mut valid = 0;
+        for seed in 0..260u64 {
+            let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let Some((problem, matrix)) = problem(&mut rng) else {
+                continue;
+            };
+            valid += 1;
+            for rule in 0..3 {
+                let now = dispatcher(rule, matrix, false).schedule(&problem, 0);
+                let reference = dispatcher(rule, matrix, true).schedule(&problem, 0);
+                assert_eq!(
+                    format!("{now:?}"),
+                    format!("{reference:?}"),
+                    "seed {seed} rule {rule}"
+                );
+            }
+        }
+        assert!(valid > 200, "only {valid} of 260 problems were valid");
+    }
+
+    /// How long the dispatcher takes on `n` tasks of one machine activity each, all released
+    /// at once on a pool of `m` machines (every offer reads the same machine), with and without
+    /// the cheap start. Slow, so only on request, and meant for `--release`:
+    /// `cargo test --release --lib dispatch_at_scale -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn dispatch_at_scale() {
+        for (n, m, with_reference) in [
+            (1_000, 1, true),
+            (2_000, 1, true),
+            (2_000, 10, true),
+            (3_000, 1, false),
+            (3_000, 10, false),
+        ] {
+            let mut rng = Lcg(n as u64 * 31 + m as u64);
+            let resources: Vec<Resource> = (0..m)
+                .map(|k| Resource::new(format!("M{k}"), "Machine"))
+                .collect();
+            let tasks: Vec<Task> = (0..n)
+                .map(|i| {
+                    Task::new(format!("T{i}"))
+                        .with_priority(rng.below(5) as i32)
+                        .with_activity(
+                            Activity::new(format!("T{i}-0"), format!("T{i}"), 0)
+                                .with_process_time(500 + rng.below(30) as i64 * 100)
+                                .with_requirement(ResourceRequirement::new("Machine")),
+                        )
+                })
+                .collect();
+            let problem = Problem::new(tasks, resources).expect("a valid problem");
+            let timed = |reference: bool| {
+                let started = std::time::Instant::now();
+                let schedule = dispatcher(0, false, reference).schedule(&problem, 0);
+                (started.elapsed().as_secs_f64(), format!("{schedule:?}"))
+            };
+            let (cheap, cheap_schedule) = timed(false);
+            if with_reference {
+                let (reference, reference_schedule) = timed(true);
+                assert_eq!(cheap_schedule, reference_schedule, "n={n} m={m}");
+                eprintln!("n={n:>5} m={m:>2}  cheap {cheap:>7.2} s  reference {reference:>7.2} s");
+            } else {
+                eprintln!("n={n:>5} m={m:>2}  cheap {cheap:>7.2} s");
+            }
+        }
     }
 
     #[test]
