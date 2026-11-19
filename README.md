@@ -60,6 +60,41 @@ A `SchedulingContext` you build yourself for `RuleEngine::sort_indices` may
 leave fields empty; each rule then reads the task as a whole (SPT the total
 processing time, LWKR the total work, WINQ 0).
 
+A rule of your own implements `DispatchingRule`. Say which parts of the context
+it reads with `reads`: a decision builds only those, which is what keeps
+dispatching thousands of jobs fast (the default is all of the context, so a rule
+that says nothing is always right, only slower). A part a rule reads without
+declaring it comes empty.
+
+```rust
+use u_schedule::dispatching::{ContextFields, DispatchingRule, SchedulingContext};
+use u_schedule::models::Task;
+
+/// The job with the least work left goes first.
+#[derive(Debug)]
+struct LeastWorkLeft;
+
+impl DispatchingRule for LeastWorkLeft {
+    fn name(&self) -> &'static str {
+        "LEAST_WORK_LEFT"
+    }
+
+    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> f64 {
+        context.remaining_work_ms(task) as f64
+    }
+
+    fn reads(&self) -> ContextFields {
+        ContextFields::REMAINING_WORK
+    }
+}
+
+let context = SchedulingContext::at_time(0).with_remaining_work("J1", 500);
+let rule = LeastWorkLeft;
+assert_eq!(rule.evaluate(&Task::new("J1"), &context), 500.0);
+assert!(rule.reads().contains(ContextFields::REMAINING_WORK));
+assert!(!rule.reads().contains(ContextFields::NEXT_QUEUE));
+```
+
 Measured on Taillard's 40 job-shop instances `ta01`–`ta40` (15×15 to 30×15),
 makespan gap to the optimum or best known upper bound, mean over instances
 (`examples/taillard.rs`):
