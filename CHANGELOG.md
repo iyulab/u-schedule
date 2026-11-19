@@ -30,7 +30,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   a long run of bookings that leave no gap. The schedules are unchanged (the pinned schedules are, and random
   problems with every kind of activity mixed agree with placing every offer in full). It also builds only the parts
   of the scheduling context the rules deciding read (see `DispatchingRule::reads`), where it built all of it for
-  every competing job at every decision. 3,000 jobs on one machine 12.3 s → 1.5 s, on 10 machines 20.7 s → 5.1 s.
+  every competing job at every decision. With one operation per job, 3,000 jobs on one machine 12.3 s → 1.5 s and on
+  10 machines 20.7 s → 5.1 s; with one to three operations per job on a machine pool and a small operator pool, 2,000
+  jobs on 5 machines 8.1 s → 4.1 s and on 20 machines 14.6 s → 12.6 s (the work still grows with the square of the
+  number of jobs, and with the machines).
 
 ### Fixed
 

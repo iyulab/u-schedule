@@ -61,10 +61,10 @@ leave fields empty; each rule then reads the task as a whole (SPT the total
 processing time, LWKR the total work, WINQ 0).
 
 A rule of your own implements `DispatchingRule`. Say which parts of the context
-it reads with `reads`: a decision builds only those, which is what keeps
-dispatching thousands of jobs fast (the default is all of the context, so a rule
-that says nothing is always right, only slower). A part a rule reads without
-declaring it comes empty.
+it reads with `reads`: a decision builds only those, so the rest is not built
+for every competing job at every decision (the default is all of the context, so
+a rule that says nothing is always right, only slower). A part a rule reads
+without declaring it comes empty.
 
 ```rust
 use u_schedule::dispatching::{ContextFields, DispatchingRule, SchedulingContext};
