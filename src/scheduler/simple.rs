@@ -56,7 +56,7 @@ use crate::Problem;
 
 mod proposal;
 
-use proposal::{Cheap, Start};
+use proposal::{Cheap, Memo, Start};
 
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
@@ -148,6 +148,10 @@ pub struct SimpleScheduler {
     /// ([`proposal`]) where that is exact. Off only in tests, as the reference the
     /// dispatcher must agree with.
     cheap_offers: bool,
+    /// Whether an offer's start goes on from where the last decision left it
+    /// ([`proposal`]'s `Memo`) instead of being searched again. Off only in tests, as the
+    /// reference the memories must agree with.
+    offer_memos: bool,
 }
 
 /// What decides each conflict.
@@ -170,6 +174,14 @@ impl SimpleScheduler {
         self
     }
 
+    /// The scheduler asking each offer's start afresh at every decision, as it did before
+    /// offers remembered: what [`schedule`](Self::schedule) must agree with.
+    #[cfg(test)]
+    fn without_offer_memos(mut self) -> Self {
+        self.offer_memos = false;
+        self
+    }
+
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
@@ -177,6 +189,7 @@ impl SimpleScheduler {
             rules: Rules::Priority,
             fixed: Vec::new(),
             cheap_offers: true,
+            offer_memos: true,
         }
     }
 
@@ -372,6 +385,10 @@ impl SimpleScheduler {
         // Per task: the start its offer would have, found without placing the activity, kept
         // until a booking on a resource the activity may use can change it ([`proposal`]).
         let cheap = self.cheap_offers.then(|| Cheap::new(self, resources));
+        // Per task: what its offer's last search found, to go on from, and how many times each
+        // resource has been booked, which says whether what a search found of it still holds.
+        let mut memos: Vec<Option<Memo>> = tasks.iter().map(|_| None).collect();
+        let mut versions: Vec<u32> = vec![0; resources.len()];
         // What the rules deciding read of the context: only that is built for a decision (a
         // policy reads it itself to choose the rules, so it gets all of it).
         let fields = match &self.rules {
@@ -464,13 +481,22 @@ impl SimpleScheduler {
                         continue;
                     }
                     if let Some(cheap) = cheap.as_ref().filter(|_| finish_floor.is_none()) {
-                        match cheap.start(
-                            activity,
-                            own.get(activity.id.as_str()),
-                            &timelines,
-                            resources,
-                            ready[i],
-                        ) {
+                        let own = own.get(activity.id.as_str());
+                        let found = if self.offer_memos {
+                            cheap.start_remembering(
+                                &mut memos[i],
+                                cursor[i],
+                                activity,
+                                own,
+                                &timelines,
+                                resources,
+                                &versions,
+                                ready[i],
+                            )
+                        } else {
+                            cheap.start(activity, own, &timelines, resources, ready[i])
+                        };
+                        match found {
                             Start::At(start) => {
                                 quick[i] = Some(start);
                                 offers.push((i, start));
@@ -602,6 +628,8 @@ impl SimpleScheduler {
                         .get_mut(resource_id)
                         .expect("selection references known resource");
                     tl.book(piece.start_ms, piece.end_ms, *usage);
+                    // What an offer found of this resource is no longer known to hold.
+                    versions[position[resource_id.as_str()]] += 1;
                     let companion = piece.companions.contains(resource_id);
                     let mut assignment = Assignment::new(
                         &activity.id,
@@ -1125,6 +1153,7 @@ impl SimpleScheduler {
             rules: self.rules.clone(),
             fixed: self.fixed.clone(),
             cheap_offers: self.cheap_offers,
+            offer_memos: self.offer_memos,
         };
         let mut schedule = scheduler.schedule(&request.problem, request.start_time_ms);
         let input = super::feasibility::FeasibilityInput {

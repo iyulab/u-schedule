@@ -20,6 +20,9 @@ use super::{SimpleScheduler, MAX_FIXED_POINT_ITERS};
 use crate::models::{Activity, Resource};
 use crate::scheduler::timeline::ResourceTimeline;
 
+mod memo;
+pub(super) use memo::Memo;
+
 /// What the cheap query knows about an offer's start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Start {
@@ -35,6 +38,8 @@ pub(super) enum Start {
 pub(super) struct Cheap {
     /// No transition matrix, companion or transport anywhere.
     plain_world: bool,
+    /// The passes of the fixed-point search before it gives up, as in the full placement.
+    max_passes: usize,
 }
 
 impl Cheap {
@@ -44,7 +49,15 @@ impl Cheap {
                 && resources
                     .iter()
                     .all(|r| r.companions.is_empty() && r.transport_ms.is_empty()),
+            max_passes: MAX_FIXED_POINT_ITERS,
         }
+    }
+
+    /// The same query with a lower bound on the passes, to meet the bound in tests.
+    #[cfg(test)]
+    fn with_max_passes(mut self, max_passes: usize) -> Self {
+        self.max_passes = max_passes;
+        self
     }
 
     /// Whether `activity` is of the kind [`start`](Self::start) answers.
@@ -77,7 +90,7 @@ impl Cheap {
         let mut taken: Vec<(&str, i32)> = Vec::new();
         let several = activity.resource_requirements.len() > 1;
         let mut t = ready;
-        for _ in 0..MAX_FIXED_POINT_ITERS {
+        for _ in 0..self.max_passes {
             let mut t_next = t;
             taken.clear();
             for req in &activity.resource_requirements {
@@ -280,6 +293,75 @@ mod tests {
         assert!(never > 100, "only {never} unplaceable");
     }
 
+    /// What an offer remembers across bookings gives the start asked afresh: three offers on one
+    /// ledger are asked after each round of bookings -- on resources they may take or not, that
+    /// push their starts later or leave them -- and the task goes on to its next activity half
+    /// way. The bound on the passes is also set to three and to one, so that passes adding up
+    /// across questions are met.
+    #[test]
+    fn what_an_offer_remembers_gives_the_start_asked_afresh() {
+        let scheduler = SimpleScheduler::new();
+        let (mut remembered, mut never, mut declined, mut moved) = (0, 0, 0, 0);
+        for seed in 0..2_000u64 {
+            for cap in [MAX_FIXED_POINT_ITERS, 3, 1] {
+                let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let (resources, mut timelines) = world(&mut rng);
+                let mut versions = vec![0u32; resources.len()];
+                let cheap = Cheap::new(&scheduler, &resources).with_max_passes(cap);
+                let mut offers: Vec<(Activity, i64, usize, Option<Memo>)> = (0..3)
+                    .map(|_| (activity(&mut rng), rng.below(7_000) as i64, 0, None))
+                    .collect();
+                let mut before: Vec<Option<Start>> = vec![None; offers.len()];
+                for round in 0..10 {
+                    if round == 5 {
+                        for offer in &mut offers {
+                            let memo = offer.3.take();
+                            *offer = (activity(&mut rng), rng.below(7_000) as i64, 1, memo);
+                            before.fill(None);
+                        }
+                    }
+                    for (k, (act, ready, cursor, memo)) in offers.iter_mut().enumerate() {
+                        let want = cheap.start(act, None, &timelines, &resources, *ready);
+                        let got = cheap.start_remembering(
+                            memo, *cursor, act, None, &timelines, &resources, &versions, *ready,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "seed {seed} cap {cap} round {round} offer {k}: {act:?} ready {ready}"
+                        );
+                        remembered += usize::from(memo.is_some());
+                        never += usize::from(got == Start::Never);
+                        declined += usize::from(got == Start::Declined && cap < 10_000);
+                        if let (Some(Start::At(was)), Start::At(now)) = (before[k], got) {
+                            moved += usize::from(now > was);
+                        }
+                        before[k] = Some(got);
+                    }
+                    for _ in 0..1 + rng.below(3) {
+                        let k = rng.below(resources.len() as u64) as usize;
+                        let resource = &resources[k];
+                        let timeline = timelines
+                            .get_mut(&resource.id)
+                            .expect("a timeline per resource");
+                        let span = 100 + rng.below(2_500) as i64;
+                        let usage = 1 + rng.below(resource.capacity.max(1) as u64) as i32;
+                        if let Some(at) =
+                            timeline.earliest_fit(rng.below(8_000) as i64, span, usage)
+                        {
+                            timeline.book(at, at + span, usage);
+                            versions[k] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The comparison must have met every answer, and starts that move on.
+        assert!(remembered > 20_000, "only {remembered} remembered");
+        assert!(never > 2_000, "only {never} unplaceable");
+        assert!(declined > 1_000, "only {declined} declined at a low bound");
+        assert!(moved > 3_000, "only {moved} starts moved later");
+    }
+
     /// A problem of tasks of one to three activities on [`world`]'s resources, with now and
     /// then an activity of a kind the cheap query declines, a predecessor across tasks, an
     /// activity that holds no resource, or a world that declines everything.
@@ -395,6 +477,27 @@ mod tests {
             }
         }
         assert!(valid > 200, "only {valid} of 260 problems were valid");
+    }
+
+    /// The shop floor the memories are for -- activities in sequence on a machine pool and a
+    /// small operator pool, with the rules that read the queue -- scheduled with them and
+    /// without.
+    #[test]
+    fn the_dispatcher_with_memories_schedules_what_it_does_without() {
+        for (n, m) in [(40, 2), (120, 4), (300, 9)] {
+            let problem = factory(n, m);
+            for rule in 0..3 {
+                let now = dispatcher(rule, false, false).schedule(&problem, 0);
+                let without = dispatcher(rule, false, false)
+                    .without_offer_memos()
+                    .schedule(&problem, 0);
+                assert_eq!(
+                    format!("{now:?}"),
+                    format!("{without:?}"),
+                    "n {n} m {m} rule {rule}"
+                );
+            }
+        }
     }
 
     /// How long the dispatcher takes on `n` tasks of one machine activity each, all released
