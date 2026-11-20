@@ -34,6 +34,22 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   10 machines 20.7 s → 5.1 s; with one to three operations per job on a machine pool and a small operator pool, 2,000
   jobs on 5 machines 8.1 s → 4.1 s and on 20 machines 14.6 s → 12.6 s (the work still grows with the square of the
   number of jobs, and with the machines).
+- Dispatching asks an offer's start again at each decision only for the resources that were booked since: it keeps,
+  per offer, the earliest start each resource gave and goes on from the start found before (a booking only moves
+  starts later), where it asked every resource again from the ready time. This applies where the requirements of an
+  activity share no resource and the activity is of the kind whose start is found without placing it; the answer is
+  the one the full search gives, bound on its passes included. The schedules are unchanged (random problems with every
+  kind of activity, and a shop floor of three sizes under three rules, agree with scheduling without it; a test asks
+  the same offers again between random bookings). With one to three operations per job on a machine pool and a small
+  operator pool, 2,000 jobs on 20 machines: priority 11.5 s → 2.8 s, SPT 12.4 s → 3.8 s, WINQ then SPT 9.9 s → 3.8 s;
+  on 5 machines 3.5 s → 1.4 s, 5.5 s → 2.8 s, 4.8 s → 3.1 s. With one operation per job, 3,000 jobs on 10 machines
+  5.1 s → 2.3 s. The work at a decision still grows with the number of waiting jobs.
+- The queue at a task's next step (`SchedulingContext::next_queue_length`, read by WINQ) is counted over the distinct
+  sets of resources the waiting offers may use, not offer by offer for every competing job: the work at a decision
+  grew with competing jobs times waiting offers, and now with the offers plus the distinct sets. The schedules are
+  unchanged (a test compares the count with its definition on 600 random problems). With one to three operations per
+  job on a machine pool and a small operator pool, WINQ then SPT on 2,000 jobs: 5 machines 11.6 s → 4.8 s, 20 machines
+  14.6 s → 9.9 s.
 
 ### Fixed
 
