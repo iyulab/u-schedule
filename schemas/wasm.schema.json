@@ -170,6 +170,15 @@
           "default": 0.5,
           "format": "double",
           "type": "number"
+        },
+        "time_limit_ms": {
+          "default": null,
+          "description": "Wall-clock budget in milliseconds, at least 1. Absent: none. The search stops\nbetween two children once it is spent and returns the best schedule it has\n(`stop_reason` `\"time_limit\"`); a child costs the population's local search, so on\na large problem the run can pass the budget by about that much.",
+          "format": "int128",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

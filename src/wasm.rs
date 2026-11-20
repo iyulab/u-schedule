@@ -1698,6 +1698,14 @@ struct JobShopGaConfig {
     #[tsify(optional)]
     #[tsify(type = "number | null")]
     seed: Option<i128>,
+    /// Wall-clock budget in milliseconds, at least 1. Absent: none. The search stops
+    /// between two children once it is spent and returns the best schedule it has
+    /// (`stop_reason` `"time_limit"`); a child costs the population's local search, so on
+    /// a large problem the run can pass the budget by about that much.
+    #[serde(default, deserialize_with = "optional_whole")]
+    #[tsify(optional)]
+    #[tsify(type = "number | null")]
+    time_limit_ms: Option<i128>,
     #[serde(default = "default_tardiness_weight")]
     #[tsify(optional)]
     tardiness_weight: f64,
@@ -1721,6 +1729,7 @@ impl Default for JobShopGaConfig {
             local_search_steps: default_local_search_steps(),
             mutation_rate: default_mutation_rate(),
             seed: None,
+            time_limit_ms: None,
             tardiness_weight: default_tardiness_weight(),
             crossover: default_crossover_type(),
             mutation: default_mutation_type(),
@@ -1855,6 +1864,7 @@ struct GaCounts {
     max_generations: usize,
     local_search_steps: usize,
     seed: Option<u64>,
+    time_limit_ms: Option<u64>,
 }
 
 /// Validates `JobShopGaConfig` fields before they are passed to `GaConfig`.
@@ -1869,6 +1879,10 @@ fn validate_ga_config(cfg: &JobShopGaConfig) -> Result<GaCounts, WireError> {
         seed: cfg
             .seed
             .map(|seed| whole_in("ga_config.seed", seed, 0, u64::MAX.into()))
+            .transpose()?,
+        time_limit_ms: cfg
+            .time_limit_ms
+            .map(|limit| count("ga_config.time_limit_ms", limit, 1).map(|ms| ms as u64))
             .transpose()?,
     };
     if !(0.0..=1.0).contains(&cfg.mutation_rate) {
@@ -2168,6 +2182,9 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
 
     if let Some(seed) = counts.seed {
         config = config.with_seed(seed);
+    }
+    if let Some(ms) = counts.time_limit_ms {
+        config = config.with_time_limit_ms(ms);
     }
 
     // Defence-in-depth: call GaConfig's own validation as well.
@@ -3426,6 +3443,7 @@ mod tests {
                 max_generations: 30,
                 mutation_rate: 0.1,
                 seed: Some(seed),
+                time_limit_ms: None,
                 tardiness_weight: 0.0,
                 crossover: "POX".to_string(),
                 mutation: "Swap".to_string(),
@@ -3629,6 +3647,7 @@ mod tests {
                 max_generations,
                 mutation_rate: 0.1,
                 seed: Some(42),
+                time_limit_ms: None,
                 tardiness_weight: 0.0,
                 crossover: "POX".to_string(),
                 mutation: "Swap".to_string(),
@@ -3700,6 +3719,7 @@ mod tests {
                 max_generations: 30,
                 mutation_rate: 0.1,
                 seed: Some(42),
+                time_limit_ms: None,
                 tardiness_weight: 0.0,
                 crossover: "POX".to_string(),
                 mutation: "Swap".to_string(),
@@ -3755,6 +3775,7 @@ mod tests {
                 population_size: 20,
                 max_generations: 20,
                 seed: Some(7),
+                time_limit_ms: None,
                 tardiness_weight: 1.0,
                 ..JobShopGaConfig::default()
             },
@@ -4066,6 +4087,7 @@ mod tests {
             max_generations: 10,
             mutation_rate: 0.1,
             seed: Some(42),
+            time_limit_ms: None,
             tardiness_weight: 0.0,
             crossover: "POX".to_string(),
             mutation: "Swap".to_string(),
@@ -4098,6 +4120,7 @@ mod tests {
                 max_generations: 5,
                 mutation_rate: 0.1,
                 seed: Some(1),
+                time_limit_ms: None,
                 tardiness_weight: 0.0,
                 crossover: "POX".to_string(),
                 mutation: "Swap".to_string(),
@@ -4498,6 +4521,69 @@ mod whole_number_tests {
         jobshop(&from_json::<JobShopInput>(input, "problem")?)
     }
 
+    /// `n` jobs of four steps on six machines: a run of many generations takes far longer than
+    /// a few hundred milliseconds.
+    fn busy_jobshop(n: usize, ga_config: serde_json::Value) -> serde_json::Value {
+        let jobs: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                let operations: Vec<serde_json::Value> = (0..4)
+                    .map(|k| {
+                        json!({
+                            "machine": format!("M{}", (i * 3 + k * 5) % 6 + 1),
+                            "processing_time": 1.0 + ((i + k) % 7) as f64,
+                        })
+                    })
+                    .collect();
+                json!({ "id": format!("J{i}"), "operations": operations })
+            })
+            .collect();
+        json!({ "jobs": jobs, "ga_config": ga_config })
+    }
+
+    #[test]
+    fn a_time_limit_below_one_is_refused() {
+        for got in [-1, 0] {
+            let err = jobshop_with(json!({ "ga_config": { "time_limit_ms": got } }))
+                .expect_err("below 1");
+            assert_eq!(
+                err.fields,
+                out_of_range("ga_config.time_limit_ms", 1.0, got as f64)
+            );
+        }
+        assert!(jobshop_with(json!({ "ga_config": { "time_limit_ms": null } })).is_ok());
+        assert!(jobshop_with(json!({ "ga_config": { "time_limit_ms": 5_000 } })).is_ok());
+    }
+
+    /// A search that would run for minutes stops at the limit with the best schedule it has, every
+    /// step placed, and says why; without a limit the same search runs its generations.
+    #[test]
+    fn the_time_limit_stops_the_search_and_leaves_a_schedule() {
+        let limited = busy_jobshop(
+            80,
+            json!({ "population_size": 30, "max_generations": 100_000, "seed": 1, "time_limit_ms": 300 }),
+        );
+        let started = std::time::Instant::now();
+        let out = jobshop(&from_json::<JobShopInput>(limited, "problem").expect("input"))
+            .expect("solved");
+        let took = started.elapsed();
+        assert_eq!(out.stop_reason, StopReason::TimeLimit);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "300 ms limit, took {took:?}"
+        );
+        assert_eq!(out.schedule.len(), 320, "every step placed");
+        assert!(out.makespan > 0.0);
+
+        let unlimited = busy_jobshop(
+            6,
+            json!({ "population_size": 6, "max_generations": 3, "seed": 1 }),
+        );
+        let out = jobshop(&from_json::<JobShopInput>(unlimited, "problem").expect("input"))
+            .expect("solved");
+        assert_eq!(out.stop_reason, StopReason::IterationLimit);
+        assert_eq!(out.generations, 3);
+    }
+
     fn out_of_range(parameter: &str, min: f64, got: f64) -> serde_json::Value {
         json!({ "code": "parameter_out_of_range", "parameter": parameter,
                 "min": min, "max": null, "got": got })
@@ -4608,6 +4694,7 @@ mod whole_number_tests {
                 max_generations: 1,
                 local_search_steps: 60,
                 seed: Some(42),
+                time_limit_ms: None,
             }
         );
         assert_eq!(
@@ -4617,6 +4704,7 @@ mod whole_number_tests {
                 max_generations: 200,
                 local_search_steps: 60,
                 seed: None,
+                time_limit_ms: None,
             }
         );
         assert!(jobshop_with(json!({ "num_machines": 3, "ga_config": { "seed": null } })).is_ok());

@@ -830,6 +830,14 @@ and a readable `message`; `makespan_mismatch` carries `reported` and `actual`.
 | `mutation_rate` | 0.0 -- 1.0 | 0.1 |
 | `tardiness_weight` | 0.0 -- 1.0 | 0.5 |
 | `seed` | optional, a whole number from 0 to 2^64 − 1 | random |
+| `time_limit_ms` | optional, a whole number >= 1 (milliseconds) | none |
+
+A run decodes about `population_size × max_generations × (1 + local_search_steps)` schedules, and the
+call is synchronous: 300 jobs of four steps on eight machines with a population of 30 and 30 generations takes
+about two minutes. Set `time_limit_ms` to bound it: the search stops between two children once the budget is
+spent and returns the best schedule it has (`stop_reason` `"time_limit"`); one child costs its local search,
+so on a large problem the run can pass the budget by about that much. Lowering `local_search_steps` (0 turns
+it off) makes every generation cheaper.
 
 #### Errors
 
