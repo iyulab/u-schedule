@@ -50,6 +50,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   unchanged (a test compares the count with its definition on 600 random problems). With one to three operations per
   job on a machine pool and a small operator pool, WINQ then SPT on 2,000 jobs: 5 machines 11.6 s → 4.8 s, 20 machines
   14.6 s → 9.9 s.
+- Dispatching finds the start of an offer in a closed form once the offer is asked from after the start of the last
+  booking of every resource it may take, where each has one unit and no calendar: such a resource is free from the end
+  of its latest booking, so the start is the latest of that time and the times from which the resources of each
+  requirement are free. These are found once for all offers that ask the same of the same resources, not once per
+  offer. The schedules are unchanged (pinned by comparisons with the search from the ready time on random ledgers:
+  bookings ahead of and behind the time asked from, offers of no length, bounds of one to six passes). 2,000 jobs on
+  20 machines: priority 2.9 s → 0.7 s, shortest processing time 3.8 s → 1.5 s; 6,000 jobs: 34 s → 17 s and 46 s → 29 s.
+  The work still grows with the square of the number of jobs.
 
 ### Fixed
 

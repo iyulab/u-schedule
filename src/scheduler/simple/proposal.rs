@@ -20,7 +20,9 @@ use super::{SimpleScheduler, MAX_FIXED_POINT_ITERS};
 use crate::models::{Activity, Resource};
 use crate::scheduler::timeline::ResourceTimeline;
 
+mod books;
 mod memo;
+pub(super) use books::Books;
 pub(super) use memo::Memo;
 
 /// What the cheap query knows about an offer's start.
@@ -306,7 +308,7 @@ mod tests {
             for cap in [MAX_FIXED_POINT_ITERS, 3, 1] {
                 let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
                 let (resources, mut timelines) = world(&mut rng);
-                let mut versions = vec![0u32; resources.len()];
+                let mut books = Books::new(resources.len());
                 let cheap = Cheap::new(&scheduler, &resources).with_max_passes(cap);
                 let mut offers: Vec<(Activity, i64, usize, Option<Memo>)> = (0..3)
                     .map(|_| (activity(&mut rng), rng.below(7_000) as i64, 0, None))
@@ -323,7 +325,7 @@ mod tests {
                     for (k, (act, ready, cursor, memo)) in offers.iter_mut().enumerate() {
                         let want = cheap.start(act, None, &timelines, &resources, *ready);
                         let got = cheap.start_remembering(
-                            memo, *cursor, act, None, &timelines, &resources, &versions, *ready,
+                            memo, *cursor, act, None, &timelines, &resources, &mut books, *ready,
                         );
                         assert_eq!(
                             got, want,
@@ -349,7 +351,7 @@ mod tests {
                             timeline.earliest_fit(rng.below(8_000) as i64, span, usage)
                         {
                             timeline.book(at, at + span, usage);
-                            versions[k] += 1;
+                            books.booked(k);
                         }
                     }
                 }
@@ -360,6 +362,221 @@ mod tests {
         assert!(never > 2_000, "only {never} unplaceable");
         assert!(declined > 1_000, "only {declined} declined at a low bound");
         assert!(moved > 3_000, "only {moved} starts moved later");
+    }
+
+    /// Machines of one unit round the clock -- the kind the tail answers for -- booked the way a
+    /// dispatcher books (starts never go back), and now and then one that breaks it: a booking
+    /// of no length, two that start together.
+    fn plain_world(rng: &mut Lcg) -> (Vec<Resource>, HashMap<String, ResourceTimeline>) {
+        let mut resources: Vec<Resource> = Vec::new();
+        for (kind, count) in [("Machine", 1 + rng.below(6)), ("Operator", rng.below(3))] {
+            for k in 0..count {
+                resources.push(Resource::new(format!("{kind}{k}"), kind));
+            }
+        }
+        let mut timelines: HashMap<String, ResourceTimeline> = resources
+            .iter()
+            .map(|r| (r.id.clone(), ResourceTimeline::new(r)))
+            .collect();
+        for r in &resources {
+            let tl = timelines.get_mut(&r.id).expect("a timeline per resource");
+            let mut at = rng.below(500) as i64;
+            for _ in 0..rng.below(8) {
+                let len = if rng.chance(10) {
+                    0
+                } else {
+                    100 + rng.below(2_500) as i64
+                };
+                tl.book(at, at + len, 1);
+                // The next one starts at the end, later, or -- now and then -- together.
+                at += match rng.below(8) {
+                    0 => 0,
+                    1..=4 => len,
+                    _ => len + rng.below(1_500) as i64,
+                };
+            }
+        }
+        (resources, timelines)
+    }
+
+    /// An activity of the kinds [`plain_world`] has: of one unit of each resource but now and then,
+    /// and now and then of no length.
+    fn plain_activity(rng: &mut Lcg) -> Activity {
+        let mut a = activity(rng);
+        for req in &mut a.resource_requirements {
+            if !rng.chance(12) {
+                req.usage = 1;
+            }
+        }
+        if rng.chance(8) {
+            a.duration = ActivityDuration {
+                setup_ms: 0,
+                process_ms: 0,
+                teardown_ms: 0,
+            };
+        }
+        a
+    }
+
+    /// When an offer is ready: before the bookings end, as often as past them.
+    fn ready_of(rng: &mut Lcg) -> i64 {
+        let horizon = if rng.chance(2) { 4_000 } else { 20_000 };
+        rng.below(horizon) as i64
+    }
+
+    /// Past the end of the bookings the start comes from the tails of the resources, and is
+    /// the start asked afresh: offers on a ledger that grows the way a dispatcher's does are asked
+    /// after each round of bookings -- bookings that start at the time asked from, ones far ahead
+    /// (a start past it) and ones in a hole behind -- at every bound on the passes.
+    #[test]
+    fn the_tail_gives_the_start_asked_afresh() {
+        let scheduler = SimpleScheduler::new();
+        let (mut from_the_tail, mut asked, mut never, mut declined) = (0, 0, 0, 0);
+        for seed in 0..3_000u64 {
+            for cap in [MAX_FIXED_POINT_ITERS, 5, 2, 1] {
+                let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let (resources, mut timelines) = plain_world(&mut rng);
+                let mut books = Books::new(resources.len());
+                let cheap = Cheap::new(&scheduler, &resources).with_max_passes(cap);
+                let mut offers: Vec<(Activity, i64, usize, Option<Memo>)> = (0..4)
+                    .map(|_| (plain_activity(&mut rng), ready_of(&mut rng), 0, None))
+                    .collect();
+                let mut frontier = 0i64;
+                for round in 0..12 {
+                    if round == 6 {
+                        for offer in &mut offers {
+                            let memo = offer.3.take();
+                            *offer = (plain_activity(&mut rng), ready_of(&mut rng), 1, memo);
+                        }
+                    }
+                    for (k, (act, ready, cursor, memo)) in offers.iter_mut().enumerate() {
+                        let want = cheap.start(act, None, &timelines, &resources, *ready);
+                        let got = cheap.start_remembering(
+                            memo, *cursor, act, None, &timelines, &resources, &mut books, *ready,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "seed {seed} cap {cap} round {round} offer {k}: {act:?} ready {ready}"
+                        );
+                        asked += 1;
+                        never += usize::from(got == Start::Never);
+                        declined += usize::from(got == Start::Declined && cap < 10_000);
+                    }
+                    frontier += rng.below(1_200) as i64;
+                    for _ in 0..1 + rng.below(3) {
+                        let k = rng.below(resources.len() as u64) as usize;
+                        let timeline = timelines
+                            .get_mut(&resources[k].id)
+                            .expect("a timeline per resource");
+                        let span = rng.below(2_500) as i64;
+                        let at = match rng.below(10) {
+                            // Behind, in a hole if there is one.
+                            0 => timeline
+                                .earliest_fit(rng.below(frontier as u64 + 1) as i64, span.max(1), 1)
+                                .expect("one unit fits"),
+                            // Far ahead: what a fixed booking or a part leaves.
+                            1 if rng.chance(3) => frontier + 3_000 + rng.below(3_000) as i64,
+                            // Where the dispatcher is.
+                            _ => timeline
+                                .latest_start()
+                                .map_or(frontier, |s| s.max(frontier)),
+                        };
+                        timeline.book(at, at + span, 1);
+                        books.booked(k);
+                    }
+                }
+                from_the_tail += books.from_the_tail;
+            }
+        }
+        // The comparison must have met the tail's answers, and the other ones too.
+        assert!(
+            from_the_tail > 20_000,
+            "only {from_the_tail} from the tail of {asked}"
+        );
+        assert!(never > 1_000, "only {never} unplaceable");
+        assert!(declined > 500, "only {declined} declined at a low bound");
+    }
+
+    /// Two machines and two operators, booked in short stretches, and offers that need one of
+    /// each: the search from the ready time hops between the two pools and needs many passes. With
+    /// a bound of three to six on them, an answer that came from the tail -- when there were few
+    /// bookings -- must not outlive it: once the bookings are many, and a booking ahead of the
+    /// offer shuts the tail, the memory begins afresh and gives what the search gives, a
+    /// declined start included.
+    #[test]
+    fn a_start_from_the_tail_does_not_outlive_the_bound_on_the_passes() {
+        let scheduler = SimpleScheduler::new();
+        let (mut from_the_tail, mut declined, mut placed) = (0, 0, 0);
+        for seed in 0..6_000u64 {
+            for cap in [3, 4, 6] {
+                let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let resources: Vec<Resource> = [("Machine", 2), ("Operator", 2)]
+                    .into_iter()
+                    .flat_map(|(kind, count)| {
+                        (0..count).map(move |k| Resource::new(format!("{kind}{k}"), kind))
+                    })
+                    .collect();
+                let mut timelines: HashMap<String, ResourceTimeline> = resources
+                    .iter()
+                    .map(|r| (r.id.clone(), ResourceTimeline::new(r)))
+                    .collect();
+                let mut books = Books::new(resources.len());
+                let cheap = Cheap::new(&scheduler, &resources).with_max_passes(cap);
+                let mut offers: Vec<(Activity, i64, Option<Memo>)> = (0..3)
+                    .map(|_| {
+                        let a = Activity::new("A", "T", 0)
+                            .with_duration(ActivityDuration {
+                                setup_ms: 0,
+                                process_ms: 60 + rng.below(240) as i64,
+                                teardown_ms: 0,
+                            })
+                            .with_requirement(ResourceRequirement::new("Machine"))
+                            .with_requirement(ResourceRequirement::new("Operator"));
+                        (a, rng.below(500) as i64, None)
+                    })
+                    .collect();
+                let mut frontier = 0i64;
+                for round in 0..16 {
+                    for (k, (act, ready, memo)) in offers.iter_mut().enumerate() {
+                        let want = cheap.start(act, None, &timelines, &resources, *ready);
+                        let got = cheap.start_remembering(
+                            memo, 0, act, None, &timelines, &resources, &mut books, *ready,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "seed {seed} cap {cap} round {round} offer {k}: ready {ready}"
+                        );
+                        declined += usize::from(got == Start::Declined);
+                        placed += usize::from(matches!(got, Start::At(_)));
+                    }
+                    frontier += rng.below(300) as i64;
+                    for _ in 0..1 + rng.below(3) {
+                        let k = rng.below(resources.len() as u64) as usize;
+                        let timeline = timelines
+                            .get_mut(&resources[k].id)
+                            .expect("a timeline per resource");
+                        let span = 40 + rng.below(300) as i64;
+                        let at = match rng.below(6) {
+                            // A stretch ahead of the offers' times: the tail is shut.
+                            0 => frontier + 400 + rng.below(1_200) as i64,
+                            // A stretch in a hole.
+                            1 => timeline
+                                .earliest_fit(rng.below(frontier as u64 + 1) as i64, span, 1)
+                                .expect("one unit fits"),
+                            _ => timeline
+                                .latest_start()
+                                .map_or(frontier, |s| s.max(frontier)),
+                        };
+                        timeline.book(at, at + span, 1);
+                        books.booked(k);
+                    }
+                }
+                from_the_tail += books.from_the_tail;
+            }
+        }
+        assert!(from_the_tail > 5_000, "only {from_the_tail} from the tail");
+        assert!(declined > 2_000, "only {declined} declined");
+        assert!(placed > 20_000, "only {placed} placed");
     }
 
     /// A problem of tasks of one to three activities on [`world`]'s resources, with now and
@@ -580,7 +797,13 @@ mod tests {
     #[test]
     #[ignore = "a measurement: run it in release"]
     fn dispatch_at_scale_factory() {
-        for (n, m) in [(1_000, 5), (2_000, 5), (2_000, 20)] {
+        for (n, m) in [
+            (1_000, 5),
+            (2_000, 5),
+            (2_000, 20),
+            (4_000, 20),
+            (6_000, 20),
+        ] {
             let problem = factory(n, m);
             for (rule, name) in [(0, "priority"), (1, "SPT"), (2, "WINQ+SPT")] {
                 let started = std::time::Instant::now();

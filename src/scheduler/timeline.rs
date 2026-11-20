@@ -214,6 +214,23 @@ impl ResourceTimeline {
         self.latest_end_to.last().copied()
     }
 
+    /// Start of the booking that starts last, if any.
+    pub(crate) fn latest_start(&self) -> Option<i64> {
+        self.bookings.last().map(|(b, _)| b.start_ms)
+    }
+
+    /// How many bookings the ledger holds.
+    pub(crate) fn booking_count(&self) -> usize {
+        self.bookings.len()
+    }
+
+    /// Whether this is a resource of one unit working round the clock -- the kind whose
+    /// earliest fit past the start of its last booking is the end of its latest one
+    /// (see [`earliest_fit`](Self::earliest_fit)).
+    pub(crate) fn is_plain_unit(&self) -> bool {
+        self.capacity == 1 && self.calendar.is_none()
+    }
+
     /// Units that can be booked at once.
     pub fn capacity(&self) -> i32 {
         self.capacity
