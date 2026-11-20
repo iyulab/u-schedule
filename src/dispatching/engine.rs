@@ -37,6 +37,9 @@ struct WeightedRule {
     weight: f64,
 }
 
+/// The relative gap under which two scores are tied ([`RuleEngine`]'s default).
+pub(crate) const DEFAULT_EPSILON: f64 = 1e-9;
+
 /// A composable rule engine for task prioritization.
 ///
 /// Supports sequential multi-layer evaluation (primary rule → tie-breaker)
@@ -77,7 +80,7 @@ impl RuleEngine {
             rules: Vec::new(),
             mode: EvaluationMode::Sequential,
             tie_breaker: TieBreaker::NextRule,
-            epsilon: 1e-9,
+            epsilon: DEFAULT_EPSILON,
         }
     }
 

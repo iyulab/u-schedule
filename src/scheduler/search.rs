@@ -1,8 +1,9 @@
 //! Searching the order dispatching takes the tasks in.
 //!
 //! A biased random-key genetic algorithm gives each activity a key; a
-//! chromosome is decoded by [`SimpleScheduler`] with the keys as its rule (the
-//! task whose next activity has the lower key wins each decision), so every decoded schedule keeps everything the
+//! chromosome is decoded by [`SimpleScheduler`] deciding by the keys (the
+//! task whose next activity has the lower key wins each decision, with no rule
+//! to evaluate and no context to build), so every decoded schedule keeps everything the
 //! dispatcher keeps — calendars, several requirements at once, usages,
 //! companions, transport times, releases. The search returns the best of the
 //! keyed schedules and the scheduler's own (its configured rules), so it is
@@ -15,15 +16,10 @@
 //! Resende & Mendes (2011), "A biased random-key genetic algorithm with
 //! forward-backward improvement for the RCPSP", *J. Heuristics* 17.
 
-use std::collections::HashMap;
-
 use u_metaheur::brkga::{BrkgaConfig, BrkgaDecoder, BrkgaRunner};
 use u_metaheur::{ConfigError, StopReason};
 
 use super::SimpleScheduler;
-use crate::dispatching::{
-    ContextFields, DispatchingRule, RuleEngine, RuleScore, SchedulingContext,
-};
 use crate::models::{Schedule, Task};
 use crate::Problem;
 
@@ -150,22 +146,16 @@ struct Decoder<'a> {
 impl Decoder<'_> {
     fn schedule(&self, keys: &[f64]) -> Schedule {
         let mut keys = keys.iter().copied();
-        let rule = KeyRule(
-            self.problem
-                .tasks()
-                .iter()
-                .map(|t| {
-                    (
-                        t.id.clone(),
-                        keys.by_ref().take(t.activities.len()).collect(),
-                    )
-                })
-                .collect(),
-        );
+        let by_task: Vec<Vec<f64>> = self
+            .problem
+            .tasks()
+            .iter()
+            .map(|t| keys.by_ref().take(t.activities.len()).collect())
+            .collect();
         self.search
             .scheduler
             .clone()
-            .with_rule_engine(RuleEngine::new().with_rule(rule))
+            .with_decision_keys(by_task)
             .schedule(self.problem, self.start_time_ms)
     }
 }
@@ -199,38 +189,6 @@ impl BrkgaDecoder for Decoder<'_> {
     }
 }
 
-/// The lower key first: each task's key for the activity it would start
-/// next (its first, when the decision does not say).
-#[derive(Debug)]
-struct KeyRule(HashMap<String, Vec<f64>>);
-
-impl DispatchingRule for KeyRule {
-    fn name(&self) -> &'static str {
-        "KEY"
-    }
-
-    fn reads(&self) -> ContextFields {
-        ContextFields::IMMINENT_ACTIVITY
-    }
-
-    fn evaluate(&self, task: &Task, context: &SchedulingContext) -> RuleScore {
-        let next = context
-            .imminent_activity
-            .get(&task.id)
-            .copied()
-            .unwrap_or(0);
-        self.0
-            .get(&task.id)
-            .and_then(|keys| keys.get(next))
-            .copied()
-            .unwrap_or(f64::INFINITY)
-    }
-
-    fn description(&self) -> &'static str {
-        "the search key of the task's next activity, lower first"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +219,66 @@ mod tests {
             .with_population_size(20)
             .with_max_generations(20)
             .with_seed(7)
+    }
+
+    /// How long one decode of the search takes on shop-floor shaped problems (1 to 3 activities
+    /// a job, a machine pool and a small operator pool), against dispatching by priority: a
+    /// measurement, `cargo test --release --lib decode_cost_at_scale -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn decode_cost_at_scale() {
+        let mut state = 12345u64;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        for (n, m) in [(1_000usize, 20usize), (2_000, 20), (4_000, 20)] {
+            let mut resources: Vec<Resource> = (0..m)
+                .map(|k| Resource::new(format!("M{k}"), "Machine"))
+                .collect();
+            resources.extend((0..3).map(|k| Resource::new(format!("W{k}"), "Operator")));
+            let tasks: Vec<Task> = (0..n)
+                .map(|i| {
+                    let mut task = Task::new(format!("T{i}")).with_priority(next(5) as i32);
+                    for s in 0..1 + next(3) {
+                        let mut a = Activity::new(format!("T{i}-{s}"), format!("T{i}"), s as i32)
+                            .with_process_time(300 + next(30) as i64 * 100)
+                            .with_requirement(ResourceRequirement::new("Machine"));
+                        if next(3) == 0 {
+                            a = a.with_requirement(ResourceRequirement::new("Operator"));
+                        }
+                        task = task.with_activity(a);
+                    }
+                    task
+                })
+                .collect();
+            let problem = Problem::new(tasks, resources).expect("valid");
+            let search = DispatchSearch::new(SimpleScheduler::new(), config());
+            let decoder = Decoder {
+                search: &search,
+                problem: &problem,
+                start_time_ms: 0,
+            };
+            let keys: Vec<f64> = (0..problem
+                .tasks()
+                .iter()
+                .map(|t| t.activities.len())
+                .sum::<usize>())
+                .map(|_| next(1_000) as f64 / 1_000.0)
+                .collect();
+            let t = std::time::Instant::now();
+            let keyed = decoder.schedule(&keys);
+            let keyed_s = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let _cost = cost(&keyed, problem.tasks(), 0.0);
+            let cost_s = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let _own = SimpleScheduler::new().schedule(&problem, 0);
+            let prio_s = t.elapsed().as_secs_f64();
+            eprintln!("n={n:>5} m={m} decode by keys {keyed_s:.2} s (cost {cost_s:.4} s) · dispatching by priority {prio_s:.2} s");
+        }
     }
 
     #[test]

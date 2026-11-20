@@ -28,6 +28,7 @@ pub(crate) mod policy;
 pub mod rules;
 
 pub use context::{ContextFields, SchedulingContext};
+pub(crate) use engine::DEFAULT_EPSILON;
 pub use engine::{EvaluationMode, RuleEngine, TieBreaker};
 pub use policy::{Decision, RulePolicy};
 

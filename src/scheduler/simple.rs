@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use super::timeline::ResourceTimeline;
 use crate::dispatching::policy::SharedPolicy;
 use crate::dispatching::{
-    rules, ContextFields, Decision, RuleEngine, RulePolicy, SchedulingContext,
+    rules, ContextFields, Decision, RuleEngine, RulePolicy, SchedulingContext, DEFAULT_EPSILON,
 };
 use crate::models::{
     transport_between, Activity, Assignment, Part, Resource, Schedule, Task, TimeOnlySpan,
@@ -163,6 +163,10 @@ enum Rules {
     Engine(RuleEngine),
     /// An engine chosen for each decision.
     Policy(SharedPolicy),
+    /// The lowest key: per task, one key for each of its activities (the one of the activity
+    /// the decision would start next counts), looked up by position. What a rule that reads
+    /// nothing of the decision but such a key decides, without the rule engine and the context.
+    Keys(Vec<Vec<f64>>),
 }
 
 impl SimpleScheduler {
@@ -196,6 +200,17 @@ impl SimpleScheduler {
     /// Sets transition matrices.
     pub fn with_transition_matrices(mut self, matrices: TransitionMatrixCollection) -> Self {
         self.transition_matrices = matrices;
+        self
+    }
+
+    /// Decides each conflict by key: among the tasks that can start now, the one whose key for
+    /// the activity it would start next is lowest (`keys[task][activity]`, the tasks in the
+    /// order of the problem; scores within the rule engine's tolerance of each other are tied,
+    /// and a tie goes to the task listed first). The decision of a rule that reads nothing of
+    /// the state, without evaluating rules or building the context for them: what a search
+    /// over orders does at every decision of every schedule it tries.
+    pub(crate) fn with_decision_keys(mut self, keys: Vec<Vec<f64>>) -> Self {
+        self.rules = Rules::Keys(keys);
         self
     }
 
@@ -395,6 +410,7 @@ impl SimpleScheduler {
             Rules::Priority => ContextFields::NONE,
             Rules::Engine(engine) => engine.reads(),
             Rules::Policy(_) => ContextFields::ALL,
+            Rules::Keys(_) => ContextFields::NONE,
         };
         let mut quick: Vec<Option<i64>> = vec![None; tasks.len()];
         // Every activity passed so far, with when it ended — `None` for one
@@ -566,24 +582,29 @@ impl SimpleScheduler {
                 start_time_ms,
             );
             let candidates: Vec<usize> = conflict.iter().map(|&k| offers[k].0).collect();
-            let per_decision;
-            let engine = match &self.rules {
-                Rules::Priority => &by_priority,
-                Rules::Engine(engine) => engine,
-                Rules::Policy(policy) => {
-                    let waiting: Vec<usize> = offers.iter().map(|(i, _)| *i).collect();
-                    per_decision = policy.0.rules_for(&Decision {
-                        tasks,
-                        waiting: &waiting,
-                        competing: &candidates,
-                        context: &context,
-                    });
-                    &per_decision
-                }
+            let chosen = if let Rules::Keys(keys) = &self.rules {
+                lowest_key(keys, &candidates, &cursor)
+            } else {
+                let per_decision;
+                let engine = match &self.rules {
+                    Rules::Priority => &by_priority,
+                    Rules::Engine(engine) => engine,
+                    Rules::Policy(policy) => {
+                        let waiting: Vec<usize> = offers.iter().map(|(i, _)| *i).collect();
+                        per_decision = policy.0.rules_for(&Decision {
+                            tasks,
+                            waiting: &waiting,
+                            competing: &candidates,
+                            context: &context,
+                        });
+                        &per_decision
+                    }
+                    Rules::Keys(_) => unreachable!("decided by key above"),
+                };
+                engine
+                    .best_of(tasks, &candidates, &context)
+                    .expect("the conflict set is non-empty")
             };
-            let chosen = engine
-                .best_of(tasks, &candidates, &context)
-                .expect("the conflict set is non-empty");
             let k = offers
                 .iter()
                 .position(|(i, _)| *i == chosen)
@@ -1189,6 +1210,29 @@ fn time_only_span(
         Some(own) if activity.resumable => own.earliest_resumable(from, work, 1),
         Some(own) => own.earliest_fit(from, work, 1).map(|t| (t, t + work)),
     }
+}
+
+/// The candidate with the lowest key for the activity it would start next (`cursor[task]`):
+/// as [`RuleEngine::best_of`] decides for one rule that scores a task by that key -- a score
+/// beats the best so far only by more than the engine's relative tolerance, so a tie goes to
+/// the candidate listed first.
+fn lowest_key(keys: &[Vec<f64>], candidates: &[usize], cursor: &[usize]) -> usize {
+    let key = |i: usize| {
+        keys.get(i)
+            .and_then(|task| task.get(cursor[i]))
+            .copied()
+            .unwrap_or(f64::INFINITY)
+    };
+    let mut best = candidates[0];
+    let mut best_key = key(best);
+    for &i in &candidates[1..] {
+        let k = key(i);
+        if (k - best_key).abs() > DEFAULT_EPSILON * k.abs().max(best_key.abs()) && k < best_key {
+            best = i;
+            best_key = k;
+        }
+    }
+    best
 }
 
 /// The state a rule judges one decision on.
