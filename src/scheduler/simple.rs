@@ -56,7 +56,7 @@ use crate::Problem;
 
 mod proposal;
 
-use proposal::{Cheap, Memo, Start};
+use proposal::{Books, Cheap, Memo, Start};
 
 /// Safety bound for the serial-SGS fixed-point search.
 const MAX_FIXED_POINT_ITERS: usize = 10_000;
@@ -388,7 +388,7 @@ impl SimpleScheduler {
         // Per task: what its offer's last search found, to go on from, and how many times each
         // resource has been booked, which says whether what a search found of it still holds.
         let mut memos: Vec<Option<Memo>> = tasks.iter().map(|_| None).collect();
-        let mut versions: Vec<u32> = vec![0; resources.len()];
+        let mut books = Books::new(resources.len());
         // What the rules deciding read of the context: only that is built for a decision (a
         // policy reads it itself to choose the rules, so it gets all of it).
         let fields = match &self.rules {
@@ -490,7 +490,7 @@ impl SimpleScheduler {
                                 own,
                                 &timelines,
                                 resources,
-                                &versions,
+                                &mut books,
                                 ready[i],
                             )
                         } else {
@@ -629,7 +629,7 @@ impl SimpleScheduler {
                         .expect("selection references known resource");
                     tl.book(piece.start_ms, piece.end_ms, *usage);
                     // What an offer found of this resource is no longer known to hold.
-                    versions[position[resource_id.as_str()]] += 1;
+                    books.booked(position[resource_id.as_str()]);
                     let companion = piece.companions.contains(resource_id);
                     let mut assignment = Assignment::new(
                         &activity.id,
