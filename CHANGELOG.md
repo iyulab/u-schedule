@@ -18,6 +18,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   task in constant time, with the answers of `assignments_for_activity_all`, `time_only_for_activity` and
   `task_completion_time` (which look through every assignment each time, as they always did: asking about every task of
   a schedule is quadratic through them, linear through the index).
+- `solve_jobshop` takes `ga_config.time_limit_ms` (at least 1, a wall-clock budget in milliseconds): the search stops
+  between two children once it is spent and returns the best schedule it has, with `stop_reason` `"time_limit"`. The
+  call is synchronous and a run decodes about `population_size × max_generations × (1 + local_search_steps)`
+  schedules, so without a limit a large problem runs for minutes (300 jobs of four steps on eight machines, population
+  30, 30 generations: about two minutes). A child costs its local search, so a run can pass the budget by about that much.
 
 ### Changed
 
