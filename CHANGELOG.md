@@ -59,6 +59,14 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   every assignment each time: checking a schedule grows with its size, not with its square (16,000 jobs of two steps on
   20 machines: 20.9 s → 0.26 s; 2,000 jobs: 0.17 s → 0.02 s). The violations found are unchanged (compared on 2,500
   generated problems with schedules made wrong in eight ways).
+- Dispatching finds the start of an offer in a closed form once the offer is asked from after the start of the last
+  booking of every resource it may take, where each has one unit and no calendar: such a resource is free from the end
+  of its latest booking, so the start is the latest of that time and the times from which the resources of each
+  requirement are free. These are found once for all offers that ask the same of the same resources, not once per
+  offer. The schedules are unchanged (pinned by comparisons with the search from the ready time on random ledgers:
+  bookings ahead of and behind the time asked from, offers of no length, bounds of one to six passes). 2,000 jobs on
+  20 machines: priority 2.9 s → 0.7 s, shortest processing time 3.8 s → 1.5 s; 6,000 jobs: 34 s → 17 s and 46 s → 29 s.
+  The work still grows with the square of the number of jobs.
 
 ### Fixed
 

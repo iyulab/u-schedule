@@ -19,9 +19,16 @@
 //! the bound on the passes included: the passes made since the memory began are counted, and
 //! when they could add up to more than [`Cheap::start`] would be allowed, the memory begins
 //! afresh and the search is the one from the ready time.
+//!
+//! Past the start of the last booking of every resource an offer may take, no hole is left to
+//! look in: a resource of one unit round the clock is free from the end of its latest booking.
+//! Then the start is a sum of the resources' tails, read from [`Books`] -- the same for every
+//! offer of the same shape -- and neither the passes nor the versions are looked at
+//! ([`Memo::past_the_tail`]).
 
 use std::collections::HashMap;
 
+use super::books::Books;
 use super::{Cheap, Start};
 use crate::models::{Activity, Resource};
 use crate::scheduler::timeline::ResourceTimeline;
@@ -34,6 +41,8 @@ struct Want {
     usage: i32,
     /// The resources that can take it and still might start it.
     fits: Vec<Fit>,
+    /// Its shape in [`Books`], when the tail can answer for it: one unit of each resource.
+    shape: Option<usize>,
 }
 
 /// What a resource was last found to give a requirement.
@@ -68,6 +77,7 @@ impl Memo {
         cursor: usize,
         activity: &Activity,
         resources: &[Resource],
+        books: &mut Books,
         ready: i64,
     ) -> Option<Self> {
         let mut used = vec![false; resources.len()];
@@ -91,10 +101,16 @@ impl Memo {
                     });
                 }
             }
+            let quantity = req.quantity as usize;
+            // A requirement of more than one unit is never a shape: a resource of one unit
+            // cannot give it, and its fit is none.
+            let shape = (req.usage <= 1 && fits.len() >= quantity)
+                .then(|| books.shape_of(fits.iter().map(|fit| fit.position).collect(), quantity));
             wants.push(Want {
-                quantity: req.quantity as usize,
+                quantity,
                 usage: req.usage,
                 fits,
+                shape,
             });
         }
         Some(Self {
@@ -104,6 +120,62 @@ impl Memo {
             never: false,
             wants,
         })
+    }
+
+    /// The start of the offer when `from` is past the start of every last booking of the
+    /// resources it may take and each is of one unit round the clock; `None` when that is not
+    /// so, or when the search from the ready time might not have got there.
+    ///
+    /// Such a resource is free from `max(t, end of its latest booking)` on, for any `t` from
+    /// `from` and any span of positive length -- the one booking that can cover `t` ends there
+    /// and nothing starts after. So the earliest fit of the `quantity`-th resource of a
+    /// requirement is `max(t, tail)`, and the fixed point from `from` is the latest of `from`
+    /// and the tails: `from` is a floor under the start (the memory's argument above), so it is
+    /// the start the search from the ready time would find.
+    ///
+    /// That search runs out of passes, and is [`Start::Declined`], where the tail would answer.
+    /// Its passes are at most two when the offer asks one unit of one resource (the resource
+    /// that gave the fit still fits there), and else one for each end of a booking it can step
+    /// over, and one to see it stay. Beyond what the search is allowed this is not the
+    /// answer, and the memory goes on as before. Having answered from the tail, the memory
+    /// does not know how many passes lie behind its start, so `steps` is made to run out: the
+    /// next ask that does not come from the tail begins afresh, which is the search from the
+    /// ready time.
+    fn past_the_tail(
+        &mut self,
+        books: &mut Books,
+        timelines: &HashMap<String, ResourceTimeline>,
+        resources: &[Resource],
+        span: i64,
+        max_passes: usize,
+    ) -> Option<i64> {
+        if self.never || span <= 0 || self.wants.is_empty() {
+            return None;
+        }
+        let mut start = self.from;
+        let mut bookings = 0;
+        for want in &self.wants {
+            let shape = books.read(want.shape?, timelines, resources);
+            if !shape.plain || shape.last_start > self.from {
+                return None;
+            }
+            start = start.max(shape.tail);
+            bookings += shape.bookings;
+        }
+        let passes = match self.wants.as_slice() {
+            [only] if only.quantity == 1 => 2,
+            _ => bookings + 1,
+        };
+        if passes > max_passes {
+            return None;
+        }
+        self.from = start;
+        self.steps = usize::MAX;
+        #[cfg(test)]
+        {
+            books.from_the_tail += 1;
+        }
+        Some(start)
     }
 }
 
@@ -120,17 +192,19 @@ impl Cheap {
         own: Option<&ResourceTimeline>,
         timelines: &HashMap<String, ResourceTimeline>,
         resources: &[Resource],
-        versions: &[u32],
+        books: &mut Books,
         ready: i64,
     ) -> Start {
         if !self.plain_world || own.is_some() || !Self::plain(activity) {
             return Start::Declined;
         }
         let from = activity.release_time.map_or(ready, |r| ready.max(r));
+        let d = activity.duration;
+        let span = d.setup_ms + d.process_ms + d.teardown_ms;
         let mut fresh = false;
         let mut memo = match slot.take() {
             Some(memo) if memo.cursor == cursor => memo,
-            _ => match Memo::begin(cursor, activity, resources, from) {
+            _ => match Memo::begin(cursor, activity, resources, books, from) {
                 Some(memo) => {
                     fresh = true;
                     memo
@@ -139,7 +213,15 @@ impl Cheap {
             },
         };
         loop {
-            if let Some(start) = self.go_on(&mut memo, activity, timelines, resources, versions) {
+            if let Some(start) =
+                memo.past_the_tail(books, timelines, resources, span, self.max_passes)
+            {
+                *slot = Some(memo);
+                return Start::At(start);
+            }
+            if let Some(start) =
+                self.go_on(&mut memo, activity, timelines, resources, books.versions())
+            {
                 *slot = Some(memo);
                 return start;
             }
@@ -150,7 +232,7 @@ impl Cheap {
                 return Start::Declined;
             }
             fresh = true;
-            memo = Memo::begin(cursor, activity, resources, from)
+            memo = Memo::begin(cursor, activity, resources, books, from)
                 .expect("a memory that began once begins again");
         }
     }
