@@ -2215,19 +2215,18 @@ fn jobshop(input: &JobShopInput) -> Result<JobShopOutput, WireError> {
 
     // Completion and tardiness by the definition the fitness weighed.
     let mut total_tardiness_ms = 0;
+    let completions = best_schedule.index();
     let jobs = problem
         .tasks()
         .iter()
         .map(|task| {
-            let completion_ms = best_schedule
-                .task_completion_time(&task.id)
-                .ok_or_else(|| {
-                    WireError::new(
-                        Code::Internal,
-                        format!("internal: job '{}' has no step in the schedule", task.id),
-                        json!({}),
-                    )
-                })?;
+            let completion_ms = completions.task_completion_time(&task.id).ok_or_else(|| {
+                WireError::new(
+                    Code::Internal,
+                    format!("internal: job '{}' has no step in the schedule", task.id),
+                    json!({}),
+                )
+            })?;
             let tardiness_ms = task.tardiness_ms(completion_ms);
             total_tardiness_ms += tardiness_ms;
             Ok(JobShopJobResult {

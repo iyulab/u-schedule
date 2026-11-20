@@ -14,6 +14,10 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   is all of it). `SimpleScheduler` builds only those for each decision; the built-in rules and the search's own key rule
   declare theirs, and a policy that chooses the rules per decision gets the whole context. A rule that reads a part it
   did not declare sees it empty, so declare every field the rule touches.
+- `Schedule::index` and `ScheduleIndex`: the assignments and time-only spans of a schedule looked up by activity and by
+  task in constant time, with the answers of `assignments_for_activity_all`, `time_only_for_activity` and
+  `task_completion_time` (which look through every assignment each time, as they always did: asking about every task of
+  a schedule is quadratic through them, linear through the index).
 
 ### Changed
 
@@ -50,6 +54,11 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   unchanged (a test compares the count with its definition on 600 random problems). With one to three operations per
   job on a machine pool and a small operator pool, WINQ then SPT on 2,000 jobs: 5 machines 11.6 s → 4.8 s, 20 machines
   14.6 s → 9.9 s.
+- The feasibility check (`check_schedule`, and what `SimpleScheduler` and the searches run after a schedule is made), the
+  KPIs and the search cost ask the schedule about each activity and task through an index instead of looking through
+  every assignment each time: checking a schedule grows with its size, not with its square (16,000 jobs of two steps on
+  20 machines: 20.9 s → 0.26 s; 2,000 jobs: 0.17 s → 0.02 s). The violations found are unchanged (compared on 2,500
+  generated problems with schedules made wrong in eight ways).
 
 ### Fixed
 

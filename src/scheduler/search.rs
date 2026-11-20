@@ -133,9 +133,10 @@ impl DispatchSearch {
 /// schedule's clock.
 fn cost(schedule: &Schedule, tasks: &[Task], tardiness_weight: f64) -> f64 {
     let makespan = schedule.makespan_ms() as f64;
+    let index = schedule.index();
     let tardiness: i64 = tasks
         .iter()
-        .filter_map(|t| Some(t.tardiness_ms(schedule.task_completion_time(&t.id)?)))
+        .filter_map(|t| Some(t.tardiness_ms(index.task_completion_time(&t.id)?)))
         .sum();
     (1.0 - tardiness_weight) * makespan + tardiness_weight * tardiness as f64
 }

@@ -53,7 +53,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::models::{
-    transport_between, Activity, Assignment, Constraint, Part, Resource, Schedule, Task, Violation,
+    transport_between, Activity, Assignment, Constraint, Part, Resource, Schedule, ScheduleIndex,
+    Task, Violation,
 };
 
 /// One piece of an activity in a schedule: the activity, or one of its parts.
@@ -106,15 +107,18 @@ pub fn check_schedule(schedule: &Schedule, input: &FeasibilityInput) -> Vec<Viol
     let mut v = Vec::new();
     let res_by_id: HashMap<&str, &Resource> =
         input.resources.iter().map(|r| (r.id.as_str(), r)).collect();
+    // What the checks ask of the schedule by activity and by task is looked up in one place:
+    // asking the schedule itself looks through every assignment each time.
+    let idx = schedule.index();
     check_assignments(schedule, input, &res_by_id, &mut v);
     check_time_only(schedule, input, &mut v);
-    check_parts(schedule, input, &mut v);
-    check_requirements(schedule, input, &res_by_id, &mut v);
+    check_parts(&idx, input, &mut v);
+    check_requirements(&idx, input, &res_by_id, &mut v);
     check_capacity(schedule, input, &res_by_id, &mut v);
-    check_calendars(schedule, input, &res_by_id, &mut v);
-    check_precedence(schedule, input, &res_by_id, &mut v);
-    check_deadlines(schedule, input, &mut v);
-    check_constraints(schedule, input, &mut v);
+    check_calendars(schedule, &idx, input, &res_by_id, &mut v);
+    check_precedence(&idx, input, &res_by_id, &mut v);
+    check_deadlines(&idx, input, &mut v);
+    check_constraints(&idx, input, &mut v);
     v
 }
 
@@ -261,16 +265,16 @@ fn check_assignments(
 /// The parts of each split activity: at most `max_parts`, each a different
 /// one, doing together exactly its processing, each at least `min_part_ms` of
 /// it when there are several — and none beside a whole placement.
-fn check_parts(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+fn check_parts(idx: &ScheduleIndex<'_>, input: &FeasibilityInput, out: &mut Vec<Violation>) {
     for task in input.tasks {
         for activity in &task.activities {
             let Some(split) = &activity.split else {
                 continue;
             };
-            let assigns = schedule.assignments_for_activity_all(&activity.id);
+            let assigns = idx.assignments_for_activity_all(&activity.id);
             let mut parts: BTreeMap<i32, i64> = BTreeMap::new();
             let mut whole = false;
-            for a in &assigns {
+            for a in assigns {
                 match a.part {
                     None => whole = true,
                     Some(part) => {
@@ -449,7 +453,7 @@ fn check_time_only(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<
 }
 
 fn check_requirements(
-    schedule: &Schedule,
+    idx: &ScheduleIndex<'_>,
     input: &FeasibilityInput,
     res_by_id: &HashMap<&str, &Resource>,
     out: &mut Vec<Violation>,
@@ -462,7 +466,7 @@ fn check_requirements(
             // Each piece (the activity, or each of its parts) fills the
             // requirements on its own.
             let mut pieces: BTreeMap<Option<i32>, Vec<&Assignment>> = BTreeMap::new();
-            for a in schedule.assignments_for_activity_all(&activity.id) {
+            for &a in idx.assignments_for_activity_all(&activity.id) {
                 pieces.entry(a.part.map(|p| p.index)).or_default().push(a);
             }
             if pieces.is_empty() {
@@ -631,6 +635,7 @@ fn check_capacity(
 
 fn check_calendars(
     schedule: &Schedule,
+    idx: &ScheduleIndex<'_>,
     input: &FeasibilityInput,
     res_by_id: &HashMap<&str, &Resource>,
     out: &mut Vec<Violation>,
@@ -650,7 +655,7 @@ fn check_calendars(
             // of every resource it runs on, and that time within its span
             // covers the work.
             Some(activity) if activity.resumable => {
-                let runs_on: Vec<&str> = schedule
+                let runs_on: Vec<&str> = idx
                     .assignments_for_activity_all(&activity.id)
                     .iter()
                     .filter(|x| x.part.map(|p| p.index) == a.part.map(|p| p.index))
@@ -712,11 +717,11 @@ fn check_calendars(
 
 /// Activity span in the schedule: (min start, max end) across its
 /// assignments, or its time-only span.
-fn activity_span(schedule: &Schedule, activity_id: &str) -> Option<(i64, i64)> {
-    if let Some(span) = schedule.time_only_for_activity(activity_id) {
+fn activity_span(idx: &ScheduleIndex<'_>, activity_id: &str) -> Option<(i64, i64)> {
+    if let Some(span) = idx.time_only_for_activity(activity_id) {
         return Some((span.start_ms, span.end_ms));
     }
-    let assigns = schedule.assignments_for_activity_all(activity_id);
+    let assigns = idx.assignments_for_activity_all(activity_id);
     let start = assigns.iter().map(|a| a.start_ms).min()?;
     let end = assigns
         .iter()
@@ -727,17 +732,16 @@ fn activity_span(schedule: &Schedule, activity_id: &str) -> Option<(i64, i64)> {
 }
 
 fn check_precedence(
-    schedule: &Schedule,
+    idx: &ScheduleIndex<'_>,
     input: &FeasibilityInput,
     res_by_id: &HashMap<&str, &Resource>,
     out: &mut Vec<Violation>,
 ) {
     // `after` starts no earlier than `delay` after `before` ends.
     let end_to_start = |before: &str, after: &str, delay: i64| -> Option<Violation> {
-        let (Some((_, before_end)), Some((after_start, _))) = (
-            activity_span(schedule, before),
-            activity_span(schedule, after),
-        ) else {
+        let (Some((_, before_end)), Some((after_start, _))) =
+            (activity_span(idx, before), activity_span(idx, after))
+        else {
             return None;
         };
         (after_start < before_end + delay).then(|| {
@@ -750,8 +754,7 @@ fn check_precedence(
         })
     };
     let runs_on = |activity: &str| -> Vec<&str> {
-        schedule
-            .assignments_for_activity_all(activity)
+        idx.assignments_for_activity_all(activity)
             .iter()
             .map(|a| a.resource_id.as_str())
             .collect()
@@ -761,7 +764,7 @@ fn check_precedence(
     // work, which moves to its resources only.
     let pieces_of = |activity: &str| -> Vec<(i64, Vec<&str>)> {
         let mut by_part: BTreeMap<Option<i32>, (i64, Vec<&str>)> = BTreeMap::new();
-        for a in schedule.assignments_for_activity_all(activity) {
+        for a in idx.assignments_for_activity_all(activity) {
             let piece = by_part
                 .entry(a.part.map(|p| p.index))
                 .or_insert((a.start_ms, Vec::new()));
@@ -770,7 +773,7 @@ fn check_precedence(
         }
         if by_part.is_empty() {
             // Time only: it moves nowhere.
-            return activity_span(schedule, activity)
+            return activity_span(idx, activity)
                 .map(|(start, _)| (start, Vec::new()))
                 .into_iter()
                 .collect();
@@ -785,7 +788,7 @@ fn check_precedence(
         ordered.sort_by_key(|a| a.sequence);
         for pair in ordered.windows(2) {
             let (before, after) = (pair[0], pair[1]);
-            let Some(previous) = activity_span(schedule, &before.id) else {
+            let Some(previous) = activity_span(idx, &before.id) else {
                 continue;
             };
             let from = runs_on(&before.id);
@@ -820,8 +823,7 @@ fn check_precedence(
             }
             // Overlapping: it ends no earlier than the step before, plus the
             // lag and the move to where it runs.
-            if let (Some(overlap), Some((_, end))) =
-                (&after.overlap, activity_span(schedule, &after.id))
+            if let (Some(overlap), Some((_, end))) = (&after.overlap, activity_span(idx, &after.id))
             {
                 let to: Vec<&str> = pieces
                     .iter()
@@ -858,10 +860,10 @@ fn check_precedence(
     }
 }
 
-fn check_deadlines(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+fn check_deadlines(idx: &ScheduleIndex<'_>, input: &FeasibilityInput, out: &mut Vec<Violation>) {
     for task in input.tasks {
         if let (Some(deadline), Some(completion)) =
-            (task.deadline, schedule.task_completion_time(&task.id))
+            (task.deadline, idx.task_completion_time(&task.id))
         {
             if task.tardiness_ms(completion) > 0 {
                 out.push(Violation::deadline_miss(
@@ -876,7 +878,7 @@ fn check_deadlines(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<
     }
 }
 
-fn check_constraints(schedule: &Schedule, input: &FeasibilityInput, out: &mut Vec<Violation>) {
+fn check_constraints(idx: &ScheduleIndex<'_>, input: &FeasibilityInput, out: &mut Vec<Violation>) {
     for c in input.constraints {
         match c {
             Constraint::TimeWindow {
@@ -884,7 +886,7 @@ fn check_constraints(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
                 start_ms,
                 end_ms,
             } => {
-                if let Some((s, e)) = activity_span(schedule, activity_id) {
+                if let Some((s, e)) = activity_span(idx, activity_id) {
                     if s < *start_ms || e > *end_ms {
                         out.push(Violation::time_window(
                             activity_id,
@@ -902,8 +904,7 @@ fn check_constraints(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
                 let spans: Vec<(&str, i64, i64)> = activity_ids
                     .iter()
                     .filter_map(|id| {
-                        schedule
-                            .assignments_for_activity_all(id)
+                        idx.assignments_for_activity_all(id)
                             .iter()
                             .find(|a| &a.resource_id == resource_id)
                             .map(|a| (id.as_str(), a.start_ms, a.end_ms))
@@ -925,7 +926,7 @@ fn check_constraints(schedule: &Schedule, input: &FeasibilityInput, out: &mut Ve
             Constraint::Synchronize { activity_ids } => {
                 let starts: Vec<i64> = activity_ids
                     .iter()
-                    .filter_map(|id| activity_span(schedule, id).map(|(s, _)| s))
+                    .filter_map(|id| activity_span(idx, id).map(|(s, _)| s))
                     .collect();
                 if starts.len() == activity_ids.len() && starts.windows(2).any(|w| w[0] != w[1]) {
                     out.push(Violation::synchronize(
@@ -1663,5 +1664,60 @@ mod tests {
         let v = check_schedule(&s, &input);
         assert_eq!(v.len(), 1, "{v:?}");
         assert_eq!(v[0].violation_type, ViolationType::EarlyStart);
+    }
+
+    /// How long [`check_schedule`] takes on `n` jobs of two steps on twenty machines, laid one
+    /// after the other: the time should grow with `n`, not with its square. A measurement:
+    /// `cargo test --release --lib check_at_scale -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run it in release"]
+    fn check_at_scale() {
+        use crate::models::{Activity, ResourceRequirement};
+        for n in [2_000usize, 4_000, 8_000, 16_000] {
+            let resources: Vec<Resource> = (0..20)
+                .map(|k| Resource::new(format!("M{k}"), "Machine"))
+                .collect();
+            let tasks: Vec<Task> = (0..n)
+                .map(|i| {
+                    let mut task = Task::new(format!("J{i}")).with_deadline(50_000_000);
+                    for s in 0..2 {
+                        task = task.with_activity(
+                            Activity::new(format!("J{i}-{s}"), format!("J{i}"), s)
+                                .with_process_time(1_000)
+                                .with_requirement(ResourceRequirement::new("Machine")),
+                        );
+                    }
+                    task
+                })
+                .collect();
+            let mut schedule = Schedule::new();
+            for (k, task) in tasks.iter().enumerate() {
+                for (s, activity) in task.activities.iter().enumerate() {
+                    // The second steps all after the first ones.
+                    let slot = (s * n + k) as i64;
+                    let at = slot / 20 * 1_000;
+                    schedule.add_assignment(Assignment::new(
+                        &activity.id,
+                        &task.id,
+                        format!("M{}", slot % 20),
+                        at,
+                        at + 1_000,
+                    ));
+                }
+            }
+            let input = FeasibilityInput {
+                tasks: &tasks,
+                resources: &resources,
+                constraints: &[],
+            };
+            let started = std::time::Instant::now();
+            let violations = check_schedule(&schedule, &input);
+            eprintln!(
+                "n={n:>6} assignments={:>6} check {:>7.3} s  ({} violations)",
+                schedule.assignments.len(),
+                started.elapsed().as_secs_f64(),
+                violations.len()
+            );
+        }
     }
 }
