@@ -346,6 +346,9 @@ impl Schedule {
     }
 
     /// The time-only span of an activity ([`time_only`](Self::time_only)).
+    ///
+    /// Looks through every span; to ask about many activities, build an
+    /// [`index`](Self::index) once.
     pub fn time_only_for_activity(&self, activity_id: &str) -> Option<&TimeOnlySpan> {
         self.time_only.iter().find(|s| s.activity_id == activity_id)
     }
@@ -363,6 +366,9 @@ impl Schedule {
     }
 
     /// Returns all assignments for a given activity (one per held resource).
+    ///
+    /// Looks through every assignment; to ask about many activities, build an
+    /// [`index`](Self::index) once.
     pub fn assignments_for_activity_all(&self, activity_id: &str) -> Vec<&Assignment> {
         self.assignments
             .iter()
@@ -423,6 +429,9 @@ impl Schedule {
 
     /// Completion time for a task (latest end of its assignments and
     /// time-only spans).
+    ///
+    /// Looks through every assignment; to ask about many tasks, build an
+    /// [`index`](Self::index) once.
     pub fn task_completion_time(&self, task_id: &str) -> Option<i64> {
         self.assignments_for_task(task_id)
             .iter()
@@ -436,9 +445,73 @@ impl Schedule {
             .max()
     }
 
+    /// Looks the schedule's assignments and time-only spans up by activity
+    /// and by task: built once in one pass over them, then each lookup takes
+    /// constant time, where the lookups of the schedule itself look through
+    /// everything (asking about every task or activity of `n` of them is
+    /// then linear, not quadratic).
+    ///
+    /// It borrows the schedule, so the schedule cannot change while it is
+    /// held.
+    pub fn index(&self) -> ScheduleIndex<'_> {
+        let mut by_activity: HashMap<&str, Vec<&Assignment>> = HashMap::new();
+        let mut completion: HashMap<&str, i64> = HashMap::new();
+        for a in &self.assignments {
+            by_activity.entry(&a.activity_id).or_default().push(a);
+            completion
+                .entry(&a.task_id)
+                .and_modify(|end| *end = (*end).max(a.end_ms))
+                .or_insert(a.end_ms);
+        }
+        let mut time_only: HashMap<&str, &TimeOnlySpan> = HashMap::new();
+        for span in &self.time_only {
+            // The first of an activity's spans, as `time_only_for_activity` finds it.
+            time_only.entry(&span.activity_id).or_insert(span);
+            completion
+                .entry(&span.task_id)
+                .and_modify(|end| *end = (*end).max(span.end_ms))
+                .or_insert(span.end_ms);
+        }
+        ScheduleIndex {
+            by_activity,
+            time_only,
+            completion,
+        }
+    }
+
     /// Number of assignments.
     pub fn assignment_count(&self) -> usize {
         self.assignments.len()
+    }
+}
+
+/// A schedule's assignments and time-only spans looked up by activity and by
+/// task, in constant time ([`Schedule::index`]).
+///
+/// The answers are those of the same-named lookups of [`Schedule`].
+#[derive(Debug, Clone)]
+pub struct ScheduleIndex<'a> {
+    by_activity: HashMap<&'a str, Vec<&'a Assignment>>,
+    time_only: HashMap<&'a str, &'a TimeOnlySpan>,
+    completion: HashMap<&'a str, i64>,
+}
+
+impl<'a> ScheduleIndex<'a> {
+    /// All assignments of an activity (one per held resource, and one per
+    /// part), in the order they were added.
+    pub fn assignments_for_activity_all(&self, activity_id: &str) -> &[&'a Assignment] {
+        self.by_activity.get(activity_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The time-only span of an activity.
+    pub fn time_only_for_activity(&self, activity_id: &str) -> Option<&'a TimeOnlySpan> {
+        self.time_only.get(activity_id).copied()
+    }
+
+    /// Completion time of a task: the latest end of its assignments and
+    /// time-only spans.
+    pub fn task_completion_time(&self, task_id: &str) -> Option<i64> {
+        self.completion.get(task_id).copied()
     }
 }
 
@@ -572,5 +645,79 @@ mod tests {
 
         let v3 = Violation::precedence_violation("O2", "Started before O1");
         assert_eq!(v3.violation_type, ViolationType::PrecedenceViolation);
+    }
+
+    /// The index answers as the schedule's own lookups do, wherever they differ in how they
+    /// could: an activity held on several resources or placed in parts, two time-only spans
+    /// of one activity (the first one counts), a task that has only time-only spans, one that
+    /// has only assignments, and an id the schedule has never heard of.
+    #[test]
+    fn the_index_answers_as_the_schedule_does() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        for _ in 0..400 {
+            let mut s = Schedule::new();
+            for _ in 0..next(60) {
+                let (task, activity) = (next(7), next(12));
+                let start = next(5_000) as i64;
+                let mut a = Assignment::new(
+                    format!("A{activity}"),
+                    format!("T{task}"),
+                    format!("M{}", next(4)),
+                    start,
+                    start + next(900) as i64,
+                );
+                if next(5) == 0 {
+                    a = a.with_part(crate::models::Part {
+                        index: next(3) as i32,
+                        work_ms: 100,
+                    });
+                }
+                s.add_assignment(a);
+            }
+            for _ in 0..next(10) {
+                let start = next(5_000) as i64;
+                s.time_only.push(TimeOnlySpan::new(
+                    format!("A{}", 20 + next(6)),
+                    format!("T{}", next(9)),
+                    start,
+                    start + next(900) as i64,
+                ));
+            }
+            let index = s.index();
+            for activity in (0..32).map(|k| format!("A{k}")) {
+                let want: Vec<*const Assignment> = s
+                    .assignments_for_activity_all(&activity)
+                    .into_iter()
+                    .map(|a| a as *const Assignment)
+                    .collect();
+                let got: Vec<*const Assignment> = index
+                    .assignments_for_activity_all(&activity)
+                    .iter()
+                    .map(|&a| a as *const Assignment)
+                    .collect();
+                assert_eq!(got, want, "assignments of {activity}, in order");
+                assert_eq!(
+                    index.time_only_for_activity(&activity),
+                    s.time_only_for_activity(&activity),
+                    "time-only span of {activity}"
+                );
+            }
+            for task in (0..12).map(|k| format!("T{k}")) {
+                assert_eq!(
+                    index.task_completion_time(&task),
+                    s.task_completion_time(&task),
+                    "completion of {task}"
+                );
+            }
+            assert!(index.assignments_for_activity_all("nothing").is_empty());
+            assert_eq!(index.time_only_for_activity("nothing"), None);
+            assert_eq!(index.task_completion_time("nothing"), None);
+        }
     }
 }

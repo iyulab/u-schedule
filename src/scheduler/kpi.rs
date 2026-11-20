@@ -56,8 +56,9 @@ impl ScheduleKpi {
         let mut total_flow_time: f64 = 0.0;
         let mut counted_tasks: usize = 0;
 
+        let index = schedule.index();
         for task in tasks {
-            if let Some(completion) = schedule.task_completion_time(&task.id) {
+            if let Some(completion) = index.task_completion_time(&task.id) {
                 counted_tasks += 1;
 
                 // Flow time
