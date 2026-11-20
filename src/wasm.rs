@@ -1285,14 +1285,14 @@ fn output_jobs(
     problem: &Problem,
     schedule: &crate::models::Schedule,
 ) -> Result<Vec<OutputJob>, WireError> {
+    let tasks: std::collections::HashMap<&str, &Task> =
+        problem.tasks().iter().map(|t| (t.id.as_str(), t)).collect();
     schedule
         .assignments
         .iter()
         .map(|a| {
-            let task = problem
-                .tasks()
-                .iter()
-                .find(|t| t.id == a.task_id)
+            let task = tasks
+                .get(a.task_id.as_str())
                 .expect("an assignment names a task of the problem");
             let machine = a.resource_id[1..]
                 .parse()

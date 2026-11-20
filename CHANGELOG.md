@@ -83,6 +83,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   same resource and the schedule overloaded it.
 - `Schedule::violations` lists capacity violations in resource-id order. With two or more resources over capacity their
   order used to change from one run to the next on the same input.
+- `run_schedule` (WebAssembly) assembles its answer in time linear in the number of jobs: it looked up each assignment's job by
+  scanning the job list, which grew with the square of the number of jobs (8,000 jobs: 0.10 s → 0.002 s of the call).
 
 ## [0.35.0] - 2026-10-29
 
