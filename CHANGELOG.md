@@ -67,6 +67,12 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
   bookings ahead of and behind the time asked from, offers of no length, bounds of one to six passes). 2,000 jobs on
   20 machines: priority 2.9 s → 0.7 s, shortest processing time 3.8 s → 1.5 s; 6,000 jobs: 34 s → 17 s and 46 s → 29 s.
   The work still grows with the square of the number of jobs.
+- `DispatchSearch` decodes a chromosome by deciding each conflict by the keys directly (the task whose next activity has
+  the lowest key, a tie to the one listed first, with the rule engine's tolerance) instead of through a dispatching rule
+  that looked each task's key up by its id in two maps at every decision, with a context of the same kind built for it.
+  The schedules and the search's results are unchanged (compared with the rule on 1,500 generated problems with keys that
+  tie, and on the choice itself with ties, near ties and activities with no key). One decode on shop-floor shaped
+  problems with 20 machines: 2,000 jobs 1.3 s → 0.5 s, 4,000 jobs 9.2 s → 3.8 s (as long as dispatching by priority).
 
 ### Fixed
 

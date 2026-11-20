@@ -579,6 +579,138 @@ mod tests {
         assert!(placed > 20_000, "only {placed} placed");
     }
 
+    use crate::scheduler::simple::lowest_key;
+
+    /// What a rule that scores a task by its key for the activity it would start next decides:
+    /// the lower key first, a tie to the task listed first. The definition the decision by keys
+    /// ([`SimpleScheduler::with_decision_keys`]) must agree with.
+    #[derive(Debug)]
+    struct KeyOf(HashMap<String, Vec<f64>>);
+
+    impl crate::dispatching::DispatchingRule for KeyOf {
+        fn name(&self) -> &'static str {
+            "KEY"
+        }
+
+        fn reads(&self) -> crate::dispatching::ContextFields {
+            crate::dispatching::ContextFields::IMMINENT_ACTIVITY
+        }
+
+        fn evaluate(
+            &self,
+            task: &Task,
+            context: &crate::dispatching::SchedulingContext,
+        ) -> crate::dispatching::RuleScore {
+            let next = context
+                .imminent_activity
+                .get(&task.id)
+                .copied()
+                .unwrap_or(0);
+            self.0
+                .get(&task.id)
+                .and_then(|keys| keys.get(next))
+                .copied()
+                .unwrap_or(f64::INFINITY)
+        }
+
+        fn description(&self) -> &'static str {
+            "the key of the task's next activity, lower first"
+        }
+    }
+
+    /// A key: of every kind that decides differently -- anywhere in [0, 1), on a coarse grid
+    /// (many ties), and within or just beyond the engine's relative tolerance of a grid value.
+    fn some_key(rng: &mut Lcg) -> f64 {
+        match rng.below(5) {
+            0 => rng.below(1_000) as f64 / 1_000.0,
+            1 | 2 => rng.below(4) as f64 / 4.0 + 1.0,
+            3 => 1.0 + 1e-10 * rng.below(3) as f64,
+            _ => 1.0 + 3e-9 * rng.below(3) as f64,
+        }
+    }
+
+    /// Deciding by keys gives the schedule that the rule engine gives with the rule that
+    /// scores by the same keys, on every kind of problem and with keys that tie.
+    #[test]
+    fn deciding_by_keys_is_what_a_key_rule_decides() {
+        let mut compared = 0;
+        for seed in 0..1_500u64 {
+            let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let Some((problem, matrix)) = problem(&mut rng) else {
+                continue;
+            };
+            let keys: Vec<Vec<f64>> = problem
+                .tasks()
+                .iter()
+                .map(|t| t.activities.iter().map(|_| some_key(&mut rng)).collect())
+                .collect();
+            let by_rule: HashMap<String, Vec<f64>> = problem
+                .tasks()
+                .iter()
+                .map(|t| t.id.clone())
+                .zip(keys.iter().cloned())
+                .collect();
+            let want = dispatcher(0, matrix, false)
+                .with_rule_engine(RuleEngine::new().with_rule(KeyOf(by_rule)))
+                .schedule(&problem, 0);
+            let got = dispatcher(0, matrix, false)
+                .with_decision_keys(keys)
+                .schedule(&problem, 0);
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "seed {seed}");
+            compared += 1;
+        }
+        assert!(compared > 1_000, "only {compared} problems");
+    }
+
+    /// The choice among candidates is the rule engine's, for keys of every kind, candidates in
+    /// any order, and an activity with no key (which loses to every key).
+    #[test]
+    fn the_lowest_key_is_the_one_the_engine_picks() {
+        let mut rng = Lcg(0x1234_5678_9ABC_DEF1);
+        for round in 0..20_000 {
+            let n = 1 + rng.below(8) as usize;
+            let tasks: Vec<Task> = (0..n).map(|i| Task::new(format!("T{i}"))).collect();
+            let keys: Vec<Vec<f64>> = (0..n)
+                .map(|_| {
+                    let first = some_key(&mut rng);
+                    match rng.below(9) {
+                        // No key for the second activity.
+                        0 => vec![first],
+                        1 => vec![first, f64::INFINITY],
+                        _ => vec![first, some_key(&mut rng)],
+                    }
+                })
+                .collect();
+            let cursor: Vec<usize> = (0..n).map(|_| rng.below(2) as usize).collect();
+            let mut candidates: Vec<usize> = (0..n).filter(|_| !rng.chance(3)).collect();
+            if candidates.is_empty() {
+                candidates.push(0);
+            }
+            // Any order of the candidates.
+            for k in (1..candidates.len()).rev() {
+                candidates.swap(k, rng.below(k as u64 + 1) as usize);
+            }
+            let mut context = crate::dispatching::SchedulingContext::default();
+            for (i, t) in tasks.iter().enumerate() {
+                context.imminent_activity.insert(t.id.clone(), cursor[i]);
+            }
+            let by_rule: HashMap<String, Vec<f64>> = tasks
+                .iter()
+                .map(|t| t.id.clone())
+                .zip(keys.iter().cloned())
+                .collect();
+            let want = RuleEngine::new()
+                .with_rule(KeyOf(by_rule))
+                .best_of(&tasks, &candidates, &context)
+                .expect("a candidate");
+            assert_eq!(
+                lowest_key(&keys, &candidates, &cursor),
+                want,
+                "round {round}: keys {keys:?} cursor {cursor:?} candidates {candidates:?}"
+            );
+        }
+    }
+
     /// A problem of tasks of one to three activities on [`world`]'s resources, with now and
     /// then an activity of a kind the cheap query declines, a predecessor across tasks, an
     /// activity that holds no resource, or a world that declines everything.
