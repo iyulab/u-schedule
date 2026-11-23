@@ -8,6 +8,8 @@ Maintained from 0.2.3 onward; earlier entries list release dates only (see git h
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-23
+
 ### Added
 
 - `DispatchingRule::reads` and `ContextFields`: a rule says which parts of the `SchedulingContext` it reads (the default
